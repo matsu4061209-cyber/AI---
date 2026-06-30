@@ -692,7 +692,25 @@ function buildIngredientDailyUsage() {
       const startDate = row[1] instanceof Date ? row[1] : (row[1] ? new Date(String(row[1]).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
       const endDate   = row[2] instanceof Date ? row[2] : (row[2] ? new Date(String(row[2]).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
       const hasValidDates = startDate && endDate && !isNaN(startDate.getTime()) && !isNaN(endDate.getTime());
-      if (!hasValidDates && repeat && /毎月\d+/.test(repeat)) {
+      if (!hasValidDates && repeat && /毎年\d+月\d+日〜次の日曜/.test(repeat)) {
+        // 毎年X月Y日〜次の日曜 → 昨年・今年・来年の期間を計算してcpListへ直接追加（実績スキャン対象）
+        const mAS2 = repeat.match(/毎年(\d+)月(\d+)日〜次の日曜/);
+        const tMonth2 = Number(mAS2[1]) - 1, tDay2 = Number(mAS2[2]);
+        const thisYear2 = new Date().getFullYear();
+        const cpFlag2 = (row[8] || '').toString().trim();
+        const isNc2 = cpFlag2 !== '' && cpFlag2 !== '切替', isSw2 = cpFlag2 === '切替';
+        const cutoffAS2 = new Date(); cutoffAS2.setFullYear(cutoffAS2.getFullYear() - 1); cutoffAS2.setHours(0,0,0,0);
+        [thisYear2 - 1, thisYear2, thisYear2 + 1].forEach(yr => {
+          const sd2 = new Date(yr, tMonth2, tDay2); sd2.setHours(0,0,0,0);
+          const ed2 = new Date(sd2);
+          while (ed2.getDay() !== 0) ed2.setDate(ed2.getDate() + 1);
+          ed2.setHours(0,0,0,0);
+          if (ed2 < cutoffAS2) return; // 1年以上前はスキップ
+          cpList.push({ name: cpName, codes, startDate: sd2, endDate: ed2, rate: setServingRate, setServingRate, isNormalCp: isNc2, isSwitchCp: isSw2 });
+        });
+        return;
+      }
+      if (!hasValidDates && repeat && (/毎月\d+/.test(repeat) || /毎年\d+月\d+/.test(repeat))) {
         // 日付なし＋繰り返しパターン → repeatCpListへ（出食率は実績から自動計算）
         repeatCpList.push({ name: cpName, codes, setServingRate, rate: setServingRate, repeat });
         return;
@@ -738,8 +756,9 @@ function buildIngredientDailyUsage() {
         if (cp.startDate && cp.endDate) {
           hit = d >= cp.startDate && d <= cp.endDate;
         } else if (cp.repeat) {
-          const m2 = cp.repeat.match(/^[^\d]*(\d+)$/);
-          hit = m2 ? d.getDate() === Number(m2[1]) : false;
+          const mAnn2 = cp.repeat.match(/毎年(\d+)月(\d+)/);
+          if (mAnn2) { hit = d.getMonth() === Number(mAnn2[1]) - 1 && d.getDate() === Number(mAnn2[2]); }
+          else { const m2 = cp.repeat.match(/毎月(\d+)/); hit = m2 ? d.getDate() === Number(m2[1]) : false; }
         }
         if (!hit) return;
         const dd = cpDayData[cp.name];
@@ -765,12 +784,15 @@ function buildIngredientDailyUsage() {
     const todayR = new Date(); todayR.setHours(0,0,0,0);
     const fEndR  = new Date(todayR); fEndR.setDate(todayR.getDate() + 5);
     repeatCpList.forEach(rcp => {
-      const m3 = rcp.repeat.match(/^[^\d]*(\d+)$/);
-      if (!m3) return;
-      const targetDay = Number(m3[1]);
+      const mAnn3 = rcp.repeat.match(/毎年(\d+)月(\d+)/);
+      const m3    = !mAnn3 && rcp.repeat.match(/毎月(\d+)/);
+      if (!mAnn3 && !m3) return;
       const cur3 = new Date(todayR);
       while (cur3 <= fEndR) {
-        if (cur3.getDate() === targetDay) {
+        const matchDate = mAnn3
+          ? (cur3.getMonth() === Number(mAnn3[1]) - 1 && cur3.getDate() === Number(mAnn3[2]))
+          : cur3.getDate() === Number(m3[1]);
+        if (matchDate) {
           const sd = new Date(cur3), ed = new Date(cur3);
           sd.setHours(0,0,0,0); ed.setHours(0,0,0,0);
           cpList.push({ name: rcp.name, codes: rcp.codes, startDate: sd, endDate: ed, rate: rcp.rate, setServingRate: rcp.setServingRate, isNormalCp: true, isSwitchCp: false });
@@ -1378,7 +1400,21 @@ function buildSalesForecast() {
         const cpCutoff = new Date(); cpCutoff.setDate(cpCutoff.getDate() - 28); cpCutoff.setHours(0,0,0,0);
         if (end < cpCutoff) return;
         eventList.push({ name: cpName, start, end, rate: rate > 0 ? rate : 1.0, priority: 5 });
-      } else if (repeat && /毎月\d+/.test(repeat)) {
+      } else if (repeat && /毎年\d+月\d+日〜次の日曜/.test(repeat)) {
+        // 毎年X月Y日〜次の日曜 → 今年・来年分の期間を計算してeventListへ追加
+        const mAS = repeat.match(/毎年(\d+)月(\d+)日〜次の日曜/);
+        const tMonth = Number(mAS[1]) - 1, tDay = Number(mAS[2]);
+        const cpCutoffAS = new Date(); cpCutoffAS.setDate(cpCutoffAS.getDate() - 28); cpCutoffAS.setHours(0,0,0,0);
+        [today.getFullYear(), today.getFullYear() + 1].forEach(yr => {
+          const sd = new Date(yr, tMonth, tDay); sd.setHours(0,0,0,0);
+          const ed = new Date(sd);
+          while (ed.getDay() !== 0) ed.setDate(ed.getDate() + 1); // 次の日曜まで
+          ed.setHours(0,0,0,0);
+          if (ed < cpCutoffAS) return; // 28日以上前に終了したものはスキップ
+          if (sd > endDate) return;    // 予測期間外はスキップ
+          eventList.push({ name: cpName, start: sd, end: ed, rate: rate > 0 ? rate : 1.0, priority: 5 });
+        });
+      } else if (repeat && (/毎月\d+/.test(repeat) || /毎年\d+月\d+/.test(repeat))) {
         // 日付なし＋繰り返しパターン → repeatEventListへ（倍率は実績から自動計算）
         repeatEventList.push({ name: cpName, rate, priority: 5, repeat });
       }
@@ -1554,16 +1590,17 @@ function buildSalesForecast() {
   });
   if (evRows.length > 1) { evActualSheet.getRange(1, 1, evRows.length, 9).setValues(evRows); evActualSheet.setFrozenRows(1); }
 
-  // 月次繰り返しイベント（毎月XX日）の実績倍率を自動計算
+  // 繰り返しイベント（毎月XX日 / 毎年X月Y日）の実績倍率を自動計算
   const repeatEventCoeffMap = {};
   repeatEventList.forEach(ev => {
-    const m = ev.repeat.match(/^[^\d]*(\d+)$/);
-    if (!m) return;
-    const targetDay = Number(m[1]);
+    const mAnn = ev.repeat.match(/毎年(\d+)月(\d+)/);
+    const mMon = !mAnn && ev.repeat.match(/毎月(\d+)/);
+    if (!mAnn && !mMon) return;
     const actualRates = [];
     Object.keys(salesMap).sort().forEach(ds => {
       const d = new Date(ds);
-      if (d.getDate() !== targetDay) return;
+      if (mAnn) { if (d.getMonth() !== Number(mAnn[1]) - 1 || d.getDate() !== Number(mAnn[2])) return; }
+      else { if (d.getDate() !== Number(mMon[1])) return; }
       if (d >= today) return;
       if (excludedDates.has(ds)) return;
       const { sales, dow } = salesMap[ds];
@@ -1597,8 +1634,14 @@ function buildSalesForecast() {
   const getEventRate = (d) => {
     const dt = new Date(d); dt.setHours(0,0,0,0);
     const dayOfMonth = dt.getDate();
+    const monthOfYear = dt.getMonth();
     const hits = eventList.filter(ev => dt >= ev.start && dt <= ev.end);
-    const repeatHits = repeatEventList.filter(ev => { const m = ev.repeat.match(/^[^\d]*(\d+)$/); return m ? dayOfMonth === Number(m[1]) : false; });
+    const repeatHits = repeatEventList.filter(ev => {
+      const mAnn = ev.repeat.match(/毎年(\d+)月(\d+)/);
+      if (mAnn) return monthOfYear === Number(mAnn[1]) - 1 && dayOfMonth === Number(mAnn[2]);
+      const mMon = ev.repeat.match(/毎月(\d+)/);
+      return mMon ? dayOfMonth === Number(mMon[1]) : false;
+    });
     const allHits = [...hits, ...repeatHits];
     if (allHits.length === 0) return { rate: 1.0, name: '' };
     allHits.sort((a, b) => b.priority - a.priority);
