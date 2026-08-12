@@ -1,0 +1,232 @@
+<title>評価表・名簿を最新にする手順</title>
+<style>
+  :root {
+    --bg:       #f7f4f1;
+    --surface:  #ffffff;
+    --ink:      #241f1c;
+    --muted:    #6d6560;
+    --hair:     #e7e0da;
+    --accent:   #c62828;
+    --accent-soft: #fbeaea;
+    --go:       #2e7d32;
+    --go-soft:  #e7f2e8;
+    --shadow:   0 1px 2px rgba(40,30,25,.06), 0 8px 24px rgba(40,30,25,.06);
+    --radius:   14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:      #191615;
+      --surface: #232019;
+      --ink:     #f1ece7;
+      --muted:   #a49c95;
+      --hair:    #37322d;
+      --accent:  #ff6a5e;
+      --accent-soft: #3a1f1c;
+      --go:      #6cc073;
+      --go-soft: #1e2a1f;
+      --shadow:  0 1px 2px rgba(0,0,0,.3), 0 10px 28px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg:#f7f4f1; --surface:#fff; --ink:#241f1c; --muted:#6d6560; --hair:#e7e0da;
+    --accent:#c62828; --accent-soft:#fbeaea; --go:#2e7d32; --go-soft:#e7f2e8;
+    --shadow:0 1px 2px rgba(40,30,25,.06),0 8px 24px rgba(40,30,25,.06);
+  }
+  :root[data-theme="dark"] {
+    --bg:#191615; --surface:#232019; --ink:#f1ece7; --muted:#a49c95; --hair:#37322d;
+    --accent:#ff6a5e; --accent-soft:#3a1f1c; --go:#6cc073; --go-soft:#1e2a1f;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 28px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic", "YuGothic", "Meiryo", system-ui, sans-serif;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 40px 22px 64px; }
+
+  .eyebrow {
+    display: inline-block;
+    font-size: 13px; font-weight: 700; letter-spacing: .12em;
+    color: var(--accent); background: var(--accent-soft);
+    padding: 5px 12px; border-radius: 999px;
+  }
+  h1 {
+    font-size: clamp(26px, 5.4vw, 36px); font-weight: 800;
+    letter-spacing: .01em; text-wrap: balance;
+    margin: 16px 0 8px;
+  }
+  .lede { font-size: 16px; color: var(--muted); margin: 0 0 18px; }
+
+  .reassure {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--go-soft); color: var(--go);
+    border: 1px solid color-mix(in srgb, var(--go) 30%, transparent);
+    border-radius: 12px; padding: 12px 16px; font-weight: 700; font-size: 15px;
+    margin-bottom: 34px;
+  }
+  .reassure .mk { font-size: 20px; line-height: 1; }
+
+  .phase {
+    background: var(--surface);
+    border: 1px solid var(--hair);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 26px 24px;
+    margin-bottom: 22px;
+  }
+  .phase-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+  .num {
+    flex: none;
+    width: 38px; height: 38px; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    font-weight: 800; font-size: 19px;
+    display: grid; place-items: center;
+    font-variant-numeric: tabular-nums;
+    transform: translateY(4px);
+  }
+  .phase h2 { font-size: 20px; font-weight: 800; margin: 0; letter-spacing: .01em; text-wrap: balance; }
+  .phase .sub { color: var(--muted); font-size: 14px; margin: 2px 0 0; }
+  .phase-body { margin-top: 16px; }
+
+  ol.steps { list-style: none; counter-reset: s; margin: 0; padding: 0; }
+  ol.steps li {
+    counter-increment: s;
+    position: relative;
+    padding: 10px 0 10px 34px;
+    border-top: 1px solid var(--hair);
+  }
+  ol.steps li:first-child { border-top: none; }
+  ol.steps li::before {
+    content: counter(s);
+    position: absolute; left: 0; top: 11px;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent);
+    font-size: 13px; font-weight: 700;
+    display: grid; place-items: center;
+    font-variant-numeric: tabular-nums;
+  }
+  ol.steps b { font-weight: 800; }
+
+  .files { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 18px; }
+  .file-chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--bg); border: 1px solid var(--hair);
+    border-radius: 9px; padding: 7px 12px; font-weight: 700; font-size: 14px;
+  }
+  .file-chip .dot { width: 9px; height: 9px; border-radius: 2px; background: var(--accent); }
+
+  .email {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: var(--accent-soft); color: var(--accent);
+    padding: 2px 8px; border-radius: 6px; font-weight: 700;
+    font-size: .95em; word-break: break-all;
+  }
+  .btnish {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #1a73e8; color: #fff; font-weight: 700; font-size: 13px;
+    padding: 4px 12px; border-radius: 7px; white-space: nowrap;
+  }
+
+  .menu-path {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    background: var(--bg); border: 1px dashed var(--hair);
+    border-radius: 10px; padding: 12px 14px; margin: 10px 0 4px;
+  }
+  .menu-path .seg {
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 7px; padding: 5px 10px; font-weight: 700; font-size: 13.5px;
+  }
+  .menu-path .seg.final { border-color: var(--go); color: var(--go); }
+  .menu-path .arw { color: var(--muted); font-weight: 700; }
+
+  .done {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--go-soft); color: var(--go);
+    border-radius: 10px; padding: 11px 14px; font-weight: 700; font-size: 14.5px;
+    margin-top: 14px;
+  }
+
+  .foot {
+    margin-top: 30px; padding: 20px 22px;
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: var(--radius); font-size: 15px;
+  }
+  .foot h3 { margin: 0 0 6px; font-size: 15px; font-weight: 800; }
+  .foot p { margin: 4px 0; color: var(--muted); }
+
+  @media print {
+    body { background: #fff; }
+    .phase, .foot { box-shadow: none; break-inside: avoid; }
+  }
+</style>
+
+<div class="wrap">
+  <span class="eyebrow">お店の方へ</span>
+  <h1>PA評価表・アルバイト名簿を<br>最新の状態にする手順</h1>
+  <p class="lede">飯塚店で改良した機能を、みなさんのお店にも反映します。やることは大きく2つだけです。</p>
+
+  <div class="reassure">
+    <span class="mk">✓</span>
+    <span>入力済みのスタッフ・評価データは消えません。安心して進めてください。</span>
+  </div>
+
+  <section class="phase">
+    <div class="phase-head">
+      <div class="num">1</div>
+      <div>
+        <h2>2つのファイルを松山に「共有」する</h2>
+        <p class="sub">今すぐお願いします（各ファイルで同じ操作）</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <div class="files">
+        <span class="file-chip"><span class="dot"></span>ペッパーランチPA評価表</span>
+        <span class="file-chip"><span class="dot"></span>アルバイト名簿</span>
+      </div>
+      <ol class="steps">
+        <li>ファイルを開き、画面の右上にある <span class="btnish">🔒 共有</span> を押す</li>
+        <li>ユーザー欄に <span class="email">matsu4061209@gmail.com</span> を入力する</li>
+        <li>権限を <b>「編集者」</b> にする（「閲覧者」ではありません）</li>
+        <li><b>「送信」</b> を押す</li>
+        <li>もう一方のファイルでも <b>同じ操作</b> をする（2ファイルとも）</li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="phase">
+    <div class="phase-head">
+      <div class="num">2</div>
+      <div>
+        <h2>松山から連絡が来たら、ボタンを1回押す</h2>
+        <p class="sub">更新作業は松山が行います。終わったら連絡します</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <ol class="steps">
+        <li><b>ペッパーランチPA評価表</b> を開く</li>
+        <li>上のメニューから、次の順に進む：
+          <div class="menu-path">
+            <span class="seg">📋 評価管理</span><span class="arw">›</span>
+            <span class="seg">🏢 全体</span><span class="arw">›</span>
+            <span class="seg final">⚙️ 初回セットアップ／最新に更新</span>
+          </div>
+        </li>
+        <li>これを <b>1回押す</b>だけ（数秒待つと確認メッセージが出ます）</li>
+      </ol>
+      <div class="done">
+        <span>🎉</span><span>「セットアップ／更新 完了！」と出れば、これで飯塚店と同じ状態です。</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="foot">
+    <h3>うまくいかない・分からないとき</h3>
+    <p>無理に操作せず、松山まで連絡してください。画面を一緒に見ながら進めます。</p>
+    <p>松山　matsu4061209@gmail.com</p>
+  </div>
+</div>

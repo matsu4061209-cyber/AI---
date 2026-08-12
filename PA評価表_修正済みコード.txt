@@ -1,0 +1,1002 @@
+// ============================================================
+//  ペッパーランチ PA評価・時給変更管理 GASコード
+// ============================================================
+
+// ===== スプレッドシートID =====
+const EVAL_SS_ID    = '1jv1lKCDfz_GL14cSSkH9OJEchgZxYOjzbrK5It3VHl0';   // 評価スプレッドシート（ペッパーランチPA評価表）
+const ROSTER_SS_ID  = '1AaK0BWbvooMvuFUKX_94TiFq6XkvhS6BclS_FUOcNgE';   // アルバイト名簿（本物・修正済み）
+
+// ===== 店舗情報（変更があればここだけ修正） =====
+const STORE_DIVISION = '第4事業部';
+const STORE_NAME     = 'ペッパーランチ飯塚';
+const STORE_MANAGER  = '松山　貴志';
+
+// ===== シート名 =====
+const EVAL_SHEET    = 'チェックシート';
+const ROSTER_SHEET  = 'スタッフマスタ';
+const HISTORY_SHEET = '評価履歴';
+const DETAIL_SHEET  = '評価詳細履歴';
+
+// ===== 評価入力シートのセル位置 =====
+// ★ 実際のセル位置が違う場合はここだけ修正してください
+const C_PERIOD    = 'A1';  // 評価年月
+const C_NAME      = 'A3';  // 氏名
+const C_GENDER    = 'G3';  // 性別（自動）
+const C_AGE       = 'I3';  // 年齢（自動）
+const C_TENURE    = 'K3';  // 経験年数（自動）
+const C_OLD_CLS   = 'N3';  // 旧クラスター（自動）
+const C_NEW_CLS   = 'R3';  // 新クラスター（自動 or 数式）
+const C_OLD_WAGE  = 'V3';  // 旧時給（自動）
+const C_NEW_WAGE  = 'Y3';  // 新時給（自動 or 数式）
+const C_PREV_INFO = 'A4';  // 前回評価情報の表示
+
+// ===== チェック欄の範囲 =====
+const R_LEFT  = 'M5:M64';   // 左側60項目（規律17＋マインド14＋共通スキル29）
+const R_RIGHT = 'AA5:AA44'; // 右側40項目（デシャップ15＋ウォッシャー6＋キッチン19）
+const R_BONUS = 'U57:U63';  // 特別加算（7項目）
+
+// ===== スタッフマスタの列番号（A=1） =====
+const MC_NAME    = 4;   // D列: 名前
+const MC_GENDER  = 3;   // C列: 男女
+const MC_CLUSTER = 10;  // J列: クラスター
+const MC_WAGE    = 14;  // N列: 時給
+const MC_TENURE  = 24;  // X列: 勤続年数
+const MC_AGE     = 25;  // Y列: 年齢
+const MC_LEAVE   = 6;   // F列: 退社日（空＝在職者）
+
+// ===== クラスター基準（点数→クラスター→時給） =====
+const CLUSTER_TABLE = [
+  { min: 90, name: 'マネージャー', wage: 1200 },
+  { min: 70, name: '3トレーナー', wage: 1160 },
+  { min: 60, name: '2トレーナー', wage: 1150 },
+  { min: 50, name: '1トレーナー', wage: 1140 },
+  { min: 35, name: '3クルー',    wage: 1130 },
+  { min: 25, name: '2クルー',    wage: 1120 },
+  { min: 15, name: '1クルー',    wage: 1110 },
+  { min: 0,  name: 'ルーキー',   wage: 1100 },
+];
+
+// ------------------------------------------------------------
+//  onOpen：スプレッドシートを開いたとき自動実行
+// ------------------------------------------------------------
+function onOpen() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(EVAL_SHEET);
+  if (!sheet) return;
+
+  // 評価年月プルダウン（直近2期＋評価履歴にある過去の期間を含める）
+  const today = new Date();
+  const year  = today.getFullYear();
+  const month = today.getMonth() + 1;
+  const recent = (month <= 6)
+    ? [year + '年3月', year + '年9月']
+    : [year + '年9月', (year + 1) + '年3月'];
+
+  // 評価履歴にある過去の期間を追加
+  const allPeriods = [...recent];
+  try {
+    const histSh = ss.getSheetByName(HISTORY_SHEET);
+    if (histSh && histSh.getLastRow() >= 2) {
+      histSh.getRange(2, 1, histSh.getLastRow() - 1, 2).getValues()
+        .map(r => normalizePeriod_(r[1])).filter(Boolean)
+        .forEach(p => { if (!allPeriods.includes(p)) allPeriods.push(p); });
+    }
+  } catch(e) {}
+
+  const periodRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(allPeriods, true).build();
+  // '@STRING@' でテキスト形式に固定し、日付への自動変換を防ぐ
+  const currentPeriod = sheet.getRange(C_PERIOD).getDisplayValue();
+  sheet.getRange(C_PERIOD).setNumberFormat('@STRING@').setDataValidation(periodRule);
+  if (!currentPeriod) sheet.getRange(C_PERIOD).setValue(recent[0]);
+
+  // 氏名プルダウン（スタッフマスタから取得）
+  buildNameDropdown_(sheet);
+
+  // メニューを追加
+  ss.addMenu('📋 評価管理', [
+    { name: '👤 氏名を選ぶ（クラスター表示）',      functionName: 'showNamePicker'       },
+    { name: '✅ 評価を保存',                      functionName: 'saveEvaluation'       },
+    null,
+    { name: '🔄 氏名プルダウンを更新',            functionName: 'refreshNameDropdown'  },
+    { name: '📊 時給変更集計を更新',              functionName: 'updateSummarySheet'   },
+    { name: '📄 PDF一括出力',                    functionName: 'exportAllPDFs'         },
+    { name: '📝 名簿に新クラスターを反映',         functionName: 'applyToRoster'        },
+    null,
+    { name: '⚙️ 初回セットアップ（初回のみ）',          functionName: 'setupTrigger'          },
+    { name: '🔧 履歴シートを初期化（初回のみ）',       functionName: 'initHistorySheets'     },
+    null,
+    { name: '🖨️ A4印刷設定を適用',                    functionName: 'setA4PrintSetting'     },
+    null,
+    { name: '🏪 他店舗渡し用：個人情報をクリア',       functionName: 'clearForTransfer'      },
+  ]);
+}
+
+// ------------------------------------------------------------
+//  氏名プルダウンをスタッフマスタから構築
+// ------------------------------------------------------------
+function buildNameDropdown_(sheet) {
+  const names = getRosterStaff_().map(s => s.name);
+  if (names.length === 0) return;
+
+  const rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(names, true)
+    .setAllowInvalid(false)
+    .build();
+  sheet.getRange(C_NAME).setDataValidation(rule);
+}
+
+// ------------------------------------------------------------
+//  氏名選択画面を開く（表示は「氏名＋旧クラスター」、
+//  クリックするとセルには氏名だけが入る）
+// ------------------------------------------------------------
+function showNamePicker() {
+  const staff = getRosterStaff_();
+  if (staff.length === 0) {
+    SpreadsheetApp.getUi().alert('名簿からスタッフを読み込めませんでした。');
+    return;
+  }
+
+  const rows = staff.map(s =>
+    `<div class="row" onclick="pick('${s.name.replace(/'/g, "\\'")}')">` +
+    `<span class="nm">${s.name}</span>` +
+    `<span class="cl">${s.cluster || '－'}</span></div>`
+  ).join('');
+
+  const html = HtmlService.createHtmlOutput(
+    `<style>
+       body   { font-family: sans-serif; margin: 0; padding: 4px; }
+       .row   { display: flex; justify-content: space-between; align-items: center;
+                padding: 9px 12px; border-bottom: 1px solid #eee; cursor: pointer; }
+       .row:hover { background: #e8f0fe; }
+       .nm    { font-size: 14px; }
+       .cl    { font-size: 12px; color: #666; }
+       #msg   { padding: 10px; text-align: center; color: #1a73e8; display: none; }
+     </style>
+     <div id="list">${rows}</div>
+     <div id="msg">読み込み中…</div>
+     <script>
+       function pick(name) {
+         document.getElementById('list').style.display = 'none';
+         document.getElementById('msg').style.display  = 'block';
+         google.script.run
+           .withSuccessHandler(function() { google.script.host.close(); })
+           .withFailureHandler(function(err) {
+             document.getElementById('msg').textContent = 'エラー: ' + err.message;
+           })
+           .applyPickedName(name);
+       }
+     </script>`
+  ).setWidth(320).setHeight(460);
+
+  SpreadsheetApp.getUi().showModalDialog(html, '氏名を選ぶ');
+}
+
+// ------------------------------------------------------------
+//  選択画面から呼ばれる（氏名だけをセルに入れて情報を読み込む）
+//  ※ google.script.run から呼ぶため末尾に _ を付けないこと
+// ------------------------------------------------------------
+function applyPickedName(name) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(EVAL_SHEET);
+  sheet.getRange(C_NAME).setValue(name);
+  loadStaffInfo_(sheet, name);
+  loadPreviousInfo_(sheet, name);
+}
+
+// ------------------------------------------------------------
+//  名簿から在職スタッフ（氏名・クラスター）を取得
+// ------------------------------------------------------------
+function getRosterStaff_() {
+  try {
+    const rosterSS    = SpreadsheetApp.openById(ROSTER_SS_ID);
+    const masterSheet = rosterSS.getSheetByName(ROSTER_SHEET);
+    const lastRow     = masterSheet.getLastRow();
+    if (lastRow < 2) return [];
+
+    return masterSheet
+      .getRange(2, 1, lastRow - 1, Math.max(MC_LEAVE, MC_CLUSTER))
+      .getValues()
+      .filter(r => r[MC_NAME - 1] !== '' && r[MC_NAME - 1] !== null && r[MC_LEAVE - 1] === '')
+      .map(r => ({ name: r[MC_NAME - 1], cluster: r[MC_CLUSTER - 1] }));
+  } catch (e) {
+    console.log('名簿読み込みエラー: ' + e.message);
+    return [];
+  }
+}
+
+// ------------------------------------------------------------
+//  氏名プルダウンを手動更新（名簿に新スタッフ追加後に使用）
+// ------------------------------------------------------------
+function refreshNameDropdown() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(EVAL_SHEET);
+  if (!sheet) { SpreadsheetApp.getUi().alert('評価シートが見つかりません'); return; }
+  buildNameDropdown_(sheet);
+  SpreadsheetApp.getUi().alert('✅ 氏名プルダウンを更新しました！\n新しいスタッフが追加されています。');
+}
+
+// ------------------------------------------------------------
+//  インストール型トリガー登録（初回のみメニューから実行）
+// ------------------------------------------------------------
+function setupTrigger() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  // 既存の onEditInstalled トリガーを削除してから再登録（重複防止）
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'onEditInstalled') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('onEditInstalled').forSpreadsheet(ss).onEdit().create();
+  SpreadsheetApp.getUi().alert('セットアップ完了！\nonEditInstalledトリガーを登録しました。');
+}
+
+// ------------------------------------------------------------
+//  onEdit：シンプルトリガー（承認不要・素早く動作）
+//  チェックセルのトグルを担当
+// ------------------------------------------------------------
+function onEdit(e) {
+  const range = e.range;
+  const sheet = range.getSheet();
+  if (sheet.getName() !== EVAL_SHEET) return;
+
+  // ── チェックセルのトグル処理 ──
+  if (range.getNumRows() === 1 && range.getNumColumns() === 1 && isCheckCell_(range, sheet)) {
+    const raw = range.getValue();
+    const cur = String(raw).trim();
+    const old = e.oldValue;
+    if (!isNaN(Number(cur)) && Number(cur) > 1) return;
+    if ((!old || old === '0') && (cur === '' || cur === '0')) {
+      range.setValue(1);
+    } else if (old === '1' && cur === '1') {
+      range.setValue('');
+    }
+    return;
+  }
+}
+
+// ------------------------------------------------------------
+//  氏名セル判定（結合セルでも判定できるよう行・列で比較）
+// ------------------------------------------------------------
+function isNameCell_(range) {
+  const nameCell = SpreadsheetApp.getActiveSpreadsheet()
+    .getSheetByName(EVAL_SHEET).getRange(C_NAME);
+  return range.getRow() === nameCell.getRow()
+      && range.getColumn() === nameCell.getColumn();
+}
+
+// ------------------------------------------------------------
+//  onEditInstalled：編集時に自動実行（インストール型）
+//  ※ openById を使うためシンプルトリガーではなくこちらを使用
+// ------------------------------------------------------------
+function onEditInstalled(e) {
+  const range = e.range;
+  const sheet = range.getSheet();
+  if (sheet.getName() !== EVAL_SHEET) return;
+
+  // ── チェックセルは onEdit 側で処理済み ──
+  if (range.getNumRows() === 1 && range.getNumColumns() === 1 && isCheckCell_(range, sheet)) return;
+
+  // ── 氏名セル（A3）変更時：スタッフ情報・前回評価を自動入力 ──
+  if (!isNameCell_(range)) return;
+  const name = String(sheet.getRange(C_NAME).getValue()).trim();
+  if (!name) return;
+  loadStaffInfo_(sheet, name);
+  loadPreviousInfo_(sheet, name);
+}
+
+// ------------------------------------------------------------
+//  チェックセル判定（M列・AA列・U列）
+// ------------------------------------------------------------
+function isCheckCell_(range, sheet) {
+  const row = range.getRow();
+  const col = range.getColumn();
+  if (col === 13 && row >= 5  && row <= 64) return true; // M列（左60項目）
+  if (col === 27 && row >= 5  && row <= 44) return true; // AA列（右40項目）
+  if (col === 21 && row >= 57 && row <= 63) return true; // U列（特別加算）
+  return false;
+}
+
+// ------------------------------------------------------------
+//  スタッフ情報をスタッフマスタから取得して自動入力
+// ------------------------------------------------------------
+function loadStaffInfo_(sheet, staffName) {
+  try {
+    const rosterSS    = SpreadsheetApp.openById(ROSTER_SS_ID);
+    const masterSheet = rosterSS.getSheetByName(ROSTER_SHEET);
+    const lastRow     = masterSheet.getLastRow();
+    if (lastRow < 2) return;
+
+    const data  = masterSheet.getRange(2, 1, lastRow - 1, 30).getValues();
+    const found = data.find(row => row[MC_NAME - 1] === staffName);
+    if (!found) return;
+
+    sheet.getRange(C_GENDER).setValue(found[MC_GENDER  - 1]); // 性別
+    sheet.getRange(C_AGE).setValue(found[MC_AGE     - 1]); // 年齢
+    sheet.getRange(C_TENURE).setValue(found[MC_TENURE  - 1]); // 経験年数
+    sheet.getRange(C_OLD_CLS).setValue(found[MC_CLUSTER - 1]); // 旧クラスター
+    sheet.getRange(C_OLD_WAGE).setValue(found[MC_WAGE   - 1]); // 旧時給
+  } catch (e) {
+    console.log('スタッフ情報読み込みエラー: ' + e.message);
+  }
+}
+
+// ------------------------------------------------------------
+//  直近評価情報を評価詳細履歴から取得して累積ロード
+//  - M5:M64（左60）・AA5:AA44（右40）・U57:U63（特別加算7）を前回値で埋める
+//  - ユーザーはその上に新たな加点のみ手動で入力する
+// ------------------------------------------------------------
+function loadPreviousInfo_(sheet, staffName) {
+  const ss          = SpreadsheetApp.getActiveSpreadsheet();
+  const detailSheet = ss.getSheetByName(DETAIL_SHEET);
+
+  // まず全チェック列をクリア（名前切り替え時に前スタッフの値が残らないよう）
+  sheet.getRange(R_LEFT).clearContent();
+  sheet.getRange(R_RIGHT).clearContent();
+  sheet.getRange(R_BONUS).clearContent();
+  sheet.getRange(C_PREV_INFO).clearContent();
+  sheet.getRange(C_NEW_CLS).clearContent();
+  sheet.getRange(C_NEW_WAGE).clearContent();
+
+  if (!detailSheet) {
+    sheet.getRange(C_PREV_INFO).setValue('前回評価：なし（初回）');
+    return;
+  }
+
+  const lastRow = detailSheet.getLastRow();
+  if (lastRow < 2) {
+    sheet.getRange(C_PREV_INFO).setValue('前回評価：なし（初回）');
+    return;
+  }
+
+  // 全列取得：名前(1)+期間(1)+合計(1)+左60+右40+特別7 = 110列
+  const data = detailSheet.getRange(2, 1, lastRow - 1, 110).getValues();
+  let foundRow = null;
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i][0] === staffName) { foundRow = data[i]; break; }
+  }
+
+  if (!foundRow) {
+    sheet.getRange(C_PREV_INFO).setValue('前回評価：なし（初回）');
+    return;
+  }
+
+  const prevPeriod = foundRow[1];
+  const prevTotal  = foundRow[2];
+  const leftVals   = foundRow.slice(3,   63);  // 60項目（index 3〜62）
+  const rightVals  = foundRow.slice(63,  103); // 40項目（index 63〜102）
+  const bonusVals  = foundRow.slice(103, 110); // 7項目（index 103〜109）
+
+  // M5:M64 に前回左側チェック値を書き込む（累積ベース）
+  sheet.getRange(R_LEFT).setValues(leftVals.map(v => [Number(v) === 1 ? 1 : '']));
+  // AA5:AA44 に前回右側チェック値を書き込む（累積ベース）
+  sheet.getRange(R_RIGHT).setValues(rightVals.map(v => [Number(v) === 1 ? 1 : '']));
+  // U57:U63 に前回特別加算を書き込む
+  sheet.getRange(R_BONUS).setValues(bonusVals.map(v => [Number(v) === 1 ? 1 : '']));
+
+  // A4 に前回評価サマリを表示
+  sheet.getRange(C_PREV_INFO).setValue(
+    `前回評価：${normalizePeriod_(prevPeriod)}  合計 ${prevTotal}点（新たに習得した項目のみ追加してください）`
+  );
+}
+
+// ------------------------------------------------------------
+//  点数からクラスターと時給を返す
+// ------------------------------------------------------------
+function calcCluster_(score) {
+  for (const row of CLUSTER_TABLE) {
+    if (score >= row.min) return { name: row.name, wage: row.wage };
+  }
+  return { name: 'ルーキー', wage: 1100 };
+}
+
+// ------------------------------------------------------------
+//  評価を保存（メニュー or ボタンから実行）
+// ------------------------------------------------------------
+function saveEvaluation() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(EVAL_SHEET);
+  const ui    = SpreadsheetApp.getUi();
+
+  const period = sheet.getRange(C_PERIOD).getDisplayValue();
+  const name   = sheet.getRange(C_NAME).getValue();
+
+  if (!name)   { ui.alert('氏名を選択してください。');     return; }
+  if (!period) { ui.alert('評価年月を選択してください。'); return; }
+
+  // チェック値を取得
+  const leftVals  = sheet.getRange(R_LEFT).getValues().flat().map(v => Number(v) || 0);
+  const rightVals = sheet.getRange(R_RIGHT).getValues().flat().map(v => Number(v) || 0);
+  const bonusVals = sheet.getRange(R_BONUS).getValues().flat().map(v => Number(v) || 0);
+
+  const leftSum  = leftVals.reduce((a, b) => a + b, 0);
+  const rightSum = rightVals.reduce((a, b) => a + b, 0);
+  const total    = leftSum + rightSum;
+  const bonusSum = bonusVals.reduce((a, b) => a + b, 0);
+
+  // カテゴリ別集計
+  const scoreKiritsu    = leftVals.slice(0,  17).reduce((a,b) => a+b, 0); // 規律17点
+  const scoreMind       = leftVals.slice(17, 31).reduce((a,b) => a+b, 0); // マインド14点
+  const scoreSkill      = leftVals.slice(31, 60).reduce((a,b) => a+b, 0); // 共通スキル29点
+
+  const oldCluster = sheet.getRange(C_OLD_CLS).getValue();
+  const oldWage    = sheet.getRange(C_OLD_WAGE).getValue();
+  const cluster    = calcCluster_(total);
+  const newCluster = cluster.name;
+  const newWage    = cluster.wage + bonusSum; // 特別加算を加算
+
+  // 新クラスター・新時給を評価シートに表示
+  sheet.getRange(C_NEW_CLS).setValue(newCluster);
+  sheet.getRange(C_NEW_WAGE).setValue(newWage);
+
+  // 確認ダイアログ
+  const res = ui.alert(
+    '評価保存確認',
+    `${name}（${period}）\n` +
+    `規律：${scoreKiritsu}点　マインド：${scoreMind}点　共通スキル：${scoreSkill}点\n` +
+    `ポジション：${rightSum}点\n` +
+    `合計：${total}点　特別加算：${bonusSum}円\n` +
+    `新クラスター：${newCluster}　新時給：¥${newWage}\n\n` +
+    '保存しますか？',
+    ui.ButtonSet.YES_NO
+  );
+  if (res !== ui.Button.YES) return;
+
+  // 履歴シートが無ければ作成
+  let histSheet   = ss.getSheetByName(HISTORY_SHEET)   || initHistorySheet_(ss);
+  let detailSheet = ss.getSheetByName(DETAIL_SHEET)    || initDetailSheet_(ss);
+
+  // 評価履歴に追記
+  histSheet.appendRow([
+    name, period,
+    scoreKiritsu, scoreMind, scoreSkill, rightSum,
+    bonusSum, total,
+    oldCluster, newCluster,
+    oldWage, newWage,
+    '未承認',
+    new Date()
+  ]);
+
+  // 評価詳細履歴に追記（チェック項目100個＋特別加算7個）
+  detailSheet.appendRow([
+    name, period, total,
+    ...leftVals,   // 60個
+    ...rightVals,  // 40個
+    ...bonusVals   // 7個
+  ]);
+
+  ui.alert(`保存しました。\n${name}（${period}）　合計${total}点`);
+}
+
+// ------------------------------------------------------------
+//  時給変更集計シートを更新（原本書式で再現・上司提出用）
+// ------------------------------------------------------------
+function updateSummarySheet() {
+  const ss  = SpreadsheetApp.getActiveSpreadsheet();
+  const ui  = SpreadsheetApp.getUi();
+
+  const histSh = ss.getSheetByName(HISTORY_SHEET);
+  if (!histSh) { ui.alert('評価履歴がありません。先に評価を保存してください。'); return; }
+
+  const lastRow = histSh.getLastRow();
+  if (lastRow < 2) { ui.alert('評価データがありません。'); return; }
+
+  const histData = histSh.getRange(2, 1, lastRow - 1, 14).getValues();
+
+  // 評価履歴にある期間を取得（新しい順）
+  const availPeriods = [...new Set(histData.map(r => normalizePeriod_(r[1])).filter(Boolean))].sort().reverse();
+  if (availPeriods.length === 0) { ui.alert('評価データがありません。'); return; }
+
+  // 期間が1件だけなら自動選択、複数あれば入力ダイアログを表示
+  let period;
+  if (availPeriods.length === 1) {
+    period = availPeriods[0];
+  } else {
+    const resp = ui.prompt(
+      '集計する評価年月',
+      `評価データがある期間：${availPeriods.join(' / ')}\n\n集計する期間を入力してください：`,
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (resp.getSelectedButton() !== ui.Button.OK) return;
+    period = resp.getResponseText().trim();
+    if (!period) return;
+  }
+
+  const targets = histData.filter(r => normalizePeriod_(r[1]) === period);
+  if (targets.length === 0) { ui.alert(`${period}の評価データが見つかりません。`); return; }
+
+  // スタッフマスタから性別・年齢・経験年数を取得
+  let masterData = [];
+  try {
+    const rosterSS = SpreadsheetApp.openById(ROSTER_SS_ID);
+    const masterSh = rosterSS.getSheetByName(ROSTER_SHEET);
+    masterData = masterSh.getRange(2, 1, masterSh.getLastRow() - 1, 30).getValues();
+  } catch (e) { console.log('スタッフマスタエラー: ' + e.message); }
+
+  // シート準備
+  let sh = ss.getSheetByName('時給変更集計');
+  if (!sh) {
+    sh = ss.insertSheet('時給変更集計');
+  } else {
+    sh.clearContents();
+    sh.clearFormats();
+    try { sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart(); } catch(e){}
+  }
+
+  // 列幅設定（A4縦向きに収まるよう調整）
+  const colWidths = [35, 110, 65, 25, 72, 88, 25, 88, 65, 25, 65, 58];
+  colWidths.forEach((w, i) => sh.setColumnWidth(i + 1, w));
+
+  // 行高さ設定
+  sh.setRowHeight(1, 28); // タイトル
+  sh.setRowHeight(2, 22); // 平均時給
+  sh.setRowHeight(3, 22); // ヘッダー
+  for (let i = 4; i <= 37; i++) sh.setRowHeight(i, 18); // データ34行
+  sh.setRowHeight(38, 8);  // 区切り
+  for (let i = 39; i <= 41; i++) sh.setRowHeight(i, 18); // フッター
+
+  // 平均時給計算
+  const oldWages = targets.map(r => Number(r[10]) || 0).filter(v => v > 0);
+  const newWages = targets.map(r => Number(r[11]) || 0).filter(v => v > 0);
+  const avgOld   = oldWages.length ? Math.round(oldWages.reduce((a,b)=>a+b,0) / oldWages.length) : 0;
+  const avgNew   = newWages.length ? Math.round(newWages.reduce((a,b)=>a+b,0) / newWages.length) : 0;
+
+  // ===== 行1：タイトル =====
+  sh.getRange('A1:L1').merge()
+    .setValue(`${period}　時給変更届`)
+    .setFontSize(13).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBackground('#1F4E79').setFontColor('#FFFFFF');
+
+  // ===== 行2：平均時給 =====
+  sh.getRange('A2:B2').merge()
+    .setValue('平均時給').setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBackground('#D6E4F7').setFontColor('#000000')
+    .setBorder(true, true, true, true, null, null, '#888888', SpreadsheetApp.BorderStyle.SOLID);
+  sh.getRange('C2')
+    .setValue(`¥${avgOld.toLocaleString()}`).setHorizontalAlignment('center')
+    .setBorder(true, true, true, true, null, null, '#888888', SpreadsheetApp.BorderStyle.SOLID);
+  sh.getRange('D2')
+    .setValue('⇒').setHorizontalAlignment('center')
+    .setBorder(true, true, true, true, null, null, '#888888', SpreadsheetApp.BorderStyle.SOLID);
+  sh.getRange('E2')
+    .setValue(`¥${avgNew.toLocaleString()}`).setHorizontalAlignment('center')
+    .setBorder(true, true, true, true, null, null, '#888888', SpreadsheetApp.BorderStyle.SOLID);
+  sh.getRange('F2:L2').merge().setBackground('#D6E4F7');
+
+  // ===== 行3：ヘッダー =====
+  const hdrs = ['No.','氏名','性別','年齢','経験年数','旧クラスター','→','新クラスター','旧時給','→','新時給','昇給額'];
+  sh.getRange(3, 1, 1, 12).setValues([hdrs])
+    .setFontWeight('bold').setFontSize(9)
+    .setBackground('#4472C4').setFontColor('#FFFFFF')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, true, true, '#FFFFFF', SpreadsheetApp.BorderStyle.SOLID);
+
+  // ===== 行4〜37：データ34行 =====
+  const DATA_ROWS = 34;
+  for (let i = 0; i < DATA_ROWS; i++) {
+    const row = 4 + i;
+    const t   = targets[i];
+    const bg  = i % 2 === 0 ? '#FFFFFF' : '#EBF3FB';
+    let vals;
+
+    if (t) {
+      const name    = t[0];
+      const staff   = masterData.find(r => r[MC_NAME - 1] === name);
+      const gender  = staff ? staff[MC_GENDER  - 1] : '';
+      const age     = staff ? (staff[MC_AGE    - 1] || '') : '';
+      const tenure  = staff ? (staff[MC_TENURE - 1] || '') : '';
+      const oldCls  = t[8];
+      const newCls  = t[9];
+      const oldW    = Number(t[10]) || 0;
+      const newW    = Number(t[11]) || 0;
+      const diff    = newW - oldW;
+      vals = [
+        i + 1, name, gender, age, tenure,
+        oldCls, '→', newCls,
+        `¥${oldW.toLocaleString()}`, '→', `¥${newW.toLocaleString()}`,
+        diff > 0 ? `+${diff}円` : diff === 0 ? '変更なし' : `${diff}円`
+      ];
+    } else {
+      vals = [i + 1, '', '', '', '', '', '', '', '', '', '', ''];
+    }
+
+    const r = sh.getRange(row, 1, 1, 12);
+    r.setValues([vals]).setBackground(bg).setFontSize(9).setVerticalAlignment('middle')
+      .setBorder(true, true, true, true, true, true, '#BBBBBB', SpreadsheetApp.BorderStyle.SOLID);
+
+    // 列ごとの横揃え
+    [1,3,4,5,6,7,8,10].forEach(c => sh.getRange(row, c).setHorizontalAlignment('center'));
+    [9,11,12].forEach(c => sh.getRange(row, c).setHorizontalAlignment('right'));
+    sh.getRange(row, 2).setHorizontalAlignment('left');
+  }
+
+  // ===== フッター（事業部・店舗・店長）=====
+  const footerItems = [
+    ['事業部名', STORE_DIVISION],
+    ['店舗名',   STORE_NAME],
+    ['店長名',   STORE_MANAGER],
+  ];
+  footerItems.forEach((fd, i) => {
+    sh.getRange(39 + i, 1, 1, 2).merge().setValue(fd[0]).setFontWeight('bold').setHorizontalAlignment('center')
+      .setBorder(true, true, true, true, null, null, '#888888', SpreadsheetApp.BorderStyle.SOLID);
+    sh.getRange(39 + i, 3, 1, 5).merge().setValue(fd[1])
+      .setBorder(true, true, true, true, null, null, '#888888', SpreadsheetApp.BorderStyle.SOLID);
+  });
+
+  ss.setActiveSheet(sh);
+  ui.alert(`${targets.length}件の集計を更新しました。\n承認後に「名簿に時給を反映」を実行してください。`);
+}
+
+// ------------------------------------------------------------
+//  アルバイト名簿に時給・クラスターを反映（承認済みのみ）
+// ------------------------------------------------------------
+function applyToRoster() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(EVAL_SHEET);
+  const ui    = SpreadsheetApp.getUi();
+  const period = sheet.getRange(C_PERIOD).getDisplayValue();
+
+  if (!period) { ui.alert('評価年月を選択してください。'); return; }
+
+  const histSheet = ss.getSheetByName(HISTORY_SHEET);
+  if (!histSheet) { ui.alert('評価履歴がありません。'); return; }
+
+  // 承認済みデータの確認
+  const lastHist = histSheet.getLastRow();
+  if (lastHist < 2) { ui.alert('評価履歴が空です。'); return; }
+
+  const histData = histSheet.getRange(2, 1, lastHist - 1, 13).getValues();
+  const approved = histData.filter(r => normalizePeriod_(r[1]) === period && r[12] === '承認済み');
+
+  if (approved.length === 0) {
+    ui.alert(`${period}に「承認済み」のデータがありません。\n評価履歴シートのM列を「承認済み」に変更してから実行してください。`);
+    return;
+  }
+
+  const res = ui.alert(
+    '⚠️【重要】名簿反映の最終確認',
+    '・この操作は元に戻せません\n' +
+    '・上長の承認が取れていることを確認してください\n' +
+    '・反映後はアルバイト名簿のクラスター・時給が書き換わります\n\n' +
+    `${period}　承認済み ${approved.length}件を名簿に反映します。\n\n` +
+    '本当に実行しますか？',
+    ui.ButtonSet.YES_NO
+  );
+  if (res !== ui.Button.YES) return;
+
+  const rosterSS    = SpreadsheetApp.openById(ROSTER_SS_ID);
+  const masterSheet = rosterSS.getSheetByName(ROSTER_SHEET);
+  const lastMaster  = masterSheet.getLastRow();
+  const masterData  = masterSheet.getRange(2, 1, lastMaster - 1, 15).getValues();
+
+  let count = 0;
+  approved.forEach(row => {
+    const targetName = row[0];
+    const newCluster = row[9];
+    const newWage    = row[11];
+    const idx        = masterData.findIndex(r => r[MC_NAME - 1] === targetName);
+    if (idx >= 0) {
+      masterSheet.getRange(idx + 2, MC_CLUSTER).setValue(newCluster);
+      masterSheet.getRange(idx + 2, MC_WAGE).setValue(newWage);
+      count++;
+    }
+  });
+
+  ui.alert(`✅ ${count}件のクラスター・時給をアルバイト名簿に反映しました。`);
+}
+
+// ------------------------------------------------------------
+//  履歴シートの初期化（初回のみ実行）
+// ------------------------------------------------------------
+function initHistorySheets() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss.getSheetByName(HISTORY_SHEET)) initHistorySheet_(ss);
+  if (!ss.getSheetByName(DETAIL_SHEET))  initDetailSheet_(ss);
+}
+
+function initHistorySheet_(ss) {
+  let s = ss.getSheetByName(HISTORY_SHEET);
+  if (!s) s = ss.insertSheet(HISTORY_SHEET);
+  s.clearContents();
+  const h = ['スタッフ名','評価年月','規律点','マインド点','共通スキル点','ポジション点','特別加算','合計点','旧クラスター','新クラスター','旧時給','新時給','承認状況','保存日時'];
+  s.getRange(1, 1, 1, h.length).setValues([h]).setFontWeight('bold').setBackground('#1565C0').setFontColor('#FFFFFF');
+  s.setFrozenRows(1);
+  return s;
+}
+
+// クラスター名を順位数値に変換（indexが小さいほど上位）
+function clusterRank_(name) {
+  const idx = CLUSTER_TABLE.findIndex(c => c.name === name);
+  return idx === -1 ? 999 : idx;
+}
+
+// Date型でも文字列でも「2026年3月」形式に統一して返す
+function normalizePeriod_(v) {
+  if (!v) return '';
+  if (v instanceof Date) {
+    return `${v.getFullYear()}年${v.getMonth() + 1}月`;
+  }
+  // 「2026/03/01」→「2026年3月」に変換
+  const m = String(v).match(/^(\d{4})[\/-]0?(\d{1,2})/);
+  if (m) return `${m[1]}年${Number(m[2])}月`;
+  return String(v);
+}
+
+function initDetailSheet_(ss) {
+  let s = ss.getSheetByName(DETAIL_SHEET);
+  if (!s) s = ss.insertSheet(DETAIL_SHEET);
+  s.clearContents();
+  const h = [
+    'スタッフ名', '評価年月', '合計点',
+    ...Array.from({length: 60}, (_, i) => `左${i+1}`),  // M5:M64
+    ...Array.from({length: 40}, (_, i) => `右${i+1}`),  // AA5:AA44
+    ...Array.from({length: 7},  (_, i) => `加算${i+1}`) // U57:U63
+  ];
+  s.getRange(1, 1, 1, h.length).setValues([h]).setFontWeight('bold').setBackground('#2E7D32').setFontColor('#FFFFFF');
+  s.setFrozenRows(1);
+  return s;
+}
+
+// ------------------------------------------------------------
+//  PDF一括出力（全スタッフのチェックシート＋時給変更集計）
+// ------------------------------------------------------------
+function exportAllPDFs() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  // 評価履歴から期間を取得
+  const histSh = ss.getSheetByName(HISTORY_SHEET);
+  if (!histSh || histSh.getLastRow() < 2) { ui.alert('評価データがありません。'); return; }
+
+  const histData = histSh.getRange(2, 1, histSh.getLastRow() - 1, 14).getValues();
+  const availPeriods = [...new Set(histData.map(r => normalizePeriod_(r[1])).filter(Boolean))].sort().reverse();
+
+  let period;
+  if (availPeriods.length === 1) {
+    period = availPeriods[0];
+  } else {
+    const resp = ui.prompt(
+      'PDF出力する評価年月',
+      `評価データがある期間：${availPeriods.join(' / ')}\n\n出力する期間を入力してください：`,
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (resp.getSelectedButton() !== ui.Button.OK) return;
+    period = resp.getResponseText().trim();
+    if (!period) return;
+  }
+
+  const targets = histData.filter(r => normalizePeriod_(r[1]) === period);
+  if (targets.length === 0) { ui.alert(`${period}の評価データが見つかりません。`); return; }
+
+  // クラスターが上がったスタッフのみ絞り込む（チェックシートPDF対象）
+  const pdfTargets = targets.filter(t => clusterRank_(t[9]) < clusterRank_(t[8]));
+
+  // 確認ダイアログ
+  const res = ui.alert(
+    '📄 PDF一括出力の確認',
+    `【チェックシート】クラスターが上がったスタッフのみ\n${pdfTargets.length}名：${pdfTargets.map(t => t[0]).join('、')}\n\n` +
+    `【時給変更集計】在籍者全員（${targets.length}名分）\n\n` +
+    '【保存先】\n' +
+    `スプレッドシートと同じフォルダ内の\n「PA評価PDF_${period}」フォルダ\n\n` +
+    '実行しますか？',
+    ui.ButtonSet.YES_NO
+  );
+  if (res !== ui.Button.YES) return;
+
+  // 評価詳細履歴を取得
+  const detailSh = ss.getSheetByName(DETAIL_SHEET);
+  let detailData = [];
+  if (detailSh && detailSh.getLastRow() >= 2) {
+    detailData = detailSh.getRange(2, 1, detailSh.getLastRow() - 1, 110).getValues();
+  }
+
+  // スタッフマスタを取得
+  let masterData = [];
+  try {
+    const rosterSS = SpreadsheetApp.openById(ROSTER_SS_ID);
+    const masterSh = rosterSS.getSheetByName(ROSTER_SHEET);
+    masterData = masterSh.getRange(2, 1, masterSh.getLastRow() - 1, 30).getValues();
+  } catch(e) { console.log('スタッフマスタエラー: ' + e.message); }
+
+  // 保存先フォルダを取得・作成
+  const parentFolder = DriveApp.getFileById(ss.getId()).getParents().next();
+  const folderName   = `PA評価PDF_${period}`;
+  const folderIter   = parentFolder.getFoldersByName(folderName);
+  const pdfFolder    = folderIter.hasNext() ? folderIter.next() : parentFolder.createFolder(folderName);
+
+  const evalSh  = ss.getSheetByName(EVAL_SHEET);
+  const evalGid = evalSh.getSheetId();
+  const ssId    = ss.getId();
+  const token   = ScriptApp.getOAuthToken();
+  const pdfParams = 'format=pdf&size=A4&portrait=true&fitw=true&sheetnames=false&printtitle=false&pagenumbers=false&gridlines=false&fzr=false';
+
+  let successCount = 0;
+  let errorNames   = [];
+
+  // クラスターが上がったスタッフのみチェックシートをPDF化
+  pdfTargets.forEach(t => {
+    const name = t[0];
+    try {
+      // 評価詳細履歴から該当スタッフのチェックデータを取得
+      const details = detailData.filter(r => r[0] === name && normalizePeriod_(r[1]) === period);
+      const detail  = details.length > 0 ? details[details.length - 1] : null;
+
+      // スタッフマスタから個人情報を取得
+      const staff = masterData.find(r => r[MC_NAME - 1] === name);
+
+      // チェックシートにデータを書き込む
+      evalSh.getRange(C_PERIOD).setValue(period);
+      evalSh.getRange(C_NAME).setValue(name);
+      evalSh.getRange(C_GENDER).setValue(staff ? staff[MC_GENDER  - 1] : '');
+      evalSh.getRange(C_AGE).setValue(staff    ? staff[MC_AGE     - 1] : '');
+      evalSh.getRange(C_TENURE).setValue(staff ? staff[MC_TENURE  - 1] : '');
+      evalSh.getRange(C_OLD_CLS).setValue(t[8]);
+      evalSh.getRange(C_NEW_CLS).setValue(t[9]);
+      evalSh.getRange(C_OLD_WAGE).setValue(t[10]);
+      evalSh.getRange(C_NEW_WAGE).setValue(t[11]);
+      evalSh.getRange(C_PREV_INFO).setValue('');
+
+      if (detail) {
+        evalSh.getRange(R_LEFT).setValues( detail.slice(3,   63).map(v => [Number(v) === 1 ? 1 : '']));
+        evalSh.getRange(R_RIGHT).setValues(detail.slice(63,  103).map(v => [Number(v) === 1 ? 1 : '']));
+        evalSh.getRange(R_BONUS).setValues(detail.slice(103, 110).map(v => [Number(v) === 1 ? 1 : '']));
+      }
+
+      SpreadsheetApp.flush();
+
+      const url  = `https://docs.google.com/spreadsheets/d/${ssId}/export?${pdfParams}&gid=${evalGid}`;
+      const blob = UrlFetchApp.fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+        .getBlob().setName(`チェックシート_${name}_${period}.pdf`);
+      pdfFolder.createFile(blob);
+      successCount++;
+    } catch(e) {
+      errorNames.push(name);
+      console.log(`${name}のPDF作成エラー: ${e.message}`);
+    }
+  });
+
+  // 時給変更集計シートをPDF化
+  const sumSh = ss.getSheetByName('時給変更集計');
+  if (sumSh) {
+    try {
+      const url  = `https://docs.google.com/spreadsheets/d/${ssId}/export?${pdfParams}&gid=${sumSh.getSheetId()}`;
+      const blob = UrlFetchApp.fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+        .getBlob().setName(`時給変更集計_${period}.pdf`);
+      pdfFolder.createFile(blob);
+    } catch(e) { console.log('時給変更集計PDF作成エラー: ' + e.message); }
+  }
+
+  let msg = `✅ PDF出力完了\n\n${successCount}名分のチェックシート＋時給変更集計を\n「${folderName}」フォルダに保存しました。`;
+  if (errorNames.length > 0) msg += `\n\n⚠️ 以下のスタッフは出力できませんでした：\n${errorNames.join('、')}`;
+  ui.alert(msg);
+}
+
+// ------------------------------------------------------------
+//  他店舗渡し用：個人情報をクリア
+// ------------------------------------------------------------
+function clearForTransfer() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  const res = ui.alert(
+    '⚠️ 個人情報クリア確認',
+    '以下のデータを全て削除します。元に戻せません。\n\n' +
+    '・チェックシートの氏名・チェック欄・個人情報\n' +
+    '・時給変更集計シートの氏名・個人情報・事業部名等\n' +
+    '・評価履歴・評価詳細履歴の全データ\n\n' +
+    '実行しますか？',
+    ui.ButtonSet.YES_NO
+  );
+  if (res !== ui.Button.YES) return;
+
+  // ── チェックシートをクリア ──
+  const evalSh = ss.getSheetByName(EVAL_SHEET);
+  if (evalSh) {
+    evalSh.getRange(C_NAME).clearContent();
+    evalSh.getRange(C_GENDER).clearContent();
+    evalSh.getRange(C_AGE).clearContent();
+    evalSh.getRange(C_TENURE).clearContent();
+    evalSh.getRange(C_OLD_CLS).clearContent();
+    evalSh.getRange(C_NEW_CLS).clearContent();
+    evalSh.getRange(C_OLD_WAGE).clearContent();
+    evalSh.getRange(C_NEW_WAGE).clearContent();
+    evalSh.getRange(C_PREV_INFO).clearContent();
+    evalSh.getRange(R_LEFT).clearContent();
+    evalSh.getRange(R_RIGHT).clearContent();
+    evalSh.getRange(R_BONUS).clearContent();
+  }
+
+  // ── 時給変更集計シートをクリア ──
+  const sumSh = ss.getSheetByName('時給変更集計');
+  if (sumSh) {
+    // 氏名・性別・年齢・経験年数列（B〜E列 4〜37行）
+    sumSh.getRange('B4:E37').clearContent();
+    // 旧時給・新時給・昇給額列（I列・K列・L列 4〜37行）
+    sumSh.getRange('I4:I37').clearContent();
+    sumSh.getRange('K4:L37').clearContent();
+    // フッター：事業部名・店舗名・店長名の値欄（D〜L列 39〜41行）
+    sumSh.getRange('D39:L41').clearContent();
+  }
+
+  // ── 評価履歴をクリア（ヘッダーだけ残す）──
+  const histSh = ss.getSheetByName(HISTORY_SHEET);
+  if (histSh && histSh.getLastRow() >= 2) {
+    histSh.getRange(2, 1, histSh.getLastRow() - 1, histSh.getLastColumn()).clearContent();
+  }
+
+  // ── 評価詳細履歴をクリア（ヘッダーだけ残す）──
+  const detailSh = ss.getSheetByName(DETAIL_SHEET);
+  if (detailSh && detailSh.getLastRow() >= 2) {
+    detailSh.getRange(2, 1, detailSh.getLastRow() - 1, detailSh.getLastColumn()).clearContent();
+  }
+
+  ui.alert('✅ 個人情報をクリアしました。\n他店舗へ渡す準備ができました。');
+}
+
+// ============================================================
+//  【ClaudeAI読み取り用】ウェブAPIエンドポイント
+//  ※ GASエディタで「デプロイ」→「新しいデプロイ」→
+//    「ウェブアプリ」→「アクセス：全員」でデプロイして使用
+// ============================================================
+
+function doGet(e) {
+  const params   = e ? (e.parameter || {}) : {};
+  const sheetName = params.sheet    || EVAL_SHEET;
+  const mode      = params.mode     || 'both';  // values / formulas / both
+  const rows      = parseInt(params.rows     || '50', 10);
+  const startRow  = parseInt(params.startRow || '1',  10);
+
+  try {
+    const ss    = SpreadsheetApp.openById(EVAL_SS_ID);
+    const sheet = ss.getSheetByName(sheetName);
+
+    if (!sheet) {
+      const names = ss.getSheets().map(s => s.getName());
+      return jsonResponse_({ error: `シート "${sheetName}" が見つかりません`, availableSheets: names });
+    }
+
+    const lastCol = sheet.getLastColumn();
+    const lastRow = sheet.getLastRow();
+    const endRow  = Math.min(startRow + rows - 1, lastRow);
+    const numRows = Math.max(endRow - startRow + 1, 0);
+
+    if (numRows === 0) {
+      return jsonResponse_({ sheetName, startRow, rows: 0, cols: lastCol, values: [], formulas: [] });
+    }
+
+    const range  = sheet.getRange(startRow, 1, numRows, lastCol);
+    const result = { sheetName, startRow, rows: numRows, cols: lastCol };
+
+    if (mode === 'values' || mode === 'both') {
+      result.values   = range.getValues();
+    }
+    if (mode === 'formulas' || mode === 'both') {
+      result.formulas = range.getFormulas();
+    }
+
+    return jsonResponse_(result);
+
+  } catch (err) {
+    return jsonResponse_({ error: err.message });
+  }
+}
+
+function jsonResponse_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ------------------------------------------------------------
+//  A4印刷設定を適用（ページに合わせて縮小・横向き）
+// ------------------------------------------------------------
+function setA4PrintSetting() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(EVAL_SHEET);
+  if (!sheet) { SpreadsheetApp.getUi().alert('シートが見つかりません'); return; }
+
+  const setup = sheet.getPageSetup();
+  setup.setPaperSize(SpreadsheetApp.PaperSize.A4);
+  setup.setPageOrientation(SpreadsheetApp.PageOrientation.PORTRAIT);
+  setup.setFitToPage(true);
+  sheet.setPageSetup(setup);
+
+  SpreadsheetApp.getUi().alert('A4印刷設定を保存しました。\n次回以降、印刷時に自動でA4横向きに収まります。');
+}

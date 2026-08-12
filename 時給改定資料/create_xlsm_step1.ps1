@@ -18,7 +18,7 @@ while ($newWb.Worksheets.Count -gt 1) {
 $newWb.Worksheets.Item(1).Name = "_tmp"
 
 # ① PA評価表シートをコピー → 「評価入力」
-$srcPA.Worksheets.Item("クラスターレベル・チェックシート").Copy($newWb.Worksheets.Item("_tmp"))
+$srcPA.Worksheets.Item("チェックシート").Copy($newWb.Worksheets.Item("_tmp"))
 $wsEval = $newWb.Worksheets.Item(1)
 $wsEval.Name = "評価入力"
 

@@ -1,0 +1,35 @@
+function onOpen(){
+  SpreadsheetApp.getUi().createMenu('PA評価表 設定')
+    .addItem('アルバイト名簿と連携設定','setupStaffLink')
+    .addToUi();
+}
+
+function setupStaffLink(){
+  var ui=SpreadsheetApp.getUi();
+  var res=ui.prompt('アルバイト名簿と連携設定','この店舗の「アルバイト名簿」スプレッドシートのURLを貼り付けてください。',ui.ButtonSet.OK_CANCEL);
+  if(res.getSelectedButton()!==ui.Button.OK)return;
+  var url=res.getResponseText().trim();
+  if(!url){ui.alert('URLが入力されていません。');return;}
+
+  var ss=SpreadsheetApp.getActiveSpreadsheet();
+  var linkSheetName='スタッフ一覧（連携用）';
+  var link=ss.getSheetByName(linkSheetName);
+  if(!link)link=ss.insertSheet(linkSheetName);
+
+  link.getRange('A1').setValue('アルバイト名簿URL（変更する場合はここを書き換えて、もう一度メニューを実行してください）');
+  link.getRange('A2').setValue(url);
+  link.getRange('A4').setFormula('=IFERROR(IMPORTRANGE(A2,"在籍スタッフ!D2:D300"),"連携エラー：URLを確認するか、下の許可メッセージを確認してください")');
+
+  var rule=SpreadsheetApp.newDataValidation()
+    .requireValueInRange(link.getRange('A4:A303'),true)
+    .setAllowInvalid(true)
+    .build();
+
+  var cluster=ss.getSheetByName('チェックシート');
+  if(cluster)cluster.getRange('A3').setDataValidation(rule);
+
+  var wage=ss.getSheetByName('時給変更集計');
+  if(wage)wage.getRange('B4:B50').setDataValidation(rule);
+
+  ui.alert('設定しました。\n\n続けて「'+linkSheetName+'」タブを開いて、A4セルに「アクセスを許可」のバナーが出たら許可してください（初回のみ）。許可後、氏名欄のプルダウンにアルバイト名簿の在籍スタッフが表示されます。');
+}

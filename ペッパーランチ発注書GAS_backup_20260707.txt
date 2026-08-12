@@ -17,10 +17,19 @@
  *      → 曜日別平均には影響しないよう別途除外
  *   ⑧ 取込停止時にメール通知＋わかりやすいメッセージ
  *
- * 【トリガー設定（初回のみ setupTriggers() を実行）】
- *   06:00 importAndFetchWeather   CSV取込＋天気
- *   06:20 buildSalesForecast      売上予測
- *   06:40 発注計算バッファ_完全生成  発注計算
+ * 【トリガー設定（初回のみ setupTriggersSplit() を実行）】
+ *   06:00 importFooditCSV                  CSV取込
+ *   06:15 fetchWeather_OpenMeteo_UpdateDB  天候更新
+ *   06:30 buildSalesForecast              売上予測
+ *   06:50 発注バッファ_ステップ1             発注計算①
+ *   07:10 発注バッファ_ステップ2             発注計算②
+ *   ※毎月1日 05:00  updateSmartHolidayMaster（土日平均更新）
+ *   ※毎週月曜 06:40 発注バッファ_トレンド更新
+ *
+ * 【トリガー設定履歴】
+ *   2026-07-07  setupTriggersSplit() 実行
+ *               ← 水曜予測が60,516円に固着する問題を受け、毎日自動実行を設定
+ *               ← buildSalesForecast が手動実行のみだったため古い曜日別平均が残っていた
  *
  * 【単独実行できる関数】
  *   importFooditCSV()
@@ -156,7 +165,12 @@ function setupTriggersSplit() {
 // ═══════════════════════════════════════════════════════════════════════
 
 function importAndFetchWeather() {
-  importFooditCSV();
+  try {
+    importFooditCSV();
+  } catch(e) {
+    // CSV取込が失敗しても天候更新は必ず続行する
+    console.error('CSV取込エラー（天候更新は継続）: ' + e.message);
+  }
   if (isWeatherFetchedToday_()) {
     console.log('天気データは本日取得済みのためスキップ');
   } else {
@@ -997,19 +1011,26 @@ function fetchWeather_OpenMeteo_UpdateDB() {
   const nowStr     = Utilities.formatDate(new Date(), tz, 'yyyy/MM/dd');
 
   // ── ① archive API：過去データで空白期間を補完 ──────────
-  // 既存データで天気コードが空の最も古い日付を探す
   const existingDates = Object.keys(dataMap).sort();
   const missingRanges = [];
+  const yesterday = new Date(todayStart); yesterday.setDate(yesterday.getDate() - 1);
 
   if (existingDates.length > 0) {
-    // 既存の先頭日から今日まで、B列(天気コード)が空の日を検出
-    const firstDate  = new Date(existingDates[0] + 'T00:00:00+09:00');
-    const missingStart = firstDate;
-    const missingEnd   = new Date(todayStart); missingEnd.setDate(missingEnd.getDate() - 1);
-
-    // B列が空の日が1件でもあればarchive取得
+    // (A) 既存行でB列(天気コード)が空の場合 → 先頭日〜昨日を再取得
     const hasEmpty = existingDates.some(k => dataMap[k][1] === null || dataMap[k][1] === '');
-    if (hasEmpty) missingRanges.push({ start: missingStart, end: missingEnd });
+    if (hasEmpty) {
+      const firstDate = new Date(existingDates[0] + 'T00:00:00+09:00');
+      missingRanges.push({ start: firstDate, end: yesterday });
+    }
+    // (B) 直近の日付が丸ごと欠損している場合 → 最終日翌日〜昨日を取得
+    const lastDateStr = existingDates[existingDates.length - 1];
+    const lastDate    = new Date(lastDateStr + 'T00:00:00+09:00');
+    if (lastDate < yesterday) {
+      const gapStart = new Date(lastDate); gapStart.setDate(gapStart.getDate() + 1);
+      console.log('直近データ欠損を検出: ' + Utilities.formatDate(gapStart, tz, 'yyyy-MM-dd')
+        + ' 〜 ' + Utilities.formatDate(yesterday, tz, 'yyyy-MM-dd'));
+      missingRanges.push({ start: gapStart, end: yesterday });
+    }
   } else {
     // データが1件もない場合：実績データの最初の日付から取得
     const jissekiSheet = ss.getSheetByName('実績データ');
@@ -1018,7 +1039,7 @@ function fetchWeather_OpenMeteo_UpdateDB() {
       const firstRow = jissekiSheet.getRange(2, 1, 1, 1).getValue();
       if (firstRow instanceof Date) { archiveStart = new Date(firstRow); archiveStart.setHours(0,0,0,0); }
     }
-    missingRanges.push({ start: archiveStart, end: new Date(todayStart) });
+    missingRanges.push({ start: archiveStart, end: yesterday });
   }
 
   // archive APIで補完
@@ -1477,12 +1498,19 @@ function buildSalesForecast() {
 
   // ★祝日マスタの日付も曜日平均から除外
   const holidayTaggedDates = getHolidayTaggedDates_();
-  const avgExcludedDates   = new Set([...excludedDates, ...holidayTaggedDates]);
+  // ★CPイベント期間の日付を通常時平均・トレンド計算から除外
+  const cpEventDates = new Set();
+  eventList.forEach(ev => {
+    const cur = new Date(ev.start);
+    while (cur <= ev.end) { cpEventDates.add(toDateStr_(cur)); cur.setDate(cur.getDate() + 1); }
+  });
+  const avgExcludedDates   = new Set([...excludedDates, ...holidayTaggedDates, ...cpEventDates]);
   const weightedDowAvg     = calcWeightedDowAvg_(salesMap, avgExcludedDates, today);
   console.log('加重平均（曜日別）: ' + JSON.stringify(Object.fromEntries(Object.entries(weightedDowAvg).map(([k,v]) => [k, Math.round(v)]))));
 
   const longTermTrend = calcLongTermTrend_(salesMap, avgExcludedDates, today);
-  const recentBiasCoeff = calcRecentBiasCoeff_(salesMap, excludedDates, ss);
+  const recentBiasCoeff = calcRecentBiasCoeff_(salesMap, avgExcludedDates, ss);
+  const monthCoeffMap   = calcMonthCoeff_(salesMap, avgExcludedDates);
 
   const cpPostEndCoeff = calcCpPostEndCoeff_(eventList, salesMap, excludedDates, today);
   if (Object.keys(cpPostEndCoeff).length > 0) console.log('CP終了後補正: ' + JSON.stringify(cpPostEndCoeff));
@@ -1672,7 +1700,11 @@ function buildSalesForecast() {
     const dowName = getDowName_(dow);
     const isPast = cur2 < today;
 
-    if (lockedRowMap[dateStr]) { forecastRows.push(lockedRowMap[dateStr]); cur2.setDate(cur2.getDate()+1); continue; }
+    if (lockedRowMap[dateStr]) {
+      forecastRows.push(lockedRowMap[dateStr].slice());
+      cur2.setDate(cur2.getDate() + 1);
+      continue;
+    }
     if (excludedDates.has(dateStr)) { forecastRows.push([new Date(cur2), dow, dowName, '', '', '', '', '', '', '除外', '', '']); cur2.setDate(cur2.getDate()+1); continue; }
 
     const holidayInfo = holidayInfoMap[dateStr];
@@ -1680,10 +1712,10 @@ function buildSalesForecast() {
     let baseAvg = weightedDowAvg[dow] || 0, holidayBase = '';
     if (isOff && holidayInfo && holidayInfo.salesAvg > 0) { baseAvg = holidayInfo.salesAvg; holidayBase = Math.round(holidayInfo.salesAvg); }
 
-    // ③ 前週アンカー：未来日のみ前週実績を35%ブレンド（祝日・除外日はスキップ）
+    // ③ 前週アンカー：未来日のみ前週実績を35%ブレンド（祝日・除外日・CP期間はスキップ）
     if (!isPast && !isOff && baseAvg > 0) {
       const lastWeekStr = toDateStr_(new Date(cur2.getTime() - 7 * 86400000));
-      if (!excludedDates.has(lastWeekStr) && salesMap[lastWeekStr] && salesMap[lastWeekStr].sales > 0) {
+      if (!avgExcludedDates.has(lastWeekStr) && salesMap[lastWeekStr] && salesMap[lastWeekStr].sales > 0) {
         baseAvg = Math.round(salesMap[lastWeekStr].sales * 0.35 + baseAvg * 0.65);
       }
     }
@@ -1694,9 +1726,12 @@ function buildSalesForecast() {
     const monthPattern = getMonthPatternCoeff_(dayOfMonth, dow, monthPatternCoeff);
     const postEndCoeff = getCpPostEndCoeff_(dateStr, cpPostEndCoeff);
 
+    const month = cur2.getMonth() + 1;
+    const daysAhead = Math.round((cur2 - today) / 86400000);
+    const monthCoeff = (!isPast && daysAhead > 70 && monthCoeffMap[month]) ? monthCoeffMap[month] : 1.0;
     const longTrend   = longTermTrend[dow] || 1.0;
     const biasAdj = isPast ? 1.0 : (recentBiasCoeff[dow] || 1.0);
-    const forecast    = Math.round(baseAvg * eventRate * weatherRate * monthPattern * postEndCoeff * longTrend * biasAdj);
+    const forecast    = Math.round(baseAvg * eventRate * weatherRate * monthPattern * postEndCoeff * longTrend * biasAdj * monthCoeff);
 
     const actualData  = salesMap[dateStr];
     const actualSales = (actualData && actualData.sales > 0) ? actualData.sales : '';
@@ -2160,6 +2195,103 @@ function getMonthPatternCoeff_(dayOfMonth, dow, monthPatternCoeff) {
   return (monthPatternCoeff[period] && monthPatternCoeff[period][dow]) || 1.0;
 }
 
+// 月別補正係数（1〜12月それぞれの売上水準を全体平均と比較）
+function calcMonthCoeff_(salesMap, excludedDates) {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const monthSales = {};
+  for (let m = 1; m <= 12; m++) monthSales[m] = [];
+
+  Object.keys(salesMap).forEach(dateStr => {
+    if (excludedDates.has(dateStr)) return;
+    const d = new Date(dateStr); d.setHours(0,0,0,0);
+    if (d >= today) return;
+    const { sales } = salesMap[dateStr];
+    if (sales <= 0) return;
+    const month = d.getMonth() + 1;
+    monthSales[month].push(sales);
+  });
+
+  const allSales = Object.values(monthSales).flat();
+  if (allSales.length === 0) return {};
+  const overallAvg = allSales.reduce((a,b) => a+b, 0) / allSales.length;
+
+  const result = {};
+  for (let m = 1; m <= 12; m++) {
+    const arr = monthSales[m];
+    if (arr.length >= 20 && overallAvg > 0) {
+      const monthAvg = arr.reduce((a,b) => a+b, 0) / arr.length;
+      result[m] = Math.min(1.3, Math.max(0.7, Math.round(monthAvg / overallAvg * 1000) / 1000));
+    } else {
+      result[m] = 1.0;
+    }
+  }
+  console.log('月別補正係数: ' + JSON.stringify(result));
+  return result;
+}
+
+// CP設定の補正倍率を実績から更新（手動実行用）
+// ※buildSalesForecastからは呼ばない。単独でupdateCpRateFromActuals()を実行する。
+function updateCpRateFromActuals() {
+  updateCpRateFromActuals_(SpreadsheetApp.getActiveSpreadsheet());
+}
+
+function updateCpRateFromActuals_(ss) {
+  const fcSheet = ss.getSheetByName('売上予測');
+  const cpSheet = ss.getSheetByName('CP設定');
+  if (!fcSheet || !cpSheet || fcSheet.getLastRow() < 2 || cpSheet.getLastRow() < 2) return;
+
+  // 売上予測シートから実績確定データを収集
+  // A:日付, D:baseAvg, F:eventRate(現在のCP倍率), G:weatherRate, H:combinedCoeff, K:実績売上
+  const actualMap = {};
+  fcSheet.getRange(2, 1, fcSheet.getLastRow()-1, 11).getValues().forEach(row => {
+    if ((row[9] || '').toString() !== '実績確定') return;
+    const baseAvg     = Number(row[3]);
+    const eventRate   = Number(row[5]) || 1.0;
+    const weatherRate = Number(row[6]) || 1.0;
+    const combined    = Number(row[7]) || 1.0; // longTrend × monthPattern × postEndCoeff
+    const actual      = Number(row[10]);
+    if (baseAvg <= 0 || actual <= 0) return;
+    // 他の係数を除いた純粋なCP効果: actual / (baseAvg × weatherRate × combined)
+    const otherFactors = weatherRate * combined;
+    const pureRate = otherFactors > 0 ? actual / (baseAvg * otherFactors) : actual / baseAvg;
+    actualMap[toDateStr_(row[0])] = { pureRate, currentRate: eventRate };
+  });
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  const cpData = cpSheet.getRange(2, 1, cpSheet.getLastRow()-1, 8).getValues();
+  let updated = 0;
+  cpData.forEach((row, i) => {
+    if (!row[0] || (row[7] || '').toString().trim() === '除外') return;
+    const s = row[1] instanceof Date ? row[1] : new Date(row[1]);
+    const e = row[2] instanceof Date ? row[2] : new Date(row[2]);
+    if (!s || !e || isNaN(s.getTime())) return;
+    s.setHours(0,0,0,0); e.setHours(0,0,0,0);
+    // 終了済みのCPのみ更新（進行中は除外）
+    if (e >= today) return;
+
+    const rates = [];
+    const cur = new Date(s);
+    while (cur <= e) {
+      const ds = toDateStr_(cur);
+      if (actualMap[ds]) rates.push(actualMap[ds].pureRate);
+      cur.setDate(cur.getDate() + 1);
+    }
+    if (rates.length < 3) return;
+
+    const calcRate = rates.reduce((a,b) => a+b, 0) / rates.length;
+    const currentRate = Number(row[5]) || 1.0;
+    // 急激な変更を防ぐため新旧を50%ブレンドし1.0〜2.5の範囲に収める
+    const blended = currentRate * 0.5 + calcRate * 0.5;
+    const clamped = Math.min(2.5, Math.max(1.0, Math.round(blended * 100) / 100));
+    cpSheet.getRange(i + 2, 6).setValue(clamped);
+    console.log('CP倍率更新: ' + row[0] + ' → ' + clamped + '（実績' + rates.length + '日, 計算値' + Math.round(calcRate*100)/100 + '）');
+    updated++;
+  });
+
+  console.log('CP倍率更新完了: ' + updated + '件');
+  ss.toast('CP倍率を' + updated + '件更新しました', '更新完了', 5);
+}
+
 function calcCpPostEndCoeff_(eventList, salesMap, excludedDates, today) {
   const result = {};
   eventList.forEach(ev => {
@@ -2517,10 +2649,10 @@ function buildOrderBufferO_(targetSheet, cpSubtractMap) {
 const todayO = new Date(); todayO.setHours(0, 0, 0, 0);
   const limitO = new Date(todayO); limitO.setDate(todayO.getDate() - 28);
 
-  // ★切替CP：食材コードごとに有効開始日を設定する
-  //   CP中    → 開始日以降のデータのみ使用（旧データを排除）
-  //   CP終了後 → 終了日翌日以降のデータのみ使用（CP中の高い値を排除）
-  const ingEffectiveLimitMap = {};
+  // ★切替CP：CP期間中のデータのみ除外し、CP前・CP後は両方使用する
+  //   CP中    → 開始日〜今日を除外期間とする（CP前の通常実績を使用）
+  //   CP終了後 → 開始日〜終了日を除外期間とする（CP前＋CP後の通常実績を両方使用）
+  const ingExcludePeriodMap = {};  // { ingCode: [{start: Date, end: Date}] }
   const cpSheetO = ss.getSheetByName('CP設定');
   if (cpSheetO && cpSheetO.getLastRow() > 1) {
     // 商品マスタから メニューコード→食材コード のマップを作成
@@ -2541,32 +2673,31 @@ const todayO = new Date(); todayO.setHours(0, 0, 0, 0);
       const eDate = eRaw instanceof Date ? eRaw : (eRaw ? new Date(String(eRaw).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
       if (!sDate || isNaN(sDate.getTime())) return;
       sDate.setHours(0,0,0,0);
-      // CP中または終了日未定 → 開始日以降、終了後 → 終了日翌日以降
-      let effectiveDate;
+      // 除外終了日の決定
+      let excludeEnd;
       if (!eDate || isNaN(eDate.getTime())) {
-        effectiveDate = sDate;  // 終了日未定：開始日以降
+        excludeEnd = new Date(todayO);  // 終了日未定（CP継続中）：今日まで除外
       } else {
         eDate.setHours(0,0,0,0);
-        if (eDate < limitO) return; // 28日以上前に終了したCPはスキップ
-        effectiveDate = todayO <= eDate
-          ? sDate                                          // CP中：開始日以降
-          : new Date(eDate.getTime() + 86400000);         // CP後：終了翌日以降
+        if (eDate < limitO) return;     // 28日以上前に終了したCPは無視
+        excludeEnd = eDate;             // CP終了済み：終了日まで除外
       }
       const rawVal = row[3];
       const menuCodes = typeof rawVal === 'number' ? [Math.round(rawVal)]
         : String(rawVal||'').split(',').map(c=>Number(c.trim())).filter(c=>c>0);
       menuCodes.forEach(mc => {
         (menuIngMapO[String(mc)]||[]).forEach(ingCode => {
-          if (!ingEffectiveLimitMap[ingCode] || effectiveDate > ingEffectiveLimitMap[ingCode]) {
-            ingEffectiveLimitMap[ingCode] = effectiveDate;
-          }
+          if (!ingExcludePeriodMap[ingCode]) ingExcludePeriodMap[ingCode] = [];
+          ingExcludePeriodMap[ingCode].push({ start: new Date(sDate), end: new Date(excludeEnd) });
         });
       });
     });
-    if (Object.keys(ingEffectiveLimitMap).length > 0) {
-      console.log('切替CP フィルター適用: ' +
-        Object.entries(ingEffectiveLimitMap)
-          .map(([k,v]) => k + '=' + Utilities.formatDate(v,'Asia/Tokyo','MM/dd') + '以降')
+    if (Object.keys(ingExcludePeriodMap).length > 0) {
+      console.log('切替CP 除外期間フィルター: ' +
+        Object.entries(ingExcludePeriodMap)
+          .map(([k,v]) => k + '=' + v.map(p =>
+            Utilities.formatDate(p.start,'Asia/Tokyo','MM/dd') + '〜' +
+            Utilities.formatDate(p.end,'Asia/Tokyo','MM/dd') + '除外').join(','))
           .join(', '));
     }
   }
@@ -2574,13 +2705,13 @@ const todayO = new Date(); todayO.setHours(0, 0, 0, 0);
   const jissekiSheet = ss.getSheetByName('食材日時実績');
   if (jissekiSheet && jissekiSheet.getLastRow() > 1) {
     jissekiSheet.getRange(2,1,jissekiSheet.getLastRow()-1,6).getValues()
-.filter(r => {
+      .filter(r => {
         if (!r[0]||!r[2]||r[4]<=0||(r[5]||'')==='推定') return false;
         const d = r[0] instanceof Date ? r[0] : new Date(r[0]); d.setHours(0,0,0,0);
         if (d < limitO) return false;
-        // ★切替CPの食材は有効開始日以前のデータを除外
-        const effLimit = ingEffectiveLimitMap[String(r[2])];
-        if (effLimit && d < effLimit) return false;
+        // ★切替CPのCP期間中データのみ除外（CP前・CP後は有効）
+        const excludePeriods = ingExcludePeriodMap[String(r[2])] || [];
+        if (excludePeriods.some(p => d >= p.start && d <= p.end)) return false;
         return true;
       })
       .forEach(row => {
@@ -2957,16 +3088,46 @@ function buildOutlierLog() {
   // ★祝日マスタの日付を取得（IQR判定から除外するため）
   const holidayTaggedDates = getHolidayTaggedDates_();
 
+  // ★CP設定・イベント登録の期間もIQR判定から除外する
+  //   （特売・CP期間は売上が通常より高く、外れ値として誤検知されるため）
+  const cpEventTaggedDates = new Set();
+  const cpSheet2 = ss.getSheetByName('CP設定');
+  if (cpSheet2 && cpSheet2.getLastRow() > 1) {
+    cpSheet2.getRange(2, 1, cpSheet2.getLastRow()-1, 8).getValues().forEach(row => {
+      const note = (row[7] || '').toString().trim();
+      if (note === '除外') return;
+      const startRaw = row[1], endRaw = row[2];
+      const start = startRaw instanceof Date ? startRaw : (startRaw ? new Date(String(startRaw).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
+      const end   = endRaw   instanceof Date ? endRaw   : (endRaw   ? new Date(String(endRaw  ).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
+      if (!start || !end || isNaN(start.getTime()) || isNaN(end.getTime())) return;
+      start.setHours(0,0,0,0); end.setHours(0,0,0,0);
+      const cur = new Date(start);
+      while (cur <= end) { cpEventTaggedDates.add(toDateStr_(cur)); cur.setDate(cur.getDate() + 1); }
+    });
+  }
+  const evSheet3 = ss.getSheetByName('イベント登録');
+  if (evSheet3 && evSheet3.getLastRow() > 1) {
+    evSheet3.getRange(2, 1, evSheet3.getLastRow()-1, 5).getValues().forEach(row => {
+      if (!row[0] || (row[4] || '').toString().trim() === '除外') return;
+      const start = row[1] instanceof Date ? row[1] : (row[1] ? new Date(String(row[1]).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
+      const end   = row[2] instanceof Date ? row[2] : (row[2] ? new Date(String(row[2]).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
+      if (!start || !end || isNaN(start.getTime())) return;
+      start.setHours(0,0,0,0); end.setHours(0,0,0,0);
+      const cur = new Date(start);
+      while (cur <= end) { cpEventTaggedDates.add(toDateStr_(cur)); cur.setDate(cur.getDate() + 1); }
+    });
+  }
+
   const outliers=[], normalMap={};
 
   Object.entries(dowGroups).forEach(([dow, items]) => {
     if (items.length<OUTLIER_MIN_SAMPLES) { items.forEach(s=>{ normalMap[s.dateStr]=true; }); return; }
 
-    // 祝日を判定対象から分離
-    const normalItems  = items.filter(s => !holidayTaggedDates.has(s.dateStr));
-    const holidayItems = items.filter(s =>  holidayTaggedDates.has(s.dateStr));
+    // 祝日・CP/イベント期間を判定対象から分離
+    const normalItems  = items.filter(s => !holidayTaggedDates.has(s.dateStr) && !cpEventTaggedDates.has(s.dateStr));
+    const holidayItems = items.filter(s =>  holidayTaggedDates.has(s.dateStr) || cpEventTaggedDates.has(s.dateStr));
 
-    // 祝日は無条件でスキップ（異常値ログに載せない）
+    // 祝日・CP期間は無条件でスキップ（異常値ログに載せない）
     holidayItems.forEach(s => { normalMap[s.dateStr]=true; });
 
     // 通常営業日だけでIQR判定
@@ -3397,4 +3558,438 @@ function clearIngredientLinkSettings() {
   });
 
   console.log('連動元コピー列クリア完了: ' + count + 'セル');
+}
+
+// ============================================================
+// 予測精度分析（analyzeForecastAccuracy）
+// 売上予測シートの実績確定行を集計し「予測精度分析」シートに出力
+// ============================================================
+function analyzeForecastAccuracy() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const fSheet = ss.getSheetByName('売上予測');
+  if (!fSheet || fSheet.getLastRow() < 2) {
+    console.log('売上予測シートにデータがありません');
+    return;
+  }
+
+  const rows = fSheet.getRange(2, 1, fSheet.getLastRow() - 1, 12).getValues();
+
+  // CP設定から全CP期間の日付セットを作成
+  const cpDateSet = new Set();
+  const cpSheet = ss.getSheetByName('CP設定');
+  if (cpSheet && cpSheet.getLastRow() > 1) {
+    cpSheet.getRange(2, 1, cpSheet.getLastRow() - 1, 8).getValues().forEach(row => {
+      if (!row[0] || (row[7] || '').toString().trim() === '除外') return;
+      const s = row[1] instanceof Date ? row[1] : new Date(row[1]);
+      const e = row[2] instanceof Date ? row[2] : new Date(row[2]);
+      if (!s || !e || isNaN(s.getTime())) return;
+      s.setHours(0,0,0,0); e.setHours(0,0,0,0);
+      const cur = new Date(s);
+      while (cur <= e) {
+        cpDateSet.add(Utilities.formatDate(cur, 'Asia/Tokyo', 'yyyy/MM/dd'));
+        cur.setDate(cur.getDate() + 1);
+      }
+    });
+  }
+  const evSheet = ss.getSheetByName('イベント登録');
+  if (evSheet && evSheet.getLastRow() > 1) {
+    evSheet.getRange(2, 1, evSheet.getLastRow() - 1, 5).getValues().forEach(row => {
+      if (!row[0] || (row[4] || '').toString().trim() === '除外') return;
+      const s = row[1] instanceof Date ? row[1] : new Date(row[1]);
+      const e = row[2] instanceof Date ? row[2] : new Date(row[2]);
+      if (!s || !e || isNaN(s.getTime())) return;
+      s.setHours(0,0,0,0); e.setHours(0,0,0,0);
+      const cur = new Date(s);
+      while (cur <= e) {
+        cpDateSet.add(Utilities.formatDate(cur, 'Asia/Tokyo', 'yyyy/MM/dd'));
+        cur.setDate(cur.getDate() + 1);
+      }
+    });
+  }
+
+  // 実績確定行のみ集計
+  const DOW_NAMES = ['', '月', '火', '水', '木', '金', '土', '日'];
+  const dowStats    = {};  // 曜日別
+  const typeStats   = { CP: { sum: 0, absSum: 0, count: 0, over: 0, under: 0 },
+                        通常: { sum: 0, absSum: 0, count: 0, over: 0, under: 0 } };
+  const monthStats  = {};  // 月別
+
+  rows.forEach(row => {
+    const dateVal = row[0], status = (row[9] || '').toString();
+    if (status !== '実績確定') return;
+    const forecast   = Number(row[8]);
+    const actual     = Number(row[10]);
+    if (!forecast || !actual) return;
+
+    const dateObj = dateVal instanceof Date ? dateVal : new Date(dateVal);
+    const dateStr = Utilities.formatDate(dateObj, 'Asia/Tokyo', 'yyyy/MM/dd');
+    const dow     = Number(row[1]);
+    const month   = dateObj.getMonth() + 1;
+    const err     = forecast - actual;
+    const absErr  = Math.abs(err);
+    const errRate = err / actual;
+    const isCP    = cpDateSet.has(dateStr);
+    const typeKey = isCP ? 'CP' : '通常';
+
+    // 曜日別
+    if (!dowStats[dow]) dowStats[dow] = { sum: 0, absSum: 0, count: 0, name: DOW_NAMES[dow] || dow };
+    dowStats[dow].sum    += errRate;
+    dowStats[dow].absSum += absErr / actual;
+    dowStats[dow].count  += 1;
+
+    // CP/通常別
+    typeStats[typeKey].sum    += errRate;
+    typeStats[typeKey].absSum += absErr / actual;
+    typeStats[typeKey].count  += 1;
+    if (err > 0) typeStats[typeKey].over++;
+    else         typeStats[typeKey].under++;
+
+    // 月別
+    if (!monthStats[month]) monthStats[month] = { sum: 0, absSum: 0, count: 0 };
+    monthStats[month].sum    += errRate;
+    monthStats[month].absSum += absErr / actual;
+    monthStats[month].count  += 1;
+  });
+
+  // 出力シート準備
+  let outSheet = ss.getSheetByName('予測精度分析');
+  if (!outSheet) outSheet = ss.insertSheet('予測精度分析');
+  outSheet.clearContents();
+
+  const pct = v => Math.round(v * 1000) / 10 + '%';
+
+  const output = [];
+  output.push(['【予測精度分析】', '', '', '', '']);
+  output.push(['生成日時', new Date().toLocaleString('ja-JP'), '', '', '']);
+  output.push(['', '', '', '', '']);
+
+  // ① CP/通常別
+  output.push(['① CP期間 vs 通常日', '', '', '', '']);
+  output.push(['区分', '件数', '平均誤差率(+過大/-過小)', '絶対誤差率(MAPE)', '過大/過小 件数']);
+  ['CP', '通常'].forEach(k => {
+    const s = typeStats[k];
+    if (!s.count) { output.push([k, 0, '-', '-', '-']); return; }
+    output.push([
+      k,
+      s.count,
+      pct(s.sum / s.count),
+      pct(s.absSum / s.count),
+      '過大' + s.over + '件 / 過小' + s.under + '件'
+    ]);
+  });
+  output.push(['', '', '', '', '']);
+
+  // ② 曜日別
+  output.push(['② 曜日別', '', '', '', '']);
+  output.push(['曜日', '件数', '平均誤差率', '絶対誤差率(MAPE)', '']);
+  [1,2,3,4,5,6,7].forEach(d => {
+    const s = dowStats[d];
+    if (!s || !s.count) return;
+    output.push([s.name + '曜日', s.count, pct(s.sum / s.count), pct(s.absSum / s.count), '']);
+  });
+  output.push(['', '', '', '', '']);
+
+  // ③ 月別
+  output.push(['③ 月別', '', '', '', '']);
+  output.push(['月', '件数', '平均誤差率', '絶対誤差率(MAPE)', '']);
+  for (let m = 1; m <= 12; m++) {
+    const s = monthStats[m];
+    if (!s || !s.count) continue;
+    output.push([m + '月', s.count, pct(s.sum / s.count), pct(s.absSum / s.count), '']);
+  }
+
+  outSheet.getRange(1, 1, output.length, 5).setValues(output);
+  outSheet.autoResizeColumns(1, 5);
+
+  // ヘッダー色付け
+  [1, 4, 10, 17].forEach(r => {
+    if (r <= output.length) {
+      outSheet.getRange(r, 1, 1, 5).setBackground('#c9daf8').setFontWeight('bold');
+    }
+  });
+
+  ss.toast('「予測精度分析」シートを確認してください', '分析完了', 5);
+  console.log('分析完了：「予測精度分析」シートを確認してください');
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// 【構造書生成】buildStructureDoc  ─── Ver10 全シート構造書をDriveに書き出す
+// ═══════════════════════════════════════════════════════════════════════
+/**
+ * 全シートの名前・gid・サイズ・先頭5行を
+ * Driveの「ペッパーランチ発注書Ver10_構造書.txt」に書き出す。
+ *
+ * 実行後にログに表示されるファイルIDをClaudeに伝えると、
+ * Claude側でそのファイルを読み込んでシートの中身を確認できる。
+ *
+ * 【実行タイミング】
+ *   ・初回セットアップ時に手動実行
+ *   ・シート構成を変更したあとに再実行
+ *   ・「Claudeにデータを見せたい」ときにも再実行
+ */
+function buildStructureDoc() {
+  const ss     = SpreadsheetApp.getActiveSpreadsheet();
+  const ssId   = ss.getId();
+  const sheets = ss.getSheets();
+  const lines  = [];
+  const now    = new Date().toLocaleString('ja-JP');
+
+  lines.push('# ペッパーランチ発注書 Ver10 — 全シート構造書');
+  lines.push('生成日時: ' + now);
+  lines.push('スプレッドシートID: ' + ssId);
+  lines.push('');
+
+  sheets.forEach(function(sheet) {
+    try {
+      const name    = sheet.getName();
+      const gid     = sheet.getSheetId();
+      const lastRow = sheet.getLastRow();
+      const lastCol = sheet.getLastColumn();
+
+      lines.push('## シート: ' + name);
+      lines.push('gid: ' + gid);
+      lines.push('行数: ' + lastRow + ' / 列数: ' + lastCol);
+
+      // 先頭5行をサンプルとして記録
+      if (lastRow > 0 && lastCol > 0) {
+        const sampleRows = Math.min(lastRow, 5);
+        try {
+          const data = sheet.getRange(1, 1, sampleRows, lastCol).getValues();
+          lines.push('（先頭' + sampleRows + '行サンプル）');
+          data.forEach(function(row) {
+            lines.push(row.join('\t'));
+          });
+        } catch (e2) {
+          lines.push('  [サンプル取得エラー: ' + e2.message + ']');
+        }
+      }
+      lines.push('');
+    } catch (e) {
+      lines.push('  [シート読み込みエラー: ' + e.message + ']');
+      lines.push('');
+    }
+  });
+
+  const content  = lines.join('\n');
+  const fileName = 'ペッパーランチ発注書Ver10_構造書.txt';
+
+  // 既存ファイルがあれば上書き、なければ新規作成
+  let file;
+  const files = DriveApp.getFilesByName(fileName);
+  if (files.hasNext()) {
+    file = files.next();
+    file.setContent(content);
+    console.log('[buildStructureDoc] 更新完了 fileId=' + file.getId());
+  } else {
+    file = DriveApp.createFile(fileName, content, MimeType.PLAIN_TEXT);
+    console.log('[buildStructureDoc] 新規作成 fileId=' + file.getId());
+  }
+
+  ss.toast('Drive に ' + fileName + ' を保存しました\nfileId: ' + file.getId(), '構造書生成完了', 8);
+  return file.getId();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// 【診断】diagnoseSalesForecast  ─── 水曜予測の異常値を診断する
+// ═══════════════════════════════════════════════════════════════════════
+/**
+ * 売上予測が異常に低い（または高い）ときに実行する診断関数。
+ * GASエディタのログ（表示 > ログ）に診断結果が出る。
+ *
+ * 確認内容：
+ *   1. 日次集計シートの水曜実績（直近10件）
+ *   2. 売上予測シートの水曜予測と実績（直近10件）
+ *   3. biasAdj（誤差補正係数）の計算結果
+ *   4. 売上予測シートに残っている異常に低い予測値（5万円未満）
+ */
+function diagnoseSalesForecast() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+
+  console.log('=== diagnoseSalesForecast 開始 ===');
+  console.log('診断日時: ' + new Date().toLocaleString('ja-JP'));
+
+  // ① 日次集計シートの水曜実績（直近10件）
+  const dailySheet = ss.getSheetByName('日次集計');
+  if (dailySheet && dailySheet.getLastRow() > 1) {
+    const rows = dailySheet.getRange(2, 1, dailySheet.getLastRow() - 1, 4).getValues();
+    const wedRows = rows.filter(r => r[1] === '水').slice(-10);
+    console.log('--- ① 日次集計：水曜実績 直近10件 ---');
+    wedRows.forEach(r => {
+      const d = r[0] instanceof Date ? r[0].toLocaleDateString('ja-JP') : r[0];
+      console.log(d + ' 水 売上=' + r[2] + ' 客数=' + r[3]);
+    });
+  } else {
+    console.log('日次集計シート：データなし');
+  }
+
+  // ② 売上予測シートの水曜行（直近10件）
+  const fcSheet = ss.getSheetByName('売上予測');
+  if (fcSheet && fcSheet.getLastRow() > 1) {
+    const rows = fcSheet.getRange(2, 1, fcSheet.getLastRow() - 1, 12).getValues();
+    // 曜日コード4=水曜
+    const wedRows = rows.filter(r => r[1] === 4).slice(-10);
+    console.log('--- ② 売上予測シート：水曜 直近10件 ---');
+    console.log('日付\t曜日別平均(D)\tイベント率(F)\t天候(G)\tトレンド(H)\t予測(I)\tステータス\t実績(K)\t誤差(L)');
+    wedRows.forEach(r => {
+      const d = r[0] instanceof Date ? r[0].toLocaleDateString('ja-JP') : r[0];
+      console.log([d, Math.round(r[3]), r[5], r[6], r[7], Math.round(r[8]), r[9], r[10], r[11]].join('\t'));
+    });
+
+    // 異常に低い予測値を検出（未来日で5万円未満）
+    const anomalies = rows.filter(r => {
+      if (!r[0] || r[9] === '実績確定') return false;
+      const d = new Date(r[0]); d.setHours(0,0,0,0);
+      return d >= today && r[8] > 0 && r[8] < 50000;
+    });
+    if (anomalies.length > 0) {
+      console.log('--- ⚠️ 異常低予測（5万円未満の未来日） ---');
+      anomalies.forEach(r => {
+        const d = r[0] instanceof Date ? r[0].toLocaleDateString('ja-JP') : r[0];
+        const dow = ['','日','月','火','水','木','金','土'][r[1]] || r[1];
+        console.log(d + ' ' + dow + ' 予測=' + Math.round(r[8]) + ' 曜日別平均=' + Math.round(r[3]));
+      });
+    } else {
+      console.log('--- 異常低予測なし（5万円未満の未来日はゼロ）---');
+    }
+  }
+
+  // ③ biasAdjの元になるI列の値を確認（直近28日のI列）
+  if (fcSheet && fcSheet.getLastRow() > 1) {
+    const rows = fcSheet.getRange(2, 1, fcSheet.getLastRow() - 1, 12).getValues();
+    console.log('--- ③ 直近28日のI列（予測売上）と実績 ---');
+    const cutoff = new Date(today); cutoff.setDate(today.getDate() - 28);
+    const recent = rows.filter(r => {
+      if (!r[0]) return false;
+      const d = new Date(r[0]); d.setHours(0,0,0,0);
+      return d >= cutoff && d < today;
+    }).sort((a,b) => new Date(a[0]) - new Date(b[0]));
+    recent.forEach(r => {
+      const d = r[0] instanceof Date ? r[0].toLocaleDateString('ja-JP') : r[0];
+      const dow = ['','日','月','火','水','木','金','土'][r[1]] || r[1];
+      const ratio = (r[10] > 0 && r[8] > 0) ? (r[10] / r[8]).toFixed(3) : '-';
+      console.log(d + ' ' + dow + ' 予測(I)=' + Math.round(r[8]) + ' 実績(K)=' + r[10] + ' ratio=' + ratio);
+    });
+  }
+
+  console.log('=== 診断完了 ===');
+  SpreadsheetApp.getActiveSpreadsheet().toast('診断完了。GASエディタのログを確認してください。', '診断', 5);
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// 【診断2】debugWeightedDowAvg  ─── 曜日別加重平均の計算根拠を確認する
+// ─────────────────────────────────────────────────────────────────────
+/**
+ * 「なぜ水曜の曜日別平均が60,516円になったのか」を診断する。
+ * avgExcludedDates に含まれる水曜日（直近83日）と、
+ * 使われた水曜日実績の一覧をログに出力する。
+ */
+function debugWeightedDowAvg() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+
+  console.log('=== debugWeightedDowAvg 開始 ===');
+
+  // salesMapを再現（日次集計シートから読む）
+  const salesMap = {};
+  const dailySheet = ss.getSheetByName('日次集計');
+  if (dailySheet && dailySheet.getLastRow() > 1) {
+    dailySheet.getRange(2, 1, dailySheet.getLastRow() - 1, 4).getValues().forEach(row => {
+      if (!row[0]) return;
+      const ds = toDateStr_(row[0]);
+      const dow = (row[0] instanceof Date ? row[0] : new Date(row[0])).getDay() + 1;
+      salesMap[ds] = { sales: Number(row[2]), dow };
+    });
+  }
+
+  // excludedDatesを再現（イベント登録で「除外」の日）
+  const excludedDates = new Set();
+  const evSheet = ss.getSheetByName('イベント登録');
+  if (evSheet && evSheet.getLastRow() > 1) {
+    evSheet.getRange(2, 1, evSheet.getLastRow() - 1, 6).getValues().forEach(row => {
+      if (!row[0] || (row[4] || '').toString() !== '除外') return;
+      if (!row[1] || !row[2]) return;
+      const s = new Date(row[1]); const e = new Date(row[2]);
+      const cur = new Date(s);
+      while (cur <= e) { excludedDates.add(toDateStr_(cur)); cur.setDate(cur.getDate() + 1); }
+    });
+  }
+
+  // holidayTaggedDates
+  const holidayTaggedDates = getHolidayTaggedDates_();
+
+  // cpEventDates
+  const cpEventDates = new Set();
+  const cpSheet = ss.getSheetByName('CP設定');
+  if (cpSheet && cpSheet.getLastRow() > 1) {
+    cpSheet.getRange(2, 1, cpSheet.getLastRow() - 1, 3).getValues().forEach(row => {
+      if (!row[1] || !row[2]) return;
+      const s = new Date(row[1]); const e = new Date(row[2]);
+      if (isNaN(s.getTime()) || isNaN(e.getTime())) return;
+      const cur = new Date(s);
+      while (cur <= e) { cpEventDates.add(toDateStr_(cur)); cur.setDate(cur.getDate() + 1); }
+    });
+  }
+  // イベント登録（除外以外のイベント）もcpEventDatesに含める
+  if (evSheet && evSheet.getLastRow() > 1) {
+    evSheet.getRange(2, 1, evSheet.getLastRow() - 1, 6).getValues().forEach(row => {
+      if (!row[0] || !row[1] || !row[2]) return;
+      const s = new Date(row[1]); const e = new Date(row[2]);
+      if (isNaN(s.getTime()) || isNaN(e.getTime())) return;
+      const cur = new Date(s);
+      while (cur <= e) { cpEventDates.add(toDateStr_(cur)); cur.setDate(cur.getDate() + 1); }
+    });
+  }
+
+  const avgExcludedDates = new Set([...excludedDates, ...holidayTaggedDates, ...cpEventDates]);
+
+  // 水曜日（dow=4）で直近83日分を調べる
+  console.log('--- 水曜日（直近83日）の除外状況 ---');
+  console.log('日付\t実績売上\t除外理由');
+  const DOW_TARGET = 4; // 水曜
+  let usedCount = 0;
+  let usedWeightedSum = 0, usedWeightedTotal = 0;
+  const ALPHA = 0.35;
+  let sampleCount = 0;
+
+  for (let daysBack = 1; daysBack <= 83; daysBack++) {
+    const target = new Date(today);
+    target.setDate(today.getDate() - daysBack);
+    target.setHours(0, 0, 0, 0);
+    if (target.getDay() + 1 !== DOW_TARGET) continue;
+
+    const ds = toDateStr_(target);
+    const sales = salesMap[ds] ? salesMap[ds].sales : 0;
+
+    let reason = '';
+    if (excludedDates.has(ds)) reason += '除外日 ';
+    if (holidayTaggedDates.has(ds)) reason += '祝日マスタ ';
+    if (cpEventDates.has(ds)) reason += 'CP/イベント ';
+
+    const isExcluded = avgExcludedDates.has(ds);
+    const hasData = sales > 0;
+
+    if (!isExcluded && hasData && sampleCount < 10) {
+      const weight = ALPHA * Math.pow(1 - ALPHA, sampleCount);
+      usedWeightedSum   += sales * weight;
+      usedWeightedTotal += weight;
+      sampleCount++;
+      console.log(ds + '\t' + sales + '\t✅使用(サンプル' + sampleCount + '件目) weight=' + weight.toFixed(4));
+    } else {
+      const skipReason = isExcluded ? (reason || '除外') : (!hasData ? 'データなし' : '');
+      console.log(ds + '\t' + sales + '\t❌スキップ: ' + skipReason);
+    }
+  }
+
+  const calcResult = usedWeightedTotal > 0 ? Math.round(usedWeightedSum / usedWeightedTotal) : 0;
+  console.log('--- 計算結果 ---');
+  console.log('使用サンプル数: ' + sampleCount + ' 件');
+  console.log('計算された曜日別平均（水曜）: ' + calcResult + ' 円');
+  console.log('売上予測シートのD列と一致しているか確認してください（シートの値: 60,516円）');
+
+  console.log('=== 終了 ===');
+  ss.toast('debugWeightedDowAvg完了。ログを確認してください。', '診断2', 5);
 }

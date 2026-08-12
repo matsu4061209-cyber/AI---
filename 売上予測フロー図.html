@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>売上予測計算フロー</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "メイリオ", "Meiryo", sans-serif;
+    background: #f0f2f5;
+    padding: 30px;
+    color: #222;
+  }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    margin-bottom: 6px;
+    color: #1a1a2e;
+    letter-spacing: 2px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 13px;
+    color: #666;
+    margin-bottom: 30px;
+  }
+
+  /* ======== メインフロー ======== */
+  .flow-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+
+  .step-box {
+    width: 820px;
+    border-radius: 10px;
+    padding: 16px 22px;
+    position: relative;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  }
+
+  .step-label {
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+  }
+  .step-title {
+    font-size: 16px;
+    font-weight: bold;
+    margin-bottom: 10px;
+  }
+  .step-body {
+    font-size: 13px;
+    line-height: 1.8;
+  }
+
+  /* 色テーマ */
+  .step1 { background: #dbeafe; border-left: 6px solid #2563eb; }
+  .step1 .step-label { color: #1d4ed8; }
+  .step2 { background: #fef9c3; border-left: 6px solid #d97706; }
+  .step2 .step-label { color: #b45309; }
+  .step3 { background: #dcfce7; border-left: 6px solid #16a34a; }
+  .step3 .step-label { color: #15803d; }
+  .step4 { background: #f3e8ff; border-left: 6px solid #7c3aed; }
+  .step4 .step-label { color: #6d28d9; }
+  .step5 { background: #e2e8f0; border-left: 6px solid #475569; }
+  .step5 .step-label { color: #334155; }
+
+  /* 矢印 */
+  .arrow {
+    width: 0; height: 0;
+    border-left: 16px solid transparent;
+    border-right: 16px solid transparent;
+    border-top: 22px solid #94a3b8;
+    margin: 4px auto;
+  }
+
+  /* 子アイテムリスト */
+  .item-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .item-card {
+    background: rgba(255,255,255,0.7);
+    border-radius: 7px;
+    padding: 9px 12px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .item-card .ic-title {
+    font-weight: bold;
+    font-size: 13px;
+    margin-bottom: 3px;
+  }
+  .badge-new {
+    display: inline-block;
+    background: #ef4444;
+    color: #fff;
+    font-size: 10px;
+    font-weight: bold;
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-left: 5px;
+    vertical-align: middle;
+  }
+  .badge-fixed {
+    display: inline-block;
+    background: #16a34a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: bold;
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-left: 5px;
+    vertical-align: middle;
+  }
+
+  /* 計算式ボックス */
+  .formula-box {
+    background: #1e1b4b;
+    color: #a5f3fc;
+    border-radius: 8px;
+    padding: 14px 20px;
+    font-size: 14px;
+    font-family: "Consolas", monospace;
+    margin-top: 12px;
+    line-height: 2.0;
+    text-align: center;
+  }
+  .formula-box .fvar { color: #fde68a; }
+  .formula-box .fop  { color: #94a3b8; }
+  .formula-box .fcomment { color: #6ee7b7; font-size: 11px; }
+
+  /* CP期間の説明 */
+  .cp-section {
+    width: 820px;
+    margin-top: 30px;
+  }
+  .cp-section h2 {
+    font-size: 15px;
+    color: #1a1a2e;
+    margin-bottom: 12px;
+    border-bottom: 2px solid #cbd5e1;
+    padding-bottom: 6px;
+  }
+  .cp-flow {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    overflow: hidden;
+  }
+  .cp-col {
+    flex: 1;
+    padding: 14px 16px;
+    font-size: 12.5px;
+    line-height: 1.8;
+  }
+  .cp-col-head {
+    font-weight: bold;
+    font-size: 13px;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(0,0,0,0.1);
+  }
+  .cp-source { background: #fef9c3; border-right: 2px dashed #d97706; }
+  .cp-arrow-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 10px;
+    gap: 10px;
+    background: #f8fafc;
+  }
+  .cp-arrow-h {
+    width: 0; height: 0;
+    border-top: 12px solid transparent;
+    border-bottom: 12px solid transparent;
+    border-left: 18px solid #94a3b8;
+  }
+  .cp-exclude { background: #dcfce7; border-left: 2px solid #16a34a; border-right: 2px dashed #94a3b8; }
+  .cp-use    { background: #dbeafe; border-left: 2px solid #2563eb; }
+
+  /* 注意点テーブル */
+  .warn-section {
+    width: 820px;
+    margin-top: 24px;
+  }
+  .warn-section h2 {
+    font-size: 15px;
+    color: #1a1a2e;
+    margin-bottom: 12px;
+    border-bottom: 2px solid #cbd5e1;
+    padding-bottom: 6px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    font-size: 13px;
+  }
+  th {
+    background: #1e293b;
+    color: #fff;
+    padding: 10px 14px;
+    text-align: left;
+  }
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid #e2e8f0;
+    vertical-align: top;
+    line-height: 1.6;
+  }
+  tr:last-child td { border-bottom: none; }
+  .risk-high   { color: #dc2626; font-weight: bold; }
+  .risk-mid    { color: #d97706; font-weight: bold; }
+  .risk-low    { color: #16a34a; font-weight: bold; }
+
+  /* 凡例 */
+  .legend {
+    width: 820px;
+    margin-top: 20px;
+    display: flex;
+    gap: 20px;
+    font-size: 12px;
+    color: #555;
+    justify-content: flex-end;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-badge-new   { background: #ef4444; color: #fff; border-radius: 4px; padding: 1px 6px; font-size: 10px; font-weight: bold; }
+  .legend-badge-fixed { background: #16a34a; color: #fff; border-radius: 4px; padding: 1px 6px; font-size: 10px; font-weight: bold; }
+
+  /* 前週アンカー分岐 */
+  .branch-box {
+    background: rgba(255,255,255,0.7);
+    border-radius: 7px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    margin-top: 10px;
+    line-height: 1.8;
+    border: 1.5px dashed #7c3aed;
+  }
+  .branch-box .bhead {
+    font-weight: bold;
+    margin-bottom: 4px;
+  }
+  .branch-yes { color: #16a34a; font-weight: bold; }
+  .branch-no  { color: #dc2626; font-weight: bold; }
+
+  @media print {
+    body { background: #fff; padding: 10px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>売上予測 計算フロー</h1>
+<p class="subtitle">buildSalesForecast() ／ 2026年7月時点</p>
+
+<div class="legend">
+  <div class="legend-item"><span class="legend-badge-new">NEW</span> 今回新たに追加</div>
+  <div class="legend-item"><span class="legend-badge-fixed">修正済</span> 今回修正した箇所</div>
+</div>
+
+<div class="flow-container">
+
+  <!-- STEP 1 -->
+  <div class="step-box step1">
+    <div class="step-label">STEP 1</div>
+    <div class="step-title">データ読み込み</div>
+    <div class="item-grid">
+      <div class="item-card">
+        <div class="ic-title">📊 日次売上実績シート</div>
+        日付 → 曜日・売上・客数 のマップを作成
+      </div>
+      <div class="item-card">
+        <div class="ic-title">🗓 CP設定シート</div>
+        eventList（CP期間リスト）<br>
+        repeatEventList（毎年・毎月の繰り返しCP）
+      </div>
+      <div class="item-card">
+        <div class="ic-title">📋 イベント登録シート</div>
+        eventListに追加 ／ 「除外」区分は excludedDates へ
+      </div>
+      <div class="item-card">
+        <div class="ic-title">🏖 祝日マスタ</div>
+        holidayInfoMap（祝日の基準売上・休業フラグ）
+      </div>
+      <div class="item-card">
+        <div class="ic-title">🌤 天候解析シート</div>
+        weatherActualMap（実績）<br>weatherForecastMap（予報）
+      </div>
+      <div class="item-card">
+        <div class="ic-title">🌧 天候生データシート</div>
+        precipBandMap（降水量帯：0mm / 1-5mm / 5-20mm / 20mm超）
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"></div>
+
+  <!-- STEP 2 -->
+  <div class="step-box step2">
+    <div class="step-label">STEP 2</div>
+    <div class="step-title">除外日セットの構築 <span class="badge-fixed">修正済</span></div>
+    <div class="step-body">
+      <div class="item-grid">
+        <div class="item-card">
+          <div class="ic-title">excludedDates（基本除外）</div>
+          ・異常値として手動登録した日<br>
+          ・イベント登録の「除外」区分日
+        </div>
+        <div class="item-card">
+          <div class="ic-title">holidayTaggedDates（祝日）</div>
+          ・祝日マスタに登録された日付<br>
+          ・通常曜日と売上特性が異なるため除外
+        </div>
+        <div class="item-card" style="border: 2px solid #d97706;">
+          <div class="ic-title">cpEventDates（CP期間）<span class="badge-new">NEW</span></div>
+          ・eventList の全CP期間の日付を列挙<br>
+          ・例：肉の日WEEK 6/26〜6/30 → 5日分を追加
+        </div>
+        <div class="item-card" style="background:#fff8e1; border:2px solid #f59e0b;">
+          <div class="ic-title">★ avgExcludedDates（統合・通常時平均用）</div>
+          excludedDates ＋ holidayTaggedDates ＋ cpEventDates<br>
+          <strong>→ STEP3の全係数計算で統一して使用</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"></div>
+
+  <!-- STEP 3 -->
+  <div class="step-box step3">
+    <div class="step-label">STEP 3</div>
+    <div class="step-title">係数の計算（すべて avgExcludedDates を使用）</div>
+    <div class="item-grid">
+      <div class="item-card">
+        <div class="ic-title">① 曜日別加重平均（weightedDowAvg）<span class="badge-fixed">修正済</span></div>
+        CP・祝日・異常値を除いた通常営業日のみ使用<br>
+        α=0.35 の指数平滑法、最大10件（直近を重視）
+      </div>
+      <div class="item-card">
+        <div class="ic-title">② 長期トレンド係数（longTermTrend）<span class="badge-fixed">修正済</span></div>
+        直近4週平均 ÷ 直近12週平均（CP除外済）<br>
+        ※0.7〜1.3 にクリップ ／ サンプル不足なら 1.0
+      </div>
+      <div class="item-card">
+        <div class="ic-title">③ 直近誤差補正（recentBiasCoeff）<span class="badge-fixed">修正済</span></div>
+        28日間の（実績 ÷ 前回予測）のEWMA（CP除外済）<br>
+        ※0.75〜1.25 にクリップ ／ 過去日の適用は 1.0 固定
+      </div>
+      <div class="item-card">
+        <div class="ic-title">④ 天候係数（weatherCoeff / tempCoeff / precipCoeff）</div>
+        天候区分・気温・降水量帯別の売上比率<br>
+        ※降水量帯が優先、なければ天候区分にフォールバック
+      </div>
+      <div class="item-card">
+        <div class="ic-title">⑤ 月内パターン係数（monthPatternCoeff）</div>
+        月初(1〜7日) ／ 中旬(8〜23日) ／ 月末(24日〜)<br>の曜日別売上比率（CP除外済）
+      </div>
+      <div class="item-card">
+        <div class="ic-title">⑥ イベント実績倍率（eventActualRates）</div>
+        CP期間実績 ÷ 曜日別通常平均（①の修正済み値）<br>
+        実績1件のみ → 設定倍率×0.5 + 実績倍率×0.5<br>
+        実績2件以上 → 実績倍率の平均を採用
+      </div>
+      <div class="item-card">
+        <div class="ic-title">⑦ CP終了後補正（cpPostEndCoeff）</div>
+        CP後 1週目：× 1 ÷ lift<br>
+        CP後 2週目：× 1 ÷ √lift<br>
+        ※lift &lt; 1.05 or CP補正倍率列が空なら スキップ
+      </div>
+      <div class="item-card">
+        <div class="ic-title">⑧ 繰り返しイベント倍率（repeatEventCoeffMap）</div>
+        毎月・毎年パターンのCPを過去実績から自動計算<br>
+        IQR外れ値除去後の平均を採用
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"></div>
+
+  <!-- STEP 4 -->
+  <div class="step-box step4">
+    <div class="step-label">STEP 4</div>
+    <div class="step-title">日付ループ（実績開始日 〜 翌々月末）</div>
+    <div class="step-body">
+
+      <div class="item-grid" style="margin-bottom:10px;">
+        <div class="item-card">
+          <div class="ic-title">「実績確定」行</div>
+          既存の確定値をそのまま保持（再計算しない）
+        </div>
+        <div class="item-card">
+          <div class="ic-title">「除外日」</div>
+          空行でスキップ（売上予測なし）
+        </div>
+      </div>
+
+      <div class="branch-box">
+        <div class="bhead">① baseAvg（基準売上）の決定</div>
+        祝日マスタにある日 → holidayInfoMap の salesAvg を使用<br>
+        通常日 → weightedDowAvg[その日の曜日]
+      </div>
+
+      <div class="branch-box" style="margin-top:8px; border-color:#16a34a;">
+        <div class="bhead">② 前週アンカー（未来日・非祝日のみ）<span class="badge-fixed">修正済</span></div>
+        前週（-7日）の日付を <strong>avgExcludedDates</strong> でチェック<br>
+        <span class="branch-yes">✓ CP期間でも除外日でもない</span> → 前週実績×35% ＋ 曜日平均×65% をブレンド<br>
+        <span class="branch-no">✗ CP期間 or 除外日</span> → ブレンドせず曜日平均のみ使用
+      </div>
+
+      <div class="formula-box">
+        <div>予測売上　＝　<span class="fvar">baseAvg</span></div>
+        <div><span class="fop">　　　　　×</span>　<span class="fvar">eventRate</span>　　<span class="fcomment">← CP・イベント倍率（設定値 or 実績自動計算）</span></div>
+        <div><span class="fop">　　　　　×</span>　<span class="fvar">weatherRate</span>　<span class="fcomment">← 天候×気温係数（降水量帯優先）</span></div>
+        <div><span class="fop">　　　　　×</span>　<span class="fvar">monthPattern</span>　<span class="fcomment">← 月初/中旬/月末 係数</span></div>
+        <div><span class="fop">　　　　　×</span>　<span class="fvar">postEndCoeff</span>　<span class="fcomment">← CP終了後の反動補正（通常は 1.0）</span></div>
+        <div><span class="fop">　　　　　×</span>　<span class="fvar">longTrend</span>　　<span class="fcomment">← 長期上昇/下降トレンド</span></div>
+        <div><span class="fop">　　　　　×</span>　<span class="fvar">biasAdj</span>　　　<span class="fcomment">← 直近誤差補正（過去日は 1.0 固定）</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"></div>
+
+  <!-- STEP 5 -->
+  <div class="step-box step5">
+    <div class="step-label">STEP 5</div>
+    <div class="step-title">売上予測シートへ書き込み</div>
+    <div class="step-body">
+      <div class="item-grid">
+        <div class="item-card">A列：日付</div>
+        <div class="item-card">B列：曜日コード</div>
+        <div class="item-card">C列：曜日名</div>
+        <div class="item-card">D列：曜日別平均売上（baseAvg）</div>
+        <div class="item-card">E列：祝日基準値</div>
+        <div class="item-card">F列：イベント倍率（eventRate）</div>
+        <div class="item-card">G列：天候影響度（weatherRate）</div>
+        <div class="item-card">H列：トレンド係数（longTrend × monthPattern × postEndCoeff）</div>
+        <div class="item-card" style="border:2px solid #475569; background:#fff;">
+          <strong>I列：予測売上（最終値）</strong>
+        </div>
+        <div class="item-card">J列：ステータス（実績確定 / 予報反映中 / 天候未定 / 予測）</div>
+        <div class="item-card">K列：実績売上</div>
+        <div class="item-card">L列：誤差率</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- CP期間の扱い説明 -->
+<div class="cp-section">
+  <h2>CP期間データの扱い方（重要）</h2>
+  <div class="cp-flow">
+    <div class="cp-col cp-source">
+      <div class="cp-col-head">📋 CP設定シート の1行</div>
+      例：肉の日WEEK<br>
+      　開始：2026/06/26<br>
+      　終了：2026/06/30<br>
+      　I列：切替
+    </div>
+    <div class="cp-arrow-col">
+      <div class="cp-arrow-h"></div>
+    </div>
+    <div class="cp-col cp-exclude">
+      <div class="cp-col-head">🚫 通常時平均計算から除外</div>
+      cpEventDates に 6/26〜6/30 を追加<br>
+      → avgExcludedDates に含まれる<br>
+      → weightedDowAvg、longTermTrend、<br>
+      　 recentBiasCoeff、前週アンカー<br>
+      　 いずれもこの日付をスキップ
+    </div>
+    <div class="cp-arrow-col">
+      <div class="cp-arrow-h"></div>
+    </div>
+    <div class="cp-col cp-use">
+      <div class="cp-col-head">✅ イベント倍率計算には使用</div>
+      eventActualRates に追加<br>
+      → CP期間の実績 ÷ 通常平均<br>
+      　＝ 肉の日WEEK の売上倍率を自動算出<br>
+      → 次回 肉の日WEEK の予測に反映
+    </div>
+  </div>
+</div>
+
+<!-- 残る注意点 -->
+<div class="warn-section">
+  <h2>⚠ 残る注意点</h2>
+  <table>
+    <tr>
+      <th>優先度</th>
+      <th>場所</th>
+      <th>内容</th>
+      <th>対処法</th>
+    </tr>
+    <tr>
+      <td><span class="risk-mid">中</span></td>
+      <td>CP終了後補正<br>（cpPostEndCoeff）</td>
+      <td>CP設定のF列（補正倍率）が空・0の場合、ev.rate = 1.0 となり<strong>CP終了後補正が働かない</strong></td>
+      <td>CP設定シートのF列に倍率（例: 1.2）を入力する。<br>または今後コードで自動算出に変更</td>
+    </tr>
+    <tr>
+      <td><span class="risk-low">低</span></td>
+      <td>CP終了後補正の<br>前CP期間計算</td>
+      <td>CP開始28日前の期間に別のCPが重なると、「通常時平均」が歪む可能性がある</td>
+      <td>現状は頻度が低いため許容範囲。<br>問題が出たら avgExcludedDates を渡すよう変更</td>
+    </tr>
+    <tr>
+      <td><span class="risk-low">低</span></td>
+      <td>天候係数の計算</td>
+      <td>CP期間中の日が天候係数の学習データに混入している</td>
+      <td>天候自体はCP影響と独立しているため基本は問題なし</td>
+    </tr>
+  </table>
+</div>
+
+<p style="text-align:right; font-size:11px; color:#aaa; margin-top:20px; width:820px; margin-left:auto; margin-right:auto;">
+  作成：2026年7月 ／ ペッパーランチ発注システム
+</p>
+
+</body>
+</html>

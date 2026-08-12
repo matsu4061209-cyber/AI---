@@ -1,0 +1,19 @@
+function clearForTemplate(){
+  var ui=SpreadsheetApp.getUi();
+  var res=ui.alert('テンプレート化の確認','このスプレッドシートの全スタッフデータを削除します。この操作は元に戻せません。よろしいですか？',ui.ButtonSet.YES_NO);
+  if(res!==ui.Button.YES)return;
+  var ss=SpreadsheetApp.getActiveSpreadsheet();
+  function clearRows(sheetName){
+    var sh=ss.getSheetByName(sheetName);
+    if(!sh)return;
+    var lr=sh.getLastRow();
+    if(lr>1)sh.getRange(2,1,lr-1,sh.getLastColumn()).clearContent();
+  }
+  clearRows('スタッフマスタ');
+  clearRows('在籍スタッフ');
+  clearRows('退職者');
+  clearRows('面談シート');
+  var chk=ss.getSheetByName('チェックシート');
+  if(chk){chk.clearContents();chk.clearFormats();}
+  ui.alert('完了しました。スタッフデータを全て削除しました。\n\nこの関数（clearForTemplate）は役目を終えたので、Apps Scriptエディタから削除して構いません。');
+}
