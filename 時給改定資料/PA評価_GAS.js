@@ -337,6 +337,8 @@ function setupTrigger() {
   try { UrlFetchApp.fetch('https://www.googleapis.com/discovery/v1/apis', { muteHttpExceptions: true }); } catch(e) {}
   // ④ 古い版のコピー向け：チェックシートの数式（Z60・U56）を最新に修正（★COPY_UPDATE★）
   fixChecksheetFormulas_(ss);
+  // ⑤ 保存済みの店舗情報があれば、時給変更届のフッターへ反映（★STORE_INFO_APPLY★）
+  applyStoreInfoToSummary_(ss);
   // 登録直後に一度プルダウンを最新化（初回セットアップ時点で反映）
   const evalSh = ss.getSheetByName(EVAL_SHEET);
   if (evalSh) buildNameDropdown_(evalSh);
@@ -1204,9 +1206,37 @@ function saveStoreInfo(o) {
     manager:  String(o.manager  == null ? '' : o.manager).trim()
   };
   PropertiesService.getDocumentProperties().setProperty('STORE_INFO', JSON.stringify(info));
-  SpreadsheetApp.getActiveSpreadsheet().toast(
-    [info.division, info.name, info.manager].filter(Boolean).join('　') +
-    '　→「📊 時給変更届を更新」でフッターに反映されます。', '店舗情報を保存しました', 6);
+
+  // ★STORE_INFO_APPLY★ 保存と同時に、時給変更届シートのフッターへ即反映する
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const applied = applyStoreInfoToSummary_(ss);
+  const shown = [info.division, info.name, info.manager].filter(Boolean).join('　');
+  ss.toast(
+    shown + (applied
+      ? '　→ 時給変更届のフッターに反映しました。'
+      : '　→ 保存しました（時給変更届はまだ無いので、作成時に反映されます）。'),
+    '店舗情報を保存しました', 6);
+}
+
+// 時給変更届シートのフッター（事業部名・店舗名・店長名）に、保存済みの店舗情報を書き込む。
+// 見出しラベルの行を探して名称セル（E列＝結合セルの先頭）に入れるので、行位置に依存しない。反映できたら true。
+function applyStoreInfoToSummary_(ss) {
+  const sh = ss.getSheetByName(SUMMARY_SHEET);
+  if (!sh) return false;
+  const info = getStoreInfo_();
+  const map  = { '事業部名': info.division, '店舗名': info.name, '店長名': info.manager };
+  const last = sh.getLastRow();
+  if (last < 1) return false;
+  const colA = sh.getRange(1, 1, last, 1).getValues();  // A列（結合セルの見出しはここに入る）
+  let updated = 0;
+  for (let r = 1; r <= last; r++) {
+    const lab = String(colA[r - 1][0]).trim();
+    if (Object.prototype.hasOwnProperty.call(map, lab)) {
+      sh.getRange(r, 5).setValue(map[lab]);  // 名称セル（E〜M列の結合＝先頭はE列）
+      updated++;
+    }
+  }
+  return updated > 0;
 }
 
 // ------------------------------------------------------------
