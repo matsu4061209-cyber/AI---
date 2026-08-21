@@ -299,7 +299,14 @@ function processRetirement(hpcd,dateStr){
     var ad=as.getDataRange().getValues();
     for(var j=ad.length-1;j>=1;j--){if(String(ad[j][COL_HPCD-1])===hpcd){as.deleteRow(j+1);break;}}
   }
-  return staffName+' の退職処理が完了しました\n退職日: '+Utilities.formatDate(rd,'Asia/Tokyo','yyyy/MM/dd');
+  // 退職者シートへ自動反映（マスタの退社日ありを作り直す）
+  var resignedMsg='';
+  try{
+    var rn=rebuildResignedList_();
+    resignedMsg=(rn>=0)?('\n退職者シートに反映しました（計 '+rn+' 名）')
+                       :'\n※退職者シートが見つからず反映できませんでした';
+  }catch(e){ resignedMsg='\n※退職者シートの反映でエラー: '+e.message; }
+  return staffName+' の退職処理が完了しました\n退職日: '+Utilities.formatDate(rd,'Asia/Tokyo','yyyy/MM/dd')+resignedMsg;
 }
 
 function showEditStaffForm(){
@@ -560,14 +567,29 @@ function formatForA4(){
 }
 
 function formatResignedList(){
+  var n=rebuildResignedList_();
+  if(n<0){SpreadsheetApp.getUi().alert('「'+MASTER_SHEET+'」または「'+RESIGNED_SHEET+'」シートが見つかりません');return;}
+  SpreadsheetApp.getUi().alert('整形完了！（退職者 '+n+' 名）\n\n印刷: ファイル → 印刷\n・用紙: A4・横\n・拡大縮小: ページ幅に合わせる');
+}
+
+// 退職者シートをマスタ（退社日あり）から作り直す。件数を返す。シートが無ければ -1。
+// ※UI（alert等）は出さない ＝ 退職処理（ダイアログ実行中）からも安全に呼べる
+function rebuildResignedList_(){
   var ss=SpreadsheetApp.getActiveSpreadsheet();
   var master=ss.getSheetByName(MASTER_SHEET);
   var sheet=ss.getSheetByName(RESIGNED_SHEET);
-  if(!master){SpreadsheetApp.getUi().alert('「'+MASTER_SHEET+'」シートが見つかりません');return;}
-  if(!sheet){SpreadsheetApp.getUi().alert('「'+RESIGNED_SHEET+'」シートが見つかりません');return;}
+  if(!master||!sheet)return -1;
   function skillLabel(s){if(s==='D')return 'デシャップ';if(s==='K')return 'キッチン';return s||'';}
   var rows=master.getDataRange().getValues().slice(1)
     .filter(function(r){return r[COL_HPCD-1]&&r[COL_NAME-1]&&r[COL_RESIGN-1];});
+  // 退職日順（古い→新しい）に並べ替え。日付でも文字列でも比較できるようにする
+  rows.sort(function(a,b){
+    var av=a[COL_RESIGN-1], bv=b[COL_RESIGN-1];
+    var at=(av instanceof Date)?av.getTime():(new Date(av)).getTime();
+    var bt=(bv instanceof Date)?bv.getTime():(new Date(bv)).getTime();
+    if(isNaN(at))at=0; if(isNaN(bt))bt=0;
+    return at-bt;
+  });
   sheet.clearContents();
   sheet.clearFormats();
   var hd=['No.','社員CD','HPCD','名前','性別','入社日','退社日','社歴','年齢','生年月日','クラスター','スキル','時給','区分','詳細','交通手段','上サイズ','貸与','靴サイズ','携帯番号'];
@@ -604,7 +626,7 @@ function formatResignedList(){
     if(sheet.getColumnWidth(c)<minW[c-1])sheet.setColumnWidth(c,minW[c-1]);
   }
   protectSheetWarning_(RESIGNED_SHEET);
-  SpreadsheetApp.getUi().alert('整形完了！（退職者 '+data.length+' 名）\n\n印刷: ファイル → 印刷\n・用紙: A4・横\n・拡大縮小: ページ幅に合わせる');
+  return data.length;
 }
 
 // ★CHECKLIST_SIZE★ チェックリストのサイズ切替（大＝A4に4枚／中＝6枚／小＝8枚・各枚とも同じ内容の空チェックリスト）

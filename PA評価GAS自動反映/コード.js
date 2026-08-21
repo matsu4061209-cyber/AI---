@@ -198,6 +198,9 @@ function onOpen() {
       .addItem('📊 時給変更届を更新（何度でも可）', 'updateSummarySheet')
       .addItem('🏢 店舗情報を変更（事業部名・店舗名・店長名）', 'setStoreInfo')
       .addItem('🖊️ 押印欄の役職名を変更', 'setStampTitles'))
+    .addSubMenu(ui.createMenu('📄 労働条件通知書')
+      .addItem('① 差し込みテンプレートを作成（初回のみ）', 'setupContractTemplate')
+      .addItem('② 全員ぶん作成（入力フォーム）', 'createContractNotices'))
     .addSubMenu(ui.createMenu('🏢 全体')
       .addItem('📄 PDF一括出力（提出時用）', 'exportAllPDFs')
       .addItem('📝 名簿に新クラスターを反映（上長申請後）', 'applyToRoster')
@@ -370,7 +373,9 @@ function fixChecksheetFormulas_(ss) {
 function authorizeNow() {
   UrlFetchApp.fetch('https://www.googleapis.com/discovery/v1/apis', { muteHttpExceptions: true });
   DriveApp.getRootFolder();  // Drive権限も確定
-  Logger.log('✅ 権限の承認が完了しました。スプレッドシートに戻って「PDF一括出力」を実行してください。');
+  // 労働条件通知書の差し込みで使う Docs 権限も確定（一時ドキュメントを作って即削除）
+  try { const d = DocumentApp.create('_auth_tmp'); DriveApp.getFileById(d.getId()).setTrashed(true); } catch (e) {}
+  Logger.log('✅ 権限の承認が完了しました。スプレッドシートに戻って操作を実行してください。');
 }
 
 // ------------------------------------------------------------
@@ -1690,6 +1695,414 @@ function runExportSelected(period, names, mode) {
 function safeSheetName_(name, idx) {
   const s = (idx + 1) + '_' + String(name).replace(/[\[\]\*\?\/\\:]/g, ' ');
   return s.substring(0, 90);
+}
+
+// ============================================================
+//  労働条件通知書：差し込み（メールマージ）★CONTRACT★
+//  ・元の通知書ドキュメントをコピーして {{目印}} 入りテンプレートを作る
+//  ・在籍者全員ぶんを、1つのドキュメントに 1人1ページで生成（本人用/店舗用は同内容＝印刷時に2部）
+// ============================================================
+const CONTRACT_TEMPLATE_NAME = '労働条件通知書テンプレート';
+
+// フォルダ内から元になる「労働条件通知書」のGoogleドキュメント（テンプレート・生成済みファイルを除く）を探す
+function findContractSourceDoc_(folder) {
+  const it = folder.getFilesByType(MimeType.GOOGLE_DOCS);
+  while (it.hasNext()) {
+    const f = it.next();
+    const nm = f.getName();
+    if (nm.indexOf('労働条件通知書') === -1) continue;
+    if (nm.indexOf('テンプレート') !== -1) continue;           // テンプレート自身は除外
+    if (/労働条件通知書_/.test(nm)) continue;                   // 生成済み完成ファイル（労働条件通知書_年月_日時）は除外
+    return f;
+  }
+  return null;
+}
+
+// フォルダ内の差し込みテンプレートを探す
+function findContractTemplate_(folder) {
+  const it = folder.getFilesByType(MimeType.GOOGLE_DOCS);
+  while (it.hasNext()) {
+    const f = it.next();
+    if (f.getName().indexOf(CONTRACT_TEMPLATE_NAME) !== -1) return f;
+  }
+  return null;
+}
+
+// 元ドキュメントのコピーに {{目印}} を差し込み位置へ埋める
+// ※ 空白の数に依存せず、必ず1か所だけに現れる目立つ文字列を手掛かりにする（確実性重視）
+function insertContractPlaceholders_(b) {
+  // 発行日（「令和8年　　月　　日」のように空白で日付が入っていない行）
+  b.replaceText('令和8年[\\s　]+月[\\s　]+日', '{{発行日}}');
+  // 氏名（この書類で「殿」は宛名の1か所だけ）
+  b.replaceText('殿', '{{氏名}}　殿');
+  // 事業所名称・所在地（ラベルの直後に差し込む）
+  b.replaceText('事業所名称・所在地', '事業所名称・所在地　{{事業所}}');
+  // 使用者職氏名（ラベルの直後に差し込む）
+  b.replaceText('使用者職氏名', '使用者職氏名　{{使用者}}');
+  // 契約期間（初回）の日付レンジ
+  b.replaceText('令和8年3月21日[\\s　]*～[\\s　]*令和8年9月20日', '{{契約開始}}　～　{{契約終了}}');
+  // 賃金：基本給 時間給 ◯◯円（研修時間給は空欄のまま触らない）
+  b.replaceText('基本給[\\s　]*時間給[\\s　]*円', '基本給　時間給　{{時給}}円');
+  // 就業の場所（入社時）の店名 … 置換だと $1 が使えないため、findTextで「入社時…店」を見つけ、
+  //   その「店」の直前に {{店名}} を挿入する（元の文字を壊さない）。就業の場所セルだけが該当。
+  const r = b.findText('入社時[^店]*店');
+  if (r) {
+    const el = r.getElement().asText();
+    el.insertText(r.getEndOffsetInclusive(), '{{店名}}');
+  }
+  // 事業所名称・使用者職氏名の行は右に寄りすぎて値が折り返すので、行頭の空白を減らし、値の後ろの余分な空白を削る
+  b.replaceText('[　 ]{5,}事業所名称', '　　　　　　事業所名称');
+  b.replaceText('[　 ]{5,}使用者職氏名', '　　　　　　使用者職氏名');
+  b.replaceText('\\{\\{事業所\\}\\}[　 ]+', '{{事業所}}');
+  b.replaceText('\\{\\{使用者\\}\\}[　 ]+', '{{使用者}}');
+
+  // ─── 有・無の選択を文字で固定（図形の○を使わず、不要な方は「・」ごと削って1つだけ残す）───
+  // ① 時間外労働の有無 … 人によって変わる（18歳以上=有／未成年=無）ので、ここでは目印だけ入れる
+  b.replaceText('時間外労働の有無[\\s　]*〔[\\s　]*有[\\s　]*・[\\s　]*無[\\s　]*〕', '時間外労働の有無{{時間外}}');
+  // ② 残りの〔 有 ・ 無 〕は「無」で固定（賃金の改定・賞与・退職金）
+  b.replaceText('〔[\\s　]*有[\\s　]*・[\\s　]*無[\\s　]*〕', '〔 無 〕');
+  // ③ 本契約からの労働条件の変更の有無 …「無」で固定（有（別紙のとおり）を削る）
+  b.replaceText('（[\\s　]*無[\\s　]*・[\\s　]*有（別紙のとおり）[\\s　]*）', '（ 無 ）');
+  // ④ 更新上限の有無 …「有」で固定
+  b.replaceText('（[\\s　]*無[\\s　]*・[\\s　]*有[\\s　]*）', '（ 有 ）');
+}
+
+// メニュー①：差し込みテンプレートを作成（1回だけ）
+function setupContractTemplate() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const folder = DriveApp.getFileById(ss.getId()).getParents().next();
+
+  const existing = findContractTemplate_(folder);
+  if (existing) {
+    const res = ui.alert('テンプレートを作り直しますか？',
+      '既存の「' + CONTRACT_TEMPLATE_NAME + '」を削除して、新しく作り直します。\n' +
+      '（手で加えた変更があれば消えます）\n\nよろしいですか？', ui.ButtonSet.YES_NO);
+    if (res !== ui.Button.YES) return;
+    DriveApp.getFileById(existing.getId()).setTrashed(true);
+  }
+  const src = findContractSourceDoc_(folder);
+  if (!src) {
+    ui.alert('元になる「労働条件通知書」のGoogleドキュメントが、このフォルダ内に見つかりません。\n（Word/.docxの見本ではなく、Googleドキュメント形式のものが必要です）');
+    return;
+  }
+  const copyFile = src.makeCopy(CONTRACT_TEMPLATE_NAME, folder);
+  const doc = DocumentApp.openById(copyFile.getId());
+  const body = doc.getBody();
+  insertContractPlaceholders_(body);
+  removeInlineImages_(body);   // 文中に貼られた画像（○など）を削除
+  doc.saveAndClose();
+  const removed = removeDrawings_(copyFile.getId());   // 浮動の図形（散らばる○）を削除
+
+  let note = '';
+  if (removed > 0)  note = '・散らばる○（図形）を' + removed + '個 自動で消しました。\n';
+  else if (removed === -1) note = '⚠️ 図形の自動削除でエラーが出ました（○が残る場合があります）。松山に連絡してください。\n';
+  else note = '・図形（○）は見つかりませんでした。\n';
+
+  ui.alert('✅ 差し込みテンプレートを作成しました：「' + CONTRACT_TEMPLATE_NAME + '」\n\n' +
+           note +
+           '・中に {{氏名}} {{時給}} などの目印を入れました。\n' +
+           '・有／無は正しい方だけを残しました。\n\n' +
+           '一度そのドキュメントを開いて確認し、問題なければ「② 全員ぶん作成」へ。');
+}
+
+// 文中のインライン画像（○などを画像で貼った場合）を削除
+function removeInlineImages_(body) {
+  try {
+    const imgs = body.getImages();
+    for (let i = 0; i < imgs.length; i++) { try { imgs[i].removeFromParent(); } catch (e) {} }
+  } catch (e) { console.log('インライン画像削除エラー: ' + e.message); }
+}
+
+// 浮動の図形（テキストに固定されず上に浮く○など）をDocs APIで削除。削除数を返す（エラーは-1）
+function removeDrawings_(docId) {
+  try {
+    const d = Docs.Documents.get(docId);
+    const reqs = [];
+    const po = d.positionedObjects || {};
+    Object.keys(po).forEach(id => reqs.push({ deletePositionedObject: { objectId: id } }));
+    if (reqs.length) Docs.Documents.batchUpdate({ requests: reqs }, docId);
+    return reqs.length;
+  } catch (e) {
+    console.log('浮動図形の削除エラー: ' + e.message);
+    return -1;
+  }
+}
+
+// 元号（西暦→令和の年）。2019=令和1。
+function reiwaYear_(gYear) { return gYear - 2018; }
+
+// 今日の日付を「令和◯年◯月◯日」で返す
+function todayReiwa_() {
+  const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone() || 'Asia/Tokyo';
+  const now = new Date();
+  const y = Number(Utilities.formatDate(now, tz, 'yyyy'));
+  const m = Number(Utilities.formatDate(now, tz, 'M'));
+  const d = Number(Utilities.formatDate(now, tz, 'd'));
+  return '令和' + reiwaYear_(y) + '年' + m + '月' + d + '日';
+}
+
+// 評価年月（例「2026年9月」）から、契約期間の初期値（開始・終了）を令和表記で返す
+function contractDatesFromPeriod_(period) {
+  const mMatch = String(period).match(/(\d{4})年(\d{1,2})月/);
+  if (!mMatch) return { start: '', end: '' };
+  const y = Number(mMatch[1]), mo = Number(mMatch[2]);
+  if (mo >= 7) {  // 9月評価 → 9/21〜翌3/20
+    return { start: '令和' + reiwaYear_(y) + '年9月21日', end: '令和' + reiwaYear_(y + 1) + '年3月20日' };
+  }
+  // 3月評価 → 3/21〜同年9/20
+  return { start: '令和' + reiwaYear_(y) + '年3月21日', end: '令和' + reiwaYear_(y) + '年9月20日' };
+}
+
+// 末尾の「店」を除く（テンプレートが {{店名}}店 なので二重の「店店」を防ぐ）
+function stripTrailingTen_(s) {
+  s = String(s == null ? '' : s).trim();
+  return (s.slice(-1) === '店') ? s.slice(0, -1) : s;
+}
+
+// メニュー②：入力フォームを開く（google.script.run 用の初期値も返す）
+function createContractNotices() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const folder = DriveApp.getFileById(ss.getId()).getParents().next();
+  if (!findContractTemplate_(folder)) {
+    ui.alert('先に「① 差し込みテンプレートを作成」を実行してください。');
+    return;
+  }
+  const histSh = ss.getSheetByName(HISTORY_SHEET);
+  const histData = (histSh && histSh.getLastRow() >= 2) ? histSh.getRange(2, 1, histSh.getLastRow() - 1, 14).getValues() : [];
+  const periods = [...new Set(histData.map(r => normalizePeriod_(r[1])).filter(Boolean))].sort().reverse();
+  if (periods.length === 0) { ui.alert('評価データがありません。先に評価を保存してください。'); return; }
+
+  const info = getStoreInfo_();
+  const address = PropertiesService.getDocumentProperties().getProperty('STORE_ADDRESS') || '';
+  const d0 = contractDatesFromPeriod_(periods[0]);
+  const init = {
+    periods: periods,
+    issueDate: todayReiwa_(),
+    contractStart: d0.start,
+    contractEnd: d0.end,
+    jigyosho: info.name || '',
+    address: address,
+    employer: info.manager || '',
+    storeName: info.name || ''
+  };
+  const html = HtmlService.createHtmlOutput(buildContractFormHtml_(init)).setWidth(420).setHeight(600);
+  ui.showModalDialog(html, '📄 労働条件通知書を作成');
+}
+
+// 入力フォームのHTML
+function buildContractFormHtml_(init) {
+  const periodOpts = init.periods.map(p => `<option value="${p}">${p}</option>`).join('');
+  const j = JSON.stringify(init);
+  return `<style>
+      body{font-family:sans-serif;margin:0;padding:16px;font-size:13px;color:#333;}
+      label{display:block;margin:10px 0 3px;font-weight:700;}
+      input,select{width:100%;box-sizing:border-box;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:6px;}
+      .hint{color:#888;font-weight:400;font-size:11px;}
+      .go{width:100%;margin-top:16px;padding:12px;font-size:15px;border:none;background:#1a73e8;color:#fff;border-radius:6px;cursor:pointer;}
+      #msg{display:none;text-align:center;color:#1a73e8;margin-top:10px;white-space:pre-wrap;}
+      .close{display:none;width:100%;margin-top:12px;padding:9px;border:none;background:#1a73e8;color:#fff;border-radius:6px;cursor:pointer;}
+    </style>
+    <div id="form">
+      <label>評価年月（時給を引く元）</label>
+      <select id="period" onchange="recalc()">${periodOpts}</select>
+      <label>発行日 <span class="hint">（作成日）</span></label>
+      <input id="issueDate" value="${init.issueDate}">
+      <label>契約期間 開始</label>
+      <input id="contractStart" value="${init.contractStart}">
+      <label>契約期間 終了</label>
+      <input id="contractEnd" value="${init.contractEnd}">
+      <label>事業所名称 <span class="hint">（店舗名）</span></label>
+      <input id="jigyosho" value="${init.jigyosho}">
+      <label>所在地（住所） <span class="hint">改行して表示されます</span></label>
+      <input id="address" value="${init.address}" placeholder="例：福岡県飯塚市○○1-2-3">
+      <label>使用者職氏名 <span class="hint">（店長名。交代時は新店長）</span></label>
+      <input id="employer" value="${init.employer}">
+      <label>入社時の店名</label>
+      <input id="storeName" value="${init.storeName}">
+      <button class="go" onclick="go()">在籍者全員ぶん作成する</button>
+    </div>
+    <div id="msg"></div>
+    <button id="closeBtn" class="close" onclick="google.script.host.close()">閉じる</button>
+    <script>
+      var INIT = ${j};
+      function reiwa(y){ return y - 2018; }
+      function recalc(){
+        var p = document.getElementById('period').value;
+        var m = p.match(/(\\d{4})年(\\d{1,2})月/);
+        if(!m) return;
+        var y = Number(m[1]), mo = Number(m[2]);
+        var s, e;
+        if(mo >= 7){ s='令和'+reiwa(y)+'年9月21日'; e='令和'+reiwa(y+1)+'年3月20日'; }
+        else { s='令和'+reiwa(y)+'年3月21日'; e='令和'+reiwa(y)+'年9月20日'; }
+        document.getElementById('contractStart').value = s;
+        document.getElementById('contractEnd').value = e;
+      }
+      function go(){
+        var o = {
+          period: document.getElementById('period').value,
+          issueDate: document.getElementById('issueDate').value,
+          contractStart: document.getElementById('contractStart').value,
+          contractEnd: document.getElementById('contractEnd').value,
+          jigyosho: document.getElementById('jigyosho').value,
+          address: document.getElementById('address').value,
+          employer: document.getElementById('employer').value,
+          storeName: document.getElementById('storeName').value
+        };
+        document.getElementById('form').style.display='none';
+        var msg=document.getElementById('msg'); msg.style.display='block';
+        msg.textContent='作成しています…\\nしばらくお待ちください（人数により2分ほどかかることがあります）。';
+        google.script.run
+          .withSuccessHandler(function(res){ msg.textContent=res; document.getElementById('closeBtn').style.display='block'; })
+          .withFailureHandler(function(err){ msg.style.color='#d33'; msg.textContent='エラー: '+err.message; document.getElementById('closeBtn').style.display='block'; })
+          .runCreateContracts(o);
+      }
+    </script>`;
+}
+
+// 実際の生成（google.script.run 用・末尾 _ なし）。在籍者全員ぶんを1つのドキュメントに、1人1ページで作る（本人用/店舗用は同内容＝印刷時に2部）。
+function runCreateContracts(o) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  o = o || {};
+  const period = o.period;
+
+  const built = buildSummaryRows_(ss, period);
+  if (!built.rows.length) return '在籍スタッフが取得できませんでした。';
+
+  const folder = DriveApp.getFileById(ss.getId()).getParents().next();
+  const template = findContractTemplate_(folder);
+  if (!template) return '先に「① 差し込みテンプレートを作成」を実行してください。';
+
+  // 住所を記憶（次回の初期値に）
+  PropertiesService.getDocumentProperties().setProperty('STORE_ADDRESS', String(o.address || ''));
+
+  const tenVal = stripTrailingTen_(o.storeName);
+
+  const tz = ss.getSpreadsheetTimeZone() || 'Asia/Tokyo';
+  const stamp = Utilities.formatDate(new Date(), tz, 'yyyyMMdd-HHmm');
+  const combined = DocumentApp.create('労働条件通知書_' + period + '_' + stamp);
+  const cbody = combined.getBody();
+
+  // テンプレートは1回だけ開いて中身を使い回す（コピーを作らない＝速い）
+  const templBody = DocumentApp.openById(template.getId()).getBody();
+
+  // ページ設定（用紙サイズ・余白）をテンプレートに合わせる（右ずれ・左余白の広すぎを解消）
+  try {
+    cbody.setPageWidth(templBody.getPageWidth());
+    cbody.setPageHeight(templBody.getPageHeight());
+    cbody.setMarginTop(templBody.getMarginTop());
+    cbody.setMarginBottom(templBody.getMarginBottom());
+    cbody.setMarginLeft(templBody.getMarginLeft());
+    cbody.setMarginRight(templBody.getMarginRight());
+  } catch (e) { console.log('ページ設定コピー失敗: ' + e.message); }
+
+  const tn = templBody.getNumChildren();
+  // 末尾の空段落を除いた「最後の実質要素」までを貼る（空白ページの原因を除去）
+  let lastIdx = tn - 1;
+  while (lastIdx >= 0) {
+    const el = templBody.getChild(lastIdx);
+    if (el.getType() === DocumentApp.ElementType.PARAGRAPH &&
+        el.asParagraph().getText().replace(/[\s　]/g, '').length === 0) { lastIdx--; }
+    else break;
+  }
+
+  let first = true;
+  let count = 0;
+
+  built.rows.forEach(r => {
+    // 1人1ページ（本人用/店舗用は内容が同じ＝印刷時に2部で出す）。処理を軽くして確実に完了させる
+    if (!first) cbody.appendPageBreak();  // 2ページ目以降は改ページ
+    for (let i = 0; i <= lastIdx; i++) appendContractElement_(cbody, templBody.getChild(i));
+    first = false;
+    // この人ぶんだけ埋める（前の人は埋め済みなので、残っている目印は今の人ぶんだけ）
+    const ageNum = parseInt(String(r.age).replace(/[^0-9]/g, ''), 10);
+    let jikangaiVal;
+    if (!isNaN(ageNum) && ageNum >= 18)     jikangaiVal = '〔 有 〕';
+    else if (!isNaN(ageNum) && ageNum < 18) jikangaiVal = '〔 無 〕';
+    else                                    jikangaiVal = '〔 有 ・ 無 〕';
+    cbody.replaceText('\\{\\{氏名\\}\\}', String(r.name || ''));
+    cbody.replaceText('\\{\\{時給\\}\\}', Number(r.newW || 0).toLocaleString());
+    cbody.replaceText('\\{\\{時間外\\}\\}', jikangaiVal);
+    count++;
+  });
+
+  // 全員共通の項目は最後に一括で埋める（1回ずつで済む）
+  cbody.replaceText('\\{\\{発行日\\}\\}', String(o.issueDate || ''));
+  cbody.replaceText('\\{\\{使用者\\}\\}', String(o.employer || ''));
+  cbody.replaceText('\\{\\{契約開始\\}\\}', String(o.contractStart || ''));
+  cbody.replaceText('\\{\\{契約終了\\}\\}', String(o.contractEnd || ''));
+  // 入社時の店名：（入社時）と店名の間の空白を1つに減らす（左の空きすぎを解消）
+  cbody.replaceText('（入社時）[\\s　]*\\{\\{店名\\}\\}', '（入社時）　{{店名}}');
+  cbody.replaceText('\\{\\{店名\\}\\}', tenVal);
+
+  // 事業所名称・所在地を「事業所名称／所在地」の2行に分け、値の開始位置を縦にそろえる（ラベルを全角7桁に統一）
+  const jigyoshoBlock = '事業所名称　　' + String(o.jigyosho || '')
+      + (o.address ? '\n所在地　　　　' + String(o.address) : '');
+  cbody.replaceText('[　 ]*事業所名称・所在地[\\s　]*\\{\\{事業所\\}\\}', jigyoshoBlock);
+  // 使用者職氏名の行：先頭の余分な空白を除去（ラベルは既に全角1つ空きで値が8桁目に揃う）
+  cbody.replaceText('[　 ]*使用者職氏名', '使用者職氏名');
+
+  // 氏名（〜殿）は左端へ、事業所名称・所在地・使用者職氏名の3行は左そろえに
+  cbody.getParagraphs().forEach(p => {
+    const t = p.getText();
+    if (!t) return;
+    if (t.indexOf('殿') !== -1) {
+      p.setAlignment(DocumentApp.HorizontalAlignment.LEFT);
+      try { p.setIndentStart(0); p.setIndentFirstLine(0); } catch (e) {}
+      const te = p.editAsText();
+      const m = te.getText().match(/^[\s　]+/);
+      if (m) te.deleteText(0, m[0].length - 1);
+    } else if (t.indexOf('使用者職氏名') !== -1) {
+      // 左そろえのまま右側へ寄せる。値の下線（松山 貴志）を消す
+      p.setAlignment(DocumentApp.HorizontalAlignment.LEFT);
+      try { p.setIndentStart(265); p.setIndentFirstLine(265); } catch (e) {}
+      try { p.editAsText().setUnderline(false); } catch (e) {}
+    } else if (t.indexOf('事業所名称') !== -1) {
+      // 左そろえのまま、ブロックごと右側へ寄せる（見本と同じ位置）。値は全角スペースで縦にそろう
+      p.setAlignment(DocumentApp.HorizontalAlignment.LEFT);
+      try { p.setIndentStart(265); p.setIndentFirstLine(265); } catch (e) {}
+    }
+  });
+
+  // 先頭の空段落を除去
+  if (cbody.getNumChildren() > 1) {
+    const f = cbody.getChild(0);
+    if (f.getType() === DocumentApp.ElementType.PARAGRAPH && f.asParagraph().getText() === '') cbody.removeChild(f);
+  }
+  combined.saveAndClose();
+
+  // 出力ドキュメントをフォルダへ移動
+  const file = DriveApp.getFileById(combined.getId());
+  folder.addFile(file);
+  try { DriveApp.getRootFolder().removeFile(file); } catch (e) {}
+
+  return '✅ 労働条件通知書を作成しました（' + period + '）\n\n' +
+         '・対象：在籍者 ' + count + '名（1人1ページ）\n' +
+         '・ファイル名：「労働条件通知書_' + period + '_' + stamp + '」\n\n' +
+         '★印刷のとき「部数：2」にすると、本人用・店舗用の2部が全員ぶん出ます。\n' +
+         '（本人用・店舗用は内容が同じなので、2部刷ればOKです）\n\n' +
+         'フォルダ内にできています。開いて確認してください。';
+}
+
+// コピー元の本文要素を、まとめ先ドキュメントへ種類別に追加
+function appendContractElement_(body, element) {
+  const t = element.getType();
+  if (t === DocumentApp.ElementType.TABLE)     { body.appendTable(element.asTable().copy()); return; }
+  if (t === DocumentApp.ElementType.LIST_ITEM) { body.appendListItem(element.asListItem().copy()); return; }
+  if (t !== DocumentApp.ElementType.PARAGRAPH) return;
+  const p = element.asParagraph();
+  const hasText = p.getText().replace(/[\s　]/g, '').length > 0;
+  let hasInlineImage = false;
+  for (let i = 0; i < p.getNumChildren(); i++) {
+    if (p.getChild(i).getType() === DocumentApp.ElementType.INLINE_IMAGE) hasInlineImage = true;
+  }
+  // 浮動の図形（散らばる丸など）を持つか
+  let hasFloating = false;
+  try { hasFloating = p.getPositionedImages().length > 0; } catch (e) {}
+  // 文字が無く画像だけの段落は入れない（＝空ページに散らばる丸の元）
+  if (!hasText && (hasInlineImage || hasFloating)) return;
+  body.appendParagraph(p.copy());
 }
 
 // 実際のPDF生成。結果メッセージ（文字列）を返す。※ getUi は使わない（選択画面から呼ばれるため）

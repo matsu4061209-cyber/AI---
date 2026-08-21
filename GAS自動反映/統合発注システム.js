@@ -145,6 +145,7 @@ function onOpen() {
     { name: 'イベント追加フォーム',            functionName: 'showEventForm_' },
     { name: 'キャンペーン商品の登録フォーム',   functionName: 'showCpForm_' },
     { name: 'CPの実績出食率を今すぐ更新（CP設定に書き出す）', functionName: 'updateCpServingRatesNow' },
+    { name: '過去CP実績を今のCPに引き継ぐ（部分一致だけ確認）', functionName: 'linkPastCpNow' },
     { name: '暫定日イベントの日付確認メールを今すぐ送る', functionName: 'remindProvisionalEventsNow_' },
     { name: 'デバッグ：未登録コード診断メール', functionName: 'debugMenuCodes_' },
     null,
@@ -1257,6 +1258,7 @@ function buildIngredientDailyUsage() {
   });
 
   // CP設定シート読込（日付指定CP と 繰り返しCP を区別して収集）
+  const cpArchive = loadCpArchive_(ss);   // 過去CPの実測出食率（次の同/似CPの初期値に使う）MARKER_CP_ARCHIVE
   const cpList = [], endedProductMap = {}, repeatCpList = [];
   const cpSettingSheet = ss.getSheetByName('CP設定');
   if (cpSettingSheet && cpSettingSheet.getLastRow() > 1) {
@@ -1269,7 +1271,11 @@ function buildIngredientDailyUsage() {
       if (typeof row[3] === 'number') { codes = [Math.round(row[3])]; }
       else { codes = String(row[3] || '').split(/[,\.，．、･・\s]+/).flatMap(c => { c = c.trim(); const m = c.match(/^(\d+)-(\d+)$/); if (m) { const arr = []; for (let n = Number(m[1]); n <= Number(m[2]); n++) arr.push(n); return arr; } const n = Number(c); return n > 0 ? [n] : []; }); }   // 区切りはカンマ/ピリオド/全角どれでも（コードは整数なので安全。入力ミス耐性）
       if (codes.length === 0) return;
-      const setServingRate = Number(row[4]) || 0.10; // E列: 参考値（実績なし時のフォールバック）
+      // E列(想定)が入っていればそれを優先。空なら過去CPの完全一致（コード重複orCP名一致）実績を初期値に。無ければ0.10。MARKER_CP_ARCHIVE
+      const rawE_ = row[4];
+      const hasManualE_ = rawE_ !== '' && rawE_ !== null && rawE_ !== undefined && !isNaN(Number(rawE_)) && Number(rawE_) > 0;
+      const archiveSeed_ = hasManualE_ ? null : cpArchiveExactSeed_(cpArchive, cpName, codes);
+      const setServingRate = hasManualE_ ? Number(rawE_) : ((archiveSeed_ !== null && archiveSeed_ > 0) ? archiveSeed_ : 0.10); // E列: 想定／過去実績／既定0.10
       const repeat = (row[6] || '').toString().trim();
       const startDate = row[1] instanceof Date ? row[1] : (row[1] ? new Date(String(row[1]).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
       const endDate   = row[2] instanceof Date ? row[2] : (row[2] ? new Date(String(row[2]).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
@@ -1374,6 +1380,8 @@ function buildIngredientDailyUsage() {
     });
     // 実績の出食率をCP設定シートに書き戻して「見える化」（想定E列と並べて確認できる）。MARKER_CP_SERVING_ACTUAL
     try { writeCpServingRateBack_(ss, cpServingActual); } catch (e) { console.log('CP実績出食率の書き戻しスキップ: ' + e.message); }
+    // 実績を永久アーカイブへ保存（28日で切り捨てられる前に確保。次の同/似CPの初期値に使う）。MARKER_CP_ARCHIVE
+    try { upsertCpArchive_(ss, allCpItems, cpServingActual); } catch (e) { console.log('CPアーカイブ更新スキップ: ' + e.message); }
   }
 
   // 繰り返しCPを直近5日の対象日に展開して cpList へ追加（食材発注計算に組み込む）
@@ -1627,6 +1635,187 @@ function writeCpServingRateBack_(ss, cpServingActual) {
     return [info.hasActual ? info.actual : '', info.days || 0, (info.adopted !== undefined && info.adopted !== '') ? info.adopted : ''];
   });
   sh.getRange(2, 14, out.length, 3).setValues(out);
+}
+
+// ===== CP実績アーカイブ（過去CPの実測出食率を永久保存し、次の同/似CPの初期値に引き継ぐ）MARKER_CP_ARCHIVE =====
+//   目的：日付固定の単発CP（ワイルド・にんにく等）は毎回まっさら＝前回実績を覚えない。28日で切り捨てる前に
+//         実測出食率をこのシートへ保存し、次に同じ/似たCPが来たら初期値（想定）に使う。肉の日(繰返し)と同じ思想を拡張。
+//   完全一致（商品コード重複 or CP名完全一致）＝自動適用。部分一致（特徴語の共通）＝メニューで確認してから適用。
+const CP_ARCHIVE_SHEET = 'CP実績アーカイブ';
+const CP_ARCHIVE_HEADERS = ['CP名', '商品コード', '実績出食率', '集計日数', '最終終了日', '更新日'];
+// CP名照合で無視する汎用語（多くの商品名に共通＝これだけの一致では同一と見なさない）
+const CP_MATCH_STOPWORDS = ['ステーキ', 'ペッパーライス', 'ペッパー', 'ライス', 'セット', 'キャンペーン', 'フェア', '弁当', 'ドリンク', '限定', 'スパイシー', 'spicy', 'ｽﾊﾟｲｼｰ', 'cp', 'pr'];
+
+function ensureCpArchiveSheet_(ss) {
+  let sh = ss.getSheetByName(CP_ARCHIVE_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(CP_ARCHIVE_SHEET);
+    sh.getRange(1, 1, 1, CP_ARCHIVE_HEADERS.length).setValues([CP_ARCHIVE_HEADERS]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(1, 260);
+  }
+  // 商品コード列(B)は常にテキスト＝「4982,4983,…」を桁区切り数値と誤認させない（MARKER_CP_ARCHIVE）
+  sh.getRange(1, 2, sh.getMaxRows(), 1).setNumberFormat('@');
+  return sh;
+}
+
+// 商品コード文字列 → 整数配列（CP設定D列と同じパーサ）
+function parseCpCodes_(s) {
+  if (typeof s === 'number') return [Math.round(s)];
+  return String(s || '').split(/[,\.，．、･・\s]+/).flatMap(c => {
+    c = c.trim(); const m = c.match(/^(\d+)-(\d+)$/);
+    if (m) { const a = []; for (let n = Number(m[1]); n <= Number(m[2]); n++) a.push(n); return a; }
+    const n = Number(c); return n > 0 ? [n] : [];
+  });
+}
+
+function loadCpArchive_(ss) {
+  const sh = ss.getSheetByName(CP_ARCHIVE_SHEET);
+  const entries = [];
+  if (!sh || sh.getLastRow() < 2) return { entries };
+  sh.getRange(2, 1, sh.getLastRow() - 1, CP_ARCHIVE_HEADERS.length).getValues().forEach(r => {
+    const name = String(r[0] || '').trim(); if (!name) return;
+    entries.push({
+      name,
+      codes: parseCpCodes_(r[1]),
+      rate: Number(r[2]) || 0,
+      days: Number(r[3]) || 0,
+      endDate: r[4] instanceof Date ? r[4] : (r[4] ? new Date(r[4]) : null),
+      updated: r[5] instanceof Date ? r[5] : (r[5] ? new Date(r[5]) : null)
+    });
+  });
+  return { entries };
+}
+
+// 完全一致（商品コード重複 または CP名完全一致）で過去実績の出食率を返す。無ければnull。最新回を優先。
+function cpArchiveExactSeed_(archive, name, codes) {
+  if (!archive || !archive.entries.length) return null;
+  const nm = String(name || '').trim();
+  const codeSet = new Set(codes || []);
+  let best = null;
+  archive.entries.forEach(e => {
+    if (e.rate <= 0) return;
+    const codeHit = e.codes.some(c => codeSet.has(c));
+    const nameHit = e.name === nm;
+    if (!codeHit && !nameHit) return;
+    const et = e.updated ? e.updated.getTime() : 0;
+    const bt = best && best.updated ? best.updated.getTime() : -1;
+    if (!best || et > bt) best = e;
+  });
+  return best ? best.rate : null;
+}
+
+// CP名の「特徴部分」（汎用語・記号を除いた核）
+function cpNameCore_(name) {
+  let s = String(name || '').toLowerCase();
+  CP_MATCH_STOPWORDS.forEach(w => { s = s.split(w.toLowerCase()).join(''); });
+  return s.replace(/[^0-9a-zぁ-んァ-ヶ一-龠ー]/g, '');
+}
+// 2文字以上の最長共通部分文字列の長さ
+function longestCommonSubstrLen_(a, b) {
+  if (!a || !b) return 0;
+  let best = 0;
+  for (let i = 0; i < a.length; i++) {
+    for (let j = 0; j < b.length; j++) {
+      let k = 0;
+      while (i + k < a.length && j + k < b.length && a[i + k] === b[j + k]) k++;
+      if (k > best) best = k;
+    }
+  }
+  return best;
+}
+// 部分一致候補（完全一致＝コード重複/CP名一致 は除く）。確認用。共通核が3文字以上。
+function cpArchiveFuzzyCandidates_(archive, name, codes) {
+  if (!archive || !archive.entries.length) return [];
+  const nm = String(name || '').trim();
+  const codeSet = new Set(codes || []);
+  const core = cpNameCore_(nm);
+  const out = [];
+  archive.entries.forEach(e => {
+    if (e.rate <= 0) return;
+    if (e.name === nm) return;
+    if (e.codes.some(c => codeSet.has(c))) return;
+    const lcs = longestCommonSubstrLen_(core, cpNameCore_(e.name));
+    if (lcs >= 3) out.push({ name: e.name, rate: e.rate, days: e.days, lcs });
+  });
+  out.sort((a, b) => (b.lcs - a.lcs) || (b.days - a.days));
+  return out;
+}
+
+// 実績のあるCPをアーカイブへupsert（キー＝CP名）。新しい回・同じ回の更新は上書き、古い回は保持。
+function upsertCpArchive_(ss, allCpItems, cpServingActual) {
+  const items = allCpItems.filter(cp => {
+    const info = cpServingActual[cp.name];
+    return info && info.hasActual && info.days >= 1 && info.actual > 0;
+  });
+  if (!items.length) return;
+  const sh = ensureCpArchiveSheet_(ss);
+  const lr = sh.getLastRow();
+  const existing = lr >= 2 ? sh.getRange(2, 1, lr - 1, CP_ARCHIVE_HEADERS.length).getValues() : [];
+  const idxByName = {};
+  existing.forEach((r, i) => { const n = String(r[0] || '').trim(); if (n) idxByName[n] = i; });
+  const now = new Date();
+  const appends = [];
+  items.forEach(cp => {
+    const info = cpServingActual[cp.name];
+    const codeStr = (cp.codes || []).join(',');
+    const endD = cp.endDate instanceof Date ? cp.endDate : '';
+    const rowVals = [cp.name, codeStr, info.actual, info.days, endD, now];
+    if (idxByName[cp.name] !== undefined) {
+      const i = idxByName[cp.name];
+      const prevEnd = existing[i][4] instanceof Date ? existing[i][4] : (existing[i][4] ? new Date(existing[i][4]) : null);
+      const newEnd = endD instanceof Date ? endD : null;
+      // 新しい回 or 同じ回の再集計 or どちらか繰り返し(終了日なし) → 最新化。古い回は保持。
+      const doUpdate = (!newEnd || !prevEnd) ? true : (newEnd.getTime() >= prevEnd.getTime());
+      if (doUpdate) {
+        sh.getRange(2 + i, 2).setNumberFormat('@');   // コードはテキスト固定してから書く
+        sh.getRange(2 + i, 1, 1, CP_ARCHIVE_HEADERS.length).setValues([rowVals]);
+      }
+    } else {
+      appends.push(rowVals);
+    }
+  });
+  if (appends.length) {
+    const startRow = sh.getLastRow() + 1;
+    sh.getRange(startRow, 2, appends.length, 1).setNumberFormat('@');   // コードはテキスト固定してから書く
+    sh.getRange(startRow, 1, appends.length, CP_ARCHIVE_HEADERS.length).setValues(appends);
+  }
+}
+
+// 【手動】部分一致の過去CPを、今のCPの想定(E列)に引き継ぐか確認して反映する。完全一致は自動なので確認しない。
+function linkPastCpNow() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName('CP設定');
+  const ui = SpreadsheetApp.getUi();
+  if (!sh || sh.getLastRow() < 2) { ui.alert('CP設定シートがありません。'); return; }
+  const archive = loadCpArchive_(ss);
+  if (!archive.entries.length) { ui.alert('CP実績アーカイブがまだ空です。\n先に「CPの実績出食率を今すぐ更新」または発注計算を1回実行すると貯まります。'); return; }
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const rows = sh.getRange(2, 1, sh.getLastRow() - 1, 9).getValues();
+  let asked = 0, applied = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const name = String(r[0] || '').trim(); if (!name) continue;
+    if ((r[8] || '').toString().trim() === '休止') continue;
+    const endRaw = r[2];
+    const endD = endRaw instanceof Date ? endRaw : (endRaw ? new Date(String(endRaw).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
+    if (endD && endD < today) continue; // 終了済みは対象外（これから/実施中のみ）
+    const rawE = r[4];
+    if (rawE !== '' && rawE !== null && !isNaN(Number(rawE)) && Number(rawE) > 0) continue; // 手動想定済みはスキップ
+    const codes = parseCpCodes_(r[3]);
+    if (cpArchiveExactSeed_(archive, name, codes) !== null) continue; // 完全一致は自動適用のため確認不要
+    const cand = cpArchiveFuzzyCandidates_(archive, name, codes);
+    if (!cand.length) continue;
+    const c = cand[0];
+    asked++;
+    const res = ui.alert('過去CPの実績を引き継ぎますか？',
+      '今のCP：「' + name + '」\n\n似た過去CP：「' + c.name + '」\n実績出食率：' + c.rate + '（' + c.days + '日ぶんの実測）\n\nこの実績を今のCPの想定（E列）に入れますか？\n（違う場合は「いいえ」）',
+      ui.ButtonSet.YES_NO);
+    if (res === ui.Button.YES) { sh.getRange(2 + i, 5).setValue(c.rate); applied++; }
+  }
+  ui.alert(asked === 0
+    ? '部分一致の候補はありませんでした。\n（同じ商品コード／同じCP名の「完全一致」は、発注計算のときに自動で引き継ぎます。）'
+    : ('確認 ' + asked + '件中 ' + applied + '件を今のCPの想定(E列)に反映しました。\n次の発注計算から効きます。'));
 }
 
 // 【手動】CPの実績出食率を今すぐ再計算してCP設定シートに書き出す（テスト・確認用）。
@@ -2904,7 +3093,20 @@ function buildSalesForecast() {
     //     （因果検証：全体プール 週MAPE3.9% < 曜日別4.9%、生11.6%）。
     //   過去日（実績確定）→ 補正しない（生の予測。ただし下で“届けた予測”があればそれを凍結する）
     const biasAdj = isPast ? 1.0 : (recentBiasCoeff.overall || 1.0);
-    const rawForecast = Math.round(baseAvg * eventRate * weatherRate * monthPattern * postEndCoeff * longTrend * biasAdj * monthCoeff);
+    // ★二重計上の抑制（MARKER_SOFTCOEF_SHRINK）：
+    //   baseAvg は同曜日EWMA＝既に直近水準を反映済み。そこへ longTrend(直近÷長期) と
+    //   monthPattern(月内位置) を素で掛けると、同じ直近の伸びを2〜3回数えて過大になる
+    //   （実測検証：合成係数が需要を系統的に上振れ。効かせ具合 w=0.3〜0.5 で平日MAPE最小、
+    //     合成上限 1.15〜1.2 で直近90日の平日MAPEが 16.4%→15.1〜15.3% に改善。悪化なし）。
+    //   → 2係数の合成を 0.3強度に縮小し [0.80,1.20] で頭打ちにする。
+    //     postEndCoeff(CP明けの実減) は別要因なので縮小・上限の対象外。
+    //   強度は as-of再現バックテストで最適化：基準ウィンザライズ後、平日MAPEは STR→0 まで単調に
+    //   下がる（係数はほぼ寄与しない）。0と0.3は統計的に同等のため、月内・トレンドの弱い信号を
+    //   完全には捨てず 0.3 を採用（平日24.4% / 週末16.6%、いずれも現状比で改善）。
+    const COEF_STRENGTH = 0.3, COEF_MIN = 0.80, COEF_MAX = 1.20;
+    const softTM    = longTrend * monthPattern;
+    const softTMadj = Math.min(COEF_MAX, Math.max(COEF_MIN, 1 + (softTM - 1) * COEF_STRENGTH));
+    const rawForecast = Math.round(baseAvg * eventRate * weatherRate * softTMadj * postEndCoeff * biasAdj * monthCoeff);
 
     const actualData  = salesMap[dateStr];
     const actualSales = (actualData && actualData.sales > 0) ? actualData.sales : '';
@@ -2919,7 +3121,7 @@ function buildSalesForecast() {
     else if (!isPast && wt === 'none') status = '天候未定';
     else                               status = '予測';
 
-    const combinedCoeff = Math.round(longTrend * monthPattern * postEndCoeff * 100) / 100;
+    const combinedCoeff = Math.round(softTMadj * postEndCoeff * 100) / 100;
     forecastRows.push([new Date(cur2), dow, dowName, Math.round(baseAvg), holidayBase, eventRate, weatherRate, combinedCoeff, forecast, status, actualSales, errorRate]);
 
     cur2.setDate(cur2.getDate() + 1);
@@ -3076,52 +3278,57 @@ function buildExcludedDates_(ss) {
 // 曜日別加重平均・各種係数計算
 // ─────────────────────────────────────────────────────────────────────
 
+// ★同曜日EWMA基準のウィンザライズ（MARKER_WINSOR_BASE）
+//   一過性スパイク（祝日前日・イベント・お盆前の駆け込み等）が同曜日EWMA基準を過大にし、
+//   翌週以降の予測・発注を押し上げる問題への恒久対策。各サンプルを「その曜日サンプルの中央値」の
+//   [0.6, 1.5]倍で頭打ち（ウィンザライズ）してから指数加重する。単発の外れ値には鈍く、
+//   本当の水準変化（複数日が動く）にはそのまま追随する。
+//   実測検証（as-of再現バックテスト）：平日基準MAPE 26.1%→23.7%、直近90日 20.4%→19.4%（悪化なし）。
+const DOW_WINSOR_LO = 0.6, DOW_WINSOR_HI = 1.5;
+function dowMedian_(arr) {
+  if (!arr.length) return 0;
+  const a = arr.slice().sort((x, y) => x - y);
+  const n = a.length;
+  return n % 2 ? a[(n - 1) / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
+}
+// asOf時点から遡り、同曜日の売上を最大maxWeeks件収集→中央値でウィンザライズ→α指数加重平均
+function winsorizedEwmaDow_(salesMap, excludedDates, asOf, dow, alpha, maxWeeks) {
+  const vals = [];
+  for (let daysBack = 1; daysBack <= maxWeeks * 7 + 13 && vals.length < maxWeeks; daysBack++) {
+    const target = new Date(asOf);
+    target.setDate(asOf.getDate() - daysBack);
+    target.setHours(0, 0, 0, 0);
+    if (target.getDay() + 1 !== dow) continue; // 対象曜日以外はスキップ
+    const ds = toDateStr_(target);
+    if (excludedDates.has(ds)) continue;
+    if (!salesMap[ds] || salesMap[ds].sales <= 0) continue;
+    vals.push(salesMap[ds].sales);
+  }
+  if (!vals.length) return 0;
+  const med = dowMedian_(vals);
+  let weightedSum = 0, weightedTotal = 0;
+  for (let i = 0; i < vals.length; i++) {
+    let v = vals[i];
+    if (med > 0) v = Math.min(DOW_WINSOR_HI * med, Math.max(DOW_WINSOR_LO * med, v));
+    const weight = alpha * Math.pow(1 - alpha, i);
+    weightedSum   += v * weight;
+    weightedTotal += weight;
+  }
+  return weightedTotal > 0 ? weightedSum / weightedTotal : 0;
+}
+
 function calcWeightedDowAvg_(salesMap, excludedDates, today) {
-  // ② 指数平滑法：曜日ごとに過去を遡り最大10件をα=0.35で指数減衰
-  const ALPHA = 0.35;
-  const MAX_WEEKS = 10;
+  // ② 指数平滑法：曜日ごとに過去を遡り最大10件をα=0.35で指数減衰（中央値でウィンザライズ）
   const result = {};
   [1,2,3,4,5,6,7].forEach(dow => {
-    let weightedSum = 0, weightedTotal = 0, sampleCount = 0;
-    // 最大83日遡って対象曜日のデータを最大10件収集
-    for (let daysBack = 1; daysBack <= MAX_WEEKS * 7 + 13; daysBack++) {
-      if (sampleCount >= MAX_WEEKS) break;
-      const target = new Date(today);
-      target.setDate(today.getDate() - daysBack);
-      target.setHours(0, 0, 0, 0);
-      if (target.getDay() + 1 !== dow) continue; // 対象曜日以外はスキップ
-      const ds = toDateStr_(target);
-      if (excludedDates.has(ds)) continue;
-      if (!salesMap[ds] || salesMap[ds].sales <= 0) continue;
-      const weight = ALPHA * Math.pow(1 - ALPHA, sampleCount);
-      weightedSum   += salesMap[ds].sales * weight;
-      weightedTotal += weight;
-      sampleCount++;
-    }
-    result[dow] = weightedTotal > 0 ? weightedSum / weightedTotal : 0;
+    result[dow] = winsorizedEwmaDow_(salesMap, excludedDates, today, dow, 0.35, 10);
   });
   return result;
 }
 
 // 指定日(asOf)時点での通常同曜日の指数平滑平均（calcWeightedDowAvg_ と同じ式を単一曜日・任意基準日で）
 function expSmoothDowAt_(salesMap, excludedDates, asOf, dow) {
-  const ALPHA = 0.35, MAX_WEEKS = 10;
-  let weightedSum = 0, weightedTotal = 0, sampleCount = 0;
-  for (let daysBack = 1; daysBack <= MAX_WEEKS * 7 + 13; daysBack++) {
-    if (sampleCount >= MAX_WEEKS) break;
-    const target = new Date(asOf);
-    target.setDate(asOf.getDate() - daysBack);
-    target.setHours(0, 0, 0, 0);
-    if (target.getDay() + 1 !== dow) continue;
-    const ds = toDateStr_(target);
-    if (excludedDates.has(ds)) continue;
-    if (!salesMap[ds] || salesMap[ds].sales <= 0) continue;
-    const weight = ALPHA * Math.pow(1 - ALPHA, sampleCount);
-    weightedSum   += salesMap[ds].sales * weight;
-    weightedTotal += weight;
-    sampleCount++;
-  }
-  return weightedTotal > 0 ? weightedSum / weightedTotal : 0;
+  return winsorizedEwmaDow_(salesMap, excludedDates, asOf, dow, 0.35, 10);
 }
 
 // 祝日タグをティアに分類（最大＝正月/GW/お盆、連休＝3連休等、単発＝その他の単発祝日）
@@ -4297,14 +4504,18 @@ function buildDeadIngSet_(ss) {
 
   const dead = {}, reason = {};
   Object.keys(ingProds).forEach(ing => {
-    let maxSold = null, maxBEnd = null, hasActive = false, recentDays = 0;
+    let maxSold = null, maxBEnd = null, hasActive = false, recentDays = 0, maxLiveSold = null;
     Object.keys(ingProds[ing]).forEach(p => {
       if (activeProd[p]) hasActive = true;                          // 継続中・今後・休止中CP商品が1つでもあれば生存
       const ls = prodLastSold[p]; if (ls && (!maxSold || ls > maxSold)) maxSold = ls;
       const be = boundedEnd[p];   if (be && (!maxBEnd || be > maxBEnd)) maxBEnd = be;
+      // ★終了CPでない商品（通常・店内など）の販売日＝その食材が今も通常商品で使われている証拠。MARKER_DEAD_LIVEPROD
+      if (!be && ls && (!maxLiveSold || ls > maxLiveSold)) maxLiveSold = ls;
       const rd = prodRecentDays[p]; if (rd) { const n = Object.keys(rd).length; if (n > recentDays) recentDays = n; }
     });
     if (hasActive) return;                                          // 生存確定（新規CPの欠品防止・休止再開分の保護）
+    // ★終了CP以外の商品が直近28日に売れている＝終了CPが終わっても通常商品で使い続けている（例:ワイルドCP終了後もラウンドオイスターは店内ワイルド5010/5014等で使用）。最終販売日がCP終了の2日以内でも誤って廃番にしない。MARKER_DEAD_LIVEPROD
+    if (maxLiveSold && maxLiveSold >= staleCut) return;
     // (b) 終了CP・切替専用：直近販売がCP終了日(＋2日猶予)以前＝そのCPと共に停止した食材（鰻・牛タン・にんにく）
     if (maxBEnd && maxSold && maxSold.getTime() <= maxBEnd.getTime() + GRACE_MS) { dead[ing] = true; reason[ing] = '終了CP専用'; }
     // (a) 安全網：登録が無くても、全商品が28日以上まったく売れていなければ廃番

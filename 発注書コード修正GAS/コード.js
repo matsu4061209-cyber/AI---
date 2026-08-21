@@ -1,11 +1,214 @@
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('🔧 コード修正')
+    .addItem('★最新CSVから消耗品を同期', 'syncFromLatestCatalogCsv')
+    .addSeparator()
     .addItem('商品コード一括修正を実行', 'fixConsumableCodes')
     .addItem('商品名をサイト名に統一', 'syncNamesToCatalog')
     .addItem('単価・発注単位をサイトからコピー', 'syncPriceAndUnitFromCatalog')
     .addItem('消耗品をサイト順に並び替え', 'reorderConsumables')
+    .addSeparator()
+    .addItem('🩺 列構成を診断（書き込みなし）', 'diagnoseColumns')
+    .addItem('🛠 単位規格列を復元', 'repairSpecColumn')
+    .addItem('🗑 F列(単位規格)を削除', 'deleteSpecColumn')
+    .addItem('🧹 過去の同期バグを一括修正', 'repairSyncBugs')
     .addToUi();
+}
+
+// 「発注」フォルダ内の my_catalog_trade_prod*.csv のうち、最終更新が最も新しいものを返す。
+function findLatestCatalogFile_() {
+  const folders = DriveApp.getFoldersByName('発注');
+  if (!folders.hasNext()) return null;
+  const folder = folders.next();
+  const it = folder.getFiles();
+  let latest = null;
+  let latestDate = null;
+  while (it.hasNext()) {
+    const f = it.next();
+    const m = f.getName().match(/^my_catalog_trade_prod(\d{8})/i);
+    if (!m) continue;
+    const dateStr = m[1]; // ファイル名の日付(YYYYMMDD)を正とする
+    if (
+      !latest ||
+      dateStr > latestDate ||
+      (dateStr === latestDate && f.getLastUpdated() > latest.getLastUpdated())
+    ) {
+      latest = f;
+      latestDate = dateStr;
+    }
+  }
+  return latest;
+}
+
+// Shift-JISのCSV Blobをパースして、[ヘッダー行を除いた] 2次元配列を返す。
+function parseCatalogCsv_(file) {
+  const bytes = file.getBlob().getBytes();
+  const text = Utilities.newBlob(bytes).getDataAsString('Shift_JIS');
+  const lines = text.split(/\r\n|\n/);
+  // 1行目はタイトル行「[FOODS INFOMART]」なので除外し、2行目をヘッダーとして扱う
+  const body = lines.slice(1).join('\n');
+  const rows = Utilities.parseCsv(body);
+  return rows.slice(1); // ヘッダー行を除いたデータ行
+}
+
+// 最新CSVから 自社管理コード→{name, price, spec} のマップを作る。
+function buildCatalogMapFromCsv_(rows) {
+  const map = {};
+  const order = [];
+  rows.forEach(function (r) {
+    const code = (r[2] || '').trim();
+    if (!code) return;
+    map[code] = {
+      name: (r[12] || '').trim(),
+      price: r[17] !== '' && r[17] !== undefined ? Number(r[17]) : null,
+      spec: (r[13] || '').trim()
+    };
+    order.push(code);
+  });
+  return { map: map, order: order };
+}
+
+// 最新CSVを自動で見つけて、消耗品シートの商品名・単価・発注単位(規格の目安)・並び順をまとめて同期する。
+function syncFromLatestCatalogCsv() {
+  const ui = SpreadsheetApp.getUi();
+  const file = findLatestCatalogFile_();
+  if (!file) {
+    ui.alert('「発注」フォルダ内に my_catalog_trade_prod から始まるCSVが見つかりませんでした。');
+    return;
+  }
+
+  const found = findConsumableHeader_();
+  if (!found) {
+    ui.alert('消耗品セクションの見出し行が見つかりませんでした。');
+    return;
+  }
+  const sheet = found.sheet;
+  const dataStartRow = found.headerRow + 1;
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  const numRows = lastRow - dataStartRow + 1;
+  if (numRows <= 0 || numRows % 2 !== 0) {
+    ui.alert('データ行数が想定外です（' + numRows + '行）。中止しました。');
+    return;
+  }
+
+  const range = sheet.getRange(dataStartRow, 1, numRows, lastCol);
+  const values = range.getValues();
+  const formulas = range.getFormulas();
+  for (let r = 0; r < formulas.length; r++) {
+    for (let c = 0; c < formulas[r].length; c++) {
+      if (formulas[r][c]) {
+        ui.alert(
+          '数式が見つかりました',
+          '行' + (dataStartRow + r) + ' 列' + (c + 1) + ' に数式があります。安全のため同期を中止しました。',
+          ui.ButtonSet.OK
+        );
+        return;
+      }
+    }
+  }
+
+  // 「基準量/在庫」マーカー列と、日付が始まる列を見出し行から特定する（列構成の変化に自動対応）。
+  const headerVals = sheet.getRange(found.headerRow, 1, 1, lastCol).getDisplayValues()[0];
+  let datesStartCol = -1;
+  for (let c = 5; c < lastCol; c++) { // F列(6列目)以降を探す
+    if (/^\d+月\d+日$/.test(String(headerVals[c]).trim())) { datesStartCol = c + 1; break; }
+  }
+  if (datesStartCol === -1) {
+    ui.alert('日付列が見つかりませんでした。列構成を診断してから実行してください。');
+    return;
+  }
+  const markerCol = datesStartCol - 2; // 0-indexed配列上のマーカー列位置（datesStartColは1始まりの列番号なので-2）
+
+  const parsedRows = parseCatalogCsv_(file);
+  const catalog = buildCatalogMapFromCsv_(parsedRows);
+
+  // 2行1組（基準量/在庫）で扱う
+  const pairs = [];
+  for (let i = 0; i < numRows; i += 2) {
+    pairs.push({ code: String(values[i][1]).trim(), rows: [values[i], values[i + 1]] });
+  }
+
+  let nameCount = 0, priceCount = 0, specCount = 0;
+  const notFound = [];
+  pairs.forEach(function (p) {
+    const info = catalog.map[p.code];
+    if (!info) {
+      if (p.code) notFound.push(p.code);
+      return;
+    }
+    if (info.name) { p.rows[0][2] = info.name; nameCount++; }
+    if (info.price !== null && !isNaN(info.price)) { p.rows[0][3] = info.price; priceCount++; }
+    if (info.spec) { p.rows[0][4] = info.spec; specCount++; }
+  });
+
+  // CSVの並び順を優先し、CSVに無いものは元の相対順のまま後ろに続ける。
+  // シートにまだ無いコードは、新商品として新しい行ペアを作って追加する。
+  const used = new Array(pairs.length).fill(false);
+  const ordered = [];
+  const added = [];
+  catalog.order.forEach(function (code) {
+    for (let i = 0; i < pairs.length; i++) {
+      if (!used[i] && pairs[i].code === code) {
+        ordered.push(pairs[i]);
+        used[i] = true;
+        return;
+      }
+    }
+    // シートに無い新商品 → 新規行ペアを作成
+    const info = catalog.map[code];
+    const row0 = new Array(lastCol).fill('');
+    const row1 = new Array(lastCol).fill('');
+    row0[0] = '消耗品';
+    row0[1] = code;
+    row0[2] = info.name || '';
+    row0[3] = info.price !== null && !isNaN(info.price) ? info.price : '';
+    row0[4] = info.spec || '';
+    row0[markerCol] = '基準量';
+    row1[1] = code;
+    row1[markerCol] = '在庫';
+    ordered.push({ code: code, rows: [row0, row1], isNew: true });
+    added.push(code + (info.name ? '(' + info.name + ')' : ''));
+  });
+  pairs.forEach(function (p, i) { if (!used[i]) ordered.push(p); });
+
+  const newNumRows = ordered.length * 2;
+  if (newNumRows > numRows) {
+    sheet.insertRowsAfter(lastRow, newNumRows - numRows);
+  }
+  const writeRange = sheet.getRange(dataStartRow, 1, newNumRows, lastCol);
+
+  const newValues = [];
+  ordered.forEach(function (p) { newValues.push(p.rows[0]); newValues.push(p.rows[1]); });
+  writeRange.setValues(newValues);
+
+  // 罫線・A〜C列とL列(最終列)の2行結合が無い行があれば、既存行と同じ書式を適用する。
+  // 新規追加行だけでなく、以前から書式が崩れていた行（過去バグの取りこぼし等）も毎回チェックして直す。
+  let formatFixed = 0;
+  const templateRange = sheet.getRange(dataStartRow, 1, 2, lastCol);
+  for (let i = 0; i < ordered.length; i++) {
+    const r = dataStartRow + i * 2;
+    const merged = sheet.getRange(r, 3).getMergedRanges();
+    const isMerged = merged.length > 0 && merged[0].getNumRows() === 2;
+    if (!isMerged) {
+      templateRange.copyTo(sheet.getRange(r, 1, 2, lastCol), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+      sheet.getRange(r, 1, 2, 1).merge(); // A
+      sheet.getRange(r, 2, 2, 1).merge(); // B
+      sheet.getRange(r, 3, 2, 1).merge(); // C
+      sheet.getRange(r, lastCol, 2, 1).merge(); // L(最終列)
+      formatFixed++;
+    }
+  }
+
+  let message = 'CSV: ' + file.getName() + '\n更新日時: ' + file.getLastUpdated() + '\n\n'
+    + '商品名更新: ' + nameCount + '件\n単価更新: ' + priceCount + '件\n発注単位(目安)更新: ' + specCount + '件\n罫線・結合の修正: ' + formatFixed + '件';
+  if (added.length > 0) {
+    message += '\n\n🆕 新商品として追加（発注数量は未設定・要入力）:\n' + added.join('\n');
+  }
+  if (notFound.length > 0) {
+    message += '\n\n⚠️ 最新CSVに見つからなかったコード（要確認・自動変更なし）:\n' + notFound.join(', ');
+  }
+  ui.alert('最新CSVから同期完了', message, ui.ButtonSet.OK);
 }
 
 // サイト側の単価。キーは現在のシート上のコード。
@@ -282,4 +485,187 @@ function fixConsumableCodes() {
     ? results.join('\n')
     : '対象コードが見つかりませんでした。';
   SpreadsheetApp.getUi().alert('修正結果', message, SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+// 書き込みは一切行わず、現在の列構成をそのまま表示する（原因調査用）。
+function diagnoseColumns() {
+  const ui = SpreadsheetApp.getUi();
+  const found = findConsumableHeader_();
+  if (!found) {
+    ui.alert('消耗品セクションの見出し行が見つかりませんでした。');
+    return;
+  }
+  const sheet = found.sheet;
+  const headerRow = found.headerRow;
+  const lastCol = sheet.getLastColumn();
+  const header = sheet.getRange(headerRow, 1, 1, lastCol).getDisplayValues()[0];
+  const row1 = sheet.getRange(headerRow + 1, 1, 1, lastCol).getDisplayValues()[0];
+  const row2 = sheet.getRange(headerRow + 2, 1, 1, lastCol).getDisplayValues()[0];
+
+  const colLetter = function (n) {
+    let s = '';
+    while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+    return s;
+  };
+
+  let msg = 'シート: ' + sheet.getName() + ' / 見出し行: ' + headerRow + ' / 最終列: ' + colLetter(lastCol) + '(' + lastCol + ')\n\n';
+  for (let c = 0; c < lastCol; c++) {
+    msg += colLetter(c + 1) + ': [見出し]' + header[c] + ' / [行' + (headerRow + 1) + ']' + row1[c] + ' / [行' + (headerRow + 2) + ']' + row2[c] + '\n';
+  }
+  ui.alert('列構成の診断結果', msg, ui.ButtonSet.OK);
+  Logger.log(msg);
+}
+
+// 元の「単位規格」列(F列)の値。キーは現在のシート上のコード。
+const ORIGINAL_SPEC = {
+  '360459': '1個', '360460': '', '636280': '本', '370070': '1個', '636012': '1個',
+  '636015': '本', '636020': '個', '636024': '50枚/袋', '636050': '12', '636054': '100枚/袋',
+  '636055': '100枚/袋', '636082': '枚', '636088': '枚', '636092': '枚', '636095': '枚',
+  '636096': '枚', '636098': '枚', '636108': '枚', '636109': '枚', '636110': '枚', '636111': '枚',
+  '636112': '1000枚/巻', '636113': '1000枚/巻', '636118': '1000枚/巻', '636186': '4巻',
+  '636196': '12枚/袋', '636265': '枚', '636266': '個', '636269': '個', '636270': '個',
+  '636271': '個', '636272': '個', '636273': '個', '636275': '個', '636276': '枚', '636312': '箱',
+  '636313': '箱', '636314': '箱', '636410': '40P', '636005': '枚', '636525': '', '636529': '本',
+  '636549': '枚', '638015': '本', '638016': '本', '638017': '本', '638018': '本', '638019': '本',
+  '638020': '本', '638021': '本', '638023': '本', '636143': '枚'
+};
+
+// 消えた「単位規格」列(元F列)を、現在のF列(基準量/在庫マーカー)の手前に挿入して復元する。
+function repairSpecColumn() {
+  const ui = SpreadsheetApp.getUi();
+  const found = findConsumableHeader_();
+  if (!found) {
+    ui.alert('消耗品セクションの見出し行が見つかりませんでした。');
+    return;
+  }
+  const sheet = found.sheet;
+  const headerRow = found.headerRow;
+  const lastRow = sheet.getLastRow();
+
+  // 現在のF列(6列目)が「基準量」であることを確認してから挿入する（誤爆防止）。
+  const f2 = sheet.getRange(headerRow + 1, 6).getDisplayValue().trim();
+  if (f2 !== '基準量') {
+    ui.alert('想定と違う状態です（F列2行目=' + f2 + '）。安全のため中止しました。診断機能で確認してください。');
+    return;
+  }
+
+  sheet.insertColumnBefore(6);
+  sheet.getRange(headerRow, 6).setValue('単位規格');
+
+  const dataStartRow = headerRow + 1;
+  const numRows = lastRow - dataStartRow + 1; // 挿入により行数自体は変わらない
+  const codes = sheet.getRange(dataStartRow, 2, numRows, 1).getValues();
+  let count = 0;
+  for (let i = 0; i < numRows; i += 2) {
+    const code = String(codes[i][0]).trim();
+    if (ORIGINAL_SPEC[code]) {
+      sheet.getRange(dataStartRow + i, 6).setValue(ORIGINAL_SPEC[code]);
+      count++;
+    }
+  }
+  ui.alert('復元完了', '単位規格列を復元し、' + count + '件の値を書き戻しました。', ui.ButtonSet.OK);
+}
+
+// E列(発注単位)と内容が重複しているF列(単位規格)を削除する。
+function deleteSpecColumn() {
+  const ui = SpreadsheetApp.getUi();
+  const found = findConsumableHeader_();
+  if (!found) {
+    ui.alert('消耗品セクションの見出し行が見つかりませんでした。');
+    return;
+  }
+  const sheet = found.sheet;
+  const headerRow = found.headerRow;
+
+  const f1 = sheet.getRange(headerRow, 6).getDisplayValue().trim();
+  if (f1 !== '単位規格') {
+    ui.alert('想定と違う状態です（F列見出し=' + f1 + '）。安全のため中止しました。診断機能で確認してください。');
+    return;
+  }
+
+  sheet.deleteColumn(6);
+  ui.alert('削除完了', 'F列（単位規格）を削除しました。', ui.ButtonSet.OK);
+}
+
+// 過去の同期バグで壊れた行を一括修正する。
+// (1)新規追加時にマーカー(基準量/在庫)が1列右にズレた行 → 左に詰め直す
+// (2)在庫行にも商品名が重複して書かれた行 → 在庫行の商品名を消す
+function repairSyncBugs() {
+  const ui = SpreadsheetApp.getUi();
+  const found = findConsumableHeader_();
+  if (!found) {
+    ui.alert('消耗品セクションの見出し行が見つかりませんでした。');
+    return;
+  }
+  const sheet = found.sheet;
+  const dataStartRow = found.headerRow + 1;
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  const numRows = lastRow - dataStartRow + 1;
+
+  const headerVals = sheet.getRange(found.headerRow, 1, 1, lastCol).getDisplayValues()[0];
+  let datesStartCol = -1;
+  for (let c = 5; c < lastCol; c++) {
+    if (/^\d+月\d+日$/.test(String(headerVals[c]).trim())) { datesStartCol = c + 1; break; }
+  }
+  if (datesStartCol === -1) {
+    ui.alert('日付列が見つかりませんでした。');
+    return;
+  }
+  const markerCol = datesStartCol - 2; // 0-indexed
+
+  const range = sheet.getRange(dataStartRow, 1, numRows, lastCol);
+  const values = range.getValues();
+
+  let shiftFixed = 0;
+  let nameDupFixed = 0;
+
+  for (let i = 0; i < numRows; i += 2) {
+    const row0 = values[i];
+    const row1 = values[i + 1];
+
+    // (1) マーカーが1列右にズレている場合、そこから右を1列左に詰める
+    if (row0[markerCol] !== '基準量' && markerCol + 1 < lastCol && row0[markerCol + 1] === '基準量') {
+      for (let c = markerCol; c < lastCol - 1; c++) {
+        row0[c] = row0[c + 1];
+        row1[c] = row1[c + 1];
+      }
+      row0[lastCol - 1] = '';
+      row1[lastCol - 1] = '';
+      shiftFixed++;
+    }
+
+    // (2) 在庫行に商品名が残っている場合は消す（B列が空欄なのにC列だけ埋まっている行）
+    if (String(row1[1]).trim() === '' && String(row1[2]).trim() !== '') {
+      row1[2] = '';
+      nameDupFixed++;
+    }
+  }
+
+  range.setValues(values);
+
+  // (3) 罫線・A〜C列/L列の2行結合が無い行に、テンプレート行と同じ書式を適用する
+  let formatFixed = 0;
+  const templateRange = sheet.getRange(dataStartRow, 1, 2, lastCol);
+  for (let i = 0; i < numRows; i += 2) {
+    const row = dataStartRow + i;
+    const code = String(sheet.getRange(row, 2).getValue()).trim();
+    if (!code) continue;
+    const merged = sheet.getRange(row, 3).getMergedRanges();
+    const isMerged = merged.length > 0 && merged[0].getNumRows() === 2;
+    if (!isMerged) {
+      templateRange.copyTo(sheet.getRange(row, 1, 2, lastCol), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+      sheet.getRange(row, 1, 2, 1).merge();
+      sheet.getRange(row, 2, 2, 1).merge();
+      sheet.getRange(row, 3, 2, 1).merge();
+      sheet.getRange(row, lastCol, 2, 1).merge();
+      formatFixed++;
+    }
+  }
+
+  ui.alert(
+    '修正完了',
+    'マーカー列ズレの修正: ' + shiftFixed + '件\n在庫行の商品名重複の修正: ' + nameDupFixed + '件\n罫線・結合の修正: ' + formatFixed + '件',
+    ui.ButtonSet.OK
+  );
 }
