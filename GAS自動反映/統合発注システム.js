@@ -4437,6 +4437,8 @@ function buildDeadIngSet_(ss) {
   const REVIVE_DAYS = 21;  // ちらつき防止：一度隠した食材は、この期間に2日以上売れて初めて再表示する（単発の1件では戻さない）
   const GRACE_MS = 2 * 86400000;  // 終了CP判定の猶予（最終販売が終了日の2日後まではCP専用とみなす＝時差・遅れ計上を吸収）
   const staleCut = new Date(today); staleCut.setDate(today.getDate() - STALE_DAYS);
+  const LIVE_RECENT_DAYS = 14;   // 終了CP以外の商品が「まだ現役」の窓：直近この日数に売れていれば生存（割引版等はここを外れて自然に廃番へ）
+  const liveRecentCut = new Date(today); liveRecentCut.setDate(today.getDate() - LIVE_RECENT_DAYS);
   const reviveCut = new Date(today); reviveCut.setDate(today.getDate() - REVIVE_DAYS);
   const props = PropertiesService.getScriptProperties();
   const prevRaw = props.getProperty('deadIngSetPrev');            // null＝初回（基準づくり・通知しない）
@@ -4514,8 +4516,12 @@ function buildDeadIngSet_(ss) {
       const rd = prodRecentDays[p]; if (rd) { const n = Object.keys(rd).length; if (n > recentDays) recentDays = n; }
     });
     if (hasActive) return;                                          // 生存確定（新規CPの欠品防止・休止再開分の保護）
-    // ★終了CP以外の商品が直近28日に売れている＝終了CPが終わっても通常商品で使い続けている（例:ワイルドCP終了後もラウンドオイスターは店内ワイルド5010/5014等で使用）。最終販売日がCP終了の2日以内でも誤って廃番にしない。MARKER_DEAD_LIVEPROD
-    if (maxLiveSold && maxLiveSold >= staleCut) return;
+    // ★終了CP以外の商品が「まだ現役で（直近LIVE_RECENT_DAYS日に）売れている」＝通常商品で今も使用中→生存。
+    //   例:ワイルドCP終了後もラウンドオイスターは店内ワイルド5010/5014等が毎日売れる＝生存。
+    //   逆に、CP設定に未登録の割引バリアント等（例:うなぎAP版4998/4999＝8/1-2で終売）はこの窓を外れるので
+    //   終了CP専用として正しく廃番になる。窓方式なのでCP終了直後の1件（straggler）も日が経てば自然に外れる。
+    //   ＝「明確に終了日を登録したCPの食材が発注に残り続ける」問題の恒久対策。MARKER_DEAD_LIVEPROD
+    if (maxLiveSold && maxLiveSold.getTime() >= liveRecentCut.getTime()) return;
     // (b) 終了CP・切替専用：直近販売がCP終了日(＋2日猶予)以前＝そのCPと共に停止した食材（鰻・牛タン・にんにく）
     if (maxBEnd && maxSold && maxSold.getTime() <= maxBEnd.getTime() + GRACE_MS) { dead[ing] = true; reason[ing] = '終了CP専用'; }
     // (a) 安全網：登録が無くても、全商品が28日以上まったく売れていなければ廃番
