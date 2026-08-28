@@ -1,0 +1,73 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "geometry": {
+        "coordinates": [
+          130.6343350,
+          33.4341207
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "date": "2025-12-06T01:52:41Z",
+        "google_maps_url": "http://maps.google.com/?cid=17559809704713152647",
+        "location": {
+          "address": "日本、〒838-0802 福岡県朝倉郡筑前町久光９５１−１",
+          "country_code": "JP",
+          "name": "Mare"
+        }
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          0,
+          0
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "date": "2015-03-20T23:10:22Z",
+        "google_maps_url": "http://maps.google.com/?q=%E3%80%92803-0855+%E7%A6%8F%E5%B2%A1%E7%9C%8C%E5%8C%97%E4%B9%9D%E5%B7%9E%E5%B8%82%E5%B0%8F%E5%80%89%E5%8C%97%E5%8C%BA%E7%AB%AA%E6%9E%97%E7%94%BA%EF%BC%91%EF%BC%94%E2%88%92%EF%BC%94&ftid=0x3543c743880b444d:0xbc2c698980dc1266",
+        "Comment": "この保存済みの場所の位置情報はありません"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          0,
+          0
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "date": "2015-03-20T23:06:28Z",
+        "google_maps_url": "http://maps.google.com/?q=%E7%A6%8F%E5%B2%A1%E7%9C%8C%E5%8C%97%E4%B9%9D%E5%B7%9E%E5%B8%82&ftid=0x3543c76849636da9:0x388ab930297e38e7",
+        "Comment": "この保存済みの場所の位置情報はありません"
+      },
+      "type": "Feature"
+    },
+    {
+      "geometry": {
+        "coordinates": [
+          130.8841712,
+          33.8797792
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "date": "2015-01-10T22:57:48Z",
+        "google_maps_url": "http://maps.google.com/?cid=644082513757332181",
+        "location": {
+          "address": "日本、〒802-0081 福岡県北九州市小倉北区紺屋町１１−２０",
+          "country_code": "JP",
+          "name": "アーバンプレイスイン小倉"
+        }
+      },
+      "type": "Feature"
+    }
+  ]
+}
