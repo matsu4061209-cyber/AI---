@@ -1,0 +1,284 @@
+// スタッフ名簿の場所（4行目〜25行目＝22人分）
+var ROSTER_START_ROW = 4;
+var ROSTER_ROWS = 22;
+
+function createNextWeekSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const currentSheet = ss.getActiveSheet();
+
+  try {
+    // 0. 複製する前に「今のシート」の余分な空行・空列を縮めておく
+    //    （ワークブック全体のセル数が上限(1000万)に近づくと複製自体が失敗するため、
+    //      次週シート作成のたびに毎回自動でこれを行い、二度と同じ問題が起きないようにする）
+    trimSheetSize_(currentSheet);
+
+    // 1. T1セルから日付を取得
+    const currentDate = new Date(currentSheet.getRange("T1").getValue());
+
+    // 2. 7日後を計算
+    const nextDate = new Date(currentDate.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+    // 3. YYMMDD形式の名前を作成 (例: 260629)
+    const nextSheetName = Utilities.formatDate(nextDate, "JST", "yyMMdd");
+
+    // 4. シートを複製して名前を設定
+    const newSheet = currentSheet.copyTo(ss).setName(nextSheetName);
+
+    // 5. 新しいシートの T1 に新しい日付を書き込む
+    newSheet.getRange("T1").setValue(nextDate);
+
+    // 6. シフト時間入力表(B4:P25)をクリア。
+    //    ただし「時間を固定するスタッフを設定」でチェックされている人は消さない
+    var protectedNames = getProtectedStaffNames_();
+    var rosterNames = newSheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues();
+    for (var i = 0; i < rosterNames.length; i++) {
+      var name = rosterNames[i][0];
+      if (name && protectedNames.indexOf(name) !== -1) continue; // この人は消さない
+      newSheet.getRange(ROSTER_START_ROW + i, 2, 1, 15).clearContent(); // B〜P列
+    }
+
+    // 7. 右側の日別シフト表（転写ボタンが書き込む場所）も空にする
+    const clearRangesStr = ["T24:X39", "T43:X58", "T62:X77", "DD4:DH19", "DD24:DH39", "DD43:DH58", "DD62:DH77"];
+    clearRangesStr.forEach(rangeStr => newSheet.getRange(rangeStr).clearContent());
+
+    // 8. 祝日の色付けを新しいシートにも反映する（「祝日」シートは既にあるものを使う）
+    applyHolidayColoring_(newSheet);
+
+    // 9. シフト時間入力表(B4:O25)の表示形式を、常に「9:00」のようにコロン付きになるよう整える
+    fixTimeFormat_(newSheet);
+
+    // 10. 一番左に移動してアクティブにする
+    ss.setActiveSheet(newSheet);
+    ss.moveActiveSheet(1);
+
+  } catch (e) {
+    // ★エラーの本当の原因を突き止めるための一時的な処理。
+    //   画面に詳しい内容をそのまま表示し、あとで確認できるようにも保存しておく。
+    var detail = '次週シート作成でエラー: ' + e.message + '\n' + (e.stack || '');
+    PropertiesService.getDocumentProperties().setProperty('lastError', detail);
+    Logger.log(detail);
+    SpreadsheetApp.getUi().alert(detail);
+  }
+}
+
+// シフト時間入力表(B4:O25)の表示形式を「900」と入力しても「9:00」と表示されるように統一する
+// ★誤って結合されてしまったセル（例：L5等）があると書式設定でエラーになるため、
+//   結合を自動で解除してから表示形式を設定する
+function fixTimeFormat_(sheet) {
+  var range = sheet.getRange(ROSTER_START_ROW, 2, ROSTER_ROWS, 14); // B4:O25
+  var mergedRanges = range.getMergedRanges();
+  mergedRanges.forEach(function(m) { m.breakApart(); });
+  range.setNumberFormat('0":"00');
+}
+
+// メニューが無くても実行できるように、Appsスクリプトエディタから直接実行するための入り口
+// （実行後、対象シートの出勤・退勤欄はすべて「9:00」のようなコロン付き表示になる）
+function fixTimeFormatNow() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  fixTimeFormat_(sheet);
+  Logger.log('時間の表示形式を直しました。（対象シート: ' + sheet.getName() + '）');
+}
+
+// 1枚のシートについて、「データが入っていない余分な行・列」だけを削除する共通処理。
+// データが入っている部分（実際に使っている範囲）は一切削除しない。
+// ★createNextWeekSheet からも毎回自動で呼ばれるため、今後は手動でのメンテナンス不要。
+function trimSheetSize_(sheet) {
+  var ROW_BUFFER = 30; // 実際に使っている行数より、余裕として残しておく行数
+  var COL_BUFFER = 15; // 同じく列数の余裕
+
+  if (sheet.getName() === '祝日') {
+    // 祝日シートは行数(日付データ)を使うので対象外。列だけ縮める
+    var hCols = sheet.getMaxColumns();
+    var targetHCols = 10;
+    if (hCols > targetHCols) {
+      sheet.deleteColumns(targetHCols + 1, hCols - targetHCols);
+    }
+    return;
+  }
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  var maxRows = sheet.getMaxRows();
+  var maxCols = sheet.getMaxColumns();
+  var targetRows = Math.max(lastRow + ROW_BUFFER, 50);
+  var targetCols = Math.max(lastCol + COL_BUFFER, 50);
+
+  if (maxRows > targetRows) {
+    sheet.deleteRows(targetRows + 1, maxRows - targetRows);
+  }
+  if (maxCols > targetCols) {
+    sheet.deleteColumns(targetCols + 1, maxCols - targetCols);
+  }
+}
+
+// ★今回のセル数上限トラブルを解消するための、1回だけ実行する整理用スクリプト。
+//   既存の全シート（過去の週シートを含む）に対して trimSheetSize_ をまとめて実行する。
+function trimSheetSizes() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var logLines = [];
+  ss.getSheets().forEach(function(sheet) {
+    var before = sheet.getMaxRows() + '×' + sheet.getMaxColumns();
+    trimSheetSize_(sheet);
+    var after = sheet.getMaxRows() + '×' + sheet.getMaxColumns();
+    logLines.push(sheet.getName() + ': ' + before + ' → ' + after);
+  });
+  Logger.log('シート整理が完了しました。\n' + logLines.join('\n'));
+}
+
+// スプレッドシートを開いたときに「スタッフ管理」メニューを追加する
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('スタッフ管理')
+    .addItem('スタッフを追加', 'addStaffMember')
+    .addItem('スタッフを削除', 'removeStaffMember')
+    .addItem('時間を固定するスタッフを設定', 'setProtectedStaff')
+    .addToUi();
+}
+
+// 「次週シート作成」で時間を消さない人の一覧を取得（未設定なら松山・奥田を初期値とする）
+function getProtectedStaffNames_() {
+  var raw = PropertiesService.getDocumentProperties().getProperty('protectedStaff');
+  if (!raw) return ['松山 貴志', '奥田 恵'];
+  try {
+    var parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// チェックボックスで「時間を固定するスタッフ」を選ぶ画面を開く
+function setProtectedStaff() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var ui = SpreadsheetApp.getUi();
+
+  var names = sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues();
+  var protectedNames = getProtectedStaffNames_();
+
+  var rowsHtml = '';
+  var hasAny = false;
+  for (var i = 0; i < names.length; i++) {
+    var name = names[i][0];
+    if (!name) continue;
+    hasAny = true;
+    var checked = protectedNames.indexOf(name) !== -1 ? 'checked' : '';
+    rowsHtml += '<label style="display:block;padding:4px 0;">' +
+      '<input type="checkbox" value="' + name + '" ' + checked + '> ' + name +
+      '</label>';
+  }
+
+  if (!hasAny) {
+    ui.alert('登録されているスタッフがいません。');
+    return;
+  }
+
+  var html = '<div style="font-family:sans-serif;padding:8px;font-size:14px;">' +
+    '<p>「次週シート作成」の時に時間を消さない人にチェックを付けてください</p>' +
+    '<div style="max-height:300px;overflow-y:auto;">' + rowsHtml + '</div>' +
+    '<div style="margin-top:16px;text-align:right;">' +
+    '<button onclick="google.script.host.close()" style="margin-right:8px;padding:6px 12px;">キャンセル</button>' +
+    '<button onclick="doSave()" style="padding:6px 12px;">保存する</button>' +
+    '</div>' +
+    '</div>' +
+    '<script>' +
+    'function doSave(){' +
+    '  var boxes = document.querySelectorAll("input[type=checkbox]:checked");' +
+    '  var names = Array.prototype.map.call(boxes, function(b){ return b.value; });' +
+    '  google.script.run.withSuccessHandler(function(){ google.script.host.close(); }).saveProtectedStaff(names);' +
+    '}' +
+    '</script>';
+
+  var output = HtmlService.createHtmlOutput(html).setWidth(320).setHeight(400);
+  ui.showModalDialog(output, '時間を固定するスタッフ');
+}
+
+// setProtectedStaff の画面から呼ばれる保存処理
+// ★末尾に _ を付けると google.script.run から呼べなくなるため付けない
+function saveProtectedStaff(names) {
+  PropertiesService.getDocumentProperties().setProperty('protectedStaff', JSON.stringify(names));
+}
+
+// 名簿(4〜25行目)の空いている行に新しいスタッフの名前を入力する
+function addStaffMember() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var ui = SpreadsheetApp.getUi();
+
+  var names = sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues();
+  var emptyRow = -1;
+  for (var i = 0; i < names.length; i++) {
+    if (!names[i][0]) {
+      emptyRow = ROSTER_START_ROW + i;
+      break;
+    }
+  }
+
+  if (emptyRow === -1) {
+    ui.alert('名簿の枠がいっぱいです。先に「スタッフを削除」で退社した人の枠を空けてください。');
+    return;
+  }
+
+  var resp = ui.prompt('スタッフを追加', '新しいスタッフの名前を入力してください', ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+
+  var name = resp.getResponseText().trim();
+  if (!name) return;
+
+  sheet.getRange(emptyRow, 1).setValue(name);
+  ui.alert(name + ' さんを ' + emptyRow + '行目 に追加しました。');
+}
+
+// 名簿(4〜25行目)を一覧表示し、プルダウンで選んで削除する画面を開く
+function removeStaffMember() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var ui = SpreadsheetApp.getUi();
+
+  var names = sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues();
+  var list = [];
+  for (var i = 0; i < names.length; i++) {
+    if (names[i][0]) list.push({ row: ROSTER_START_ROW + i, name: names[i][0] });
+  }
+
+  if (list.length === 0) {
+    ui.alert('登録されているスタッフがいません。');
+    return;
+  }
+
+  var options = list.map(function(item) {
+    return '<option value="' + item.row + '">' + item.name + '</option>';
+  }).join('');
+
+  var html = '<div style="font-family:sans-serif;padding:8px;font-size:14px;">' +
+    '<p>削除する人を選んでください</p>' +
+    '<select id="targetRow" style="width:100%;padding:6px;font-size:14px;">' + options + '</select>' +
+    '<div style="margin-top:16px;text-align:right;">' +
+    '<button onclick="google.script.host.close()" style="margin-right:8px;padding:6px 12px;">キャンセル</button>' +
+    '<button onclick="doDelete()" style="padding:6px 12px;">削除する</button>' +
+    '</div>' +
+    '</div>' +
+    '<script>' +
+    'function doDelete(){' +
+    '  var row = document.getElementById("targetRow").value;' +
+    '  google.script.run.withSuccessHandler(function(){ google.script.host.close(); }).deleteStaffRow(Number(row));' +
+    '}' +
+    '</script>';
+
+  var output = HtmlService.createHtmlOutput(html).setWidth(320).setHeight(180);
+  ui.showModalDialog(output, 'スタッフを削除');
+}
+
+// removeStaffMember のプルダウンから呼ばれる削除の実処理
+// ★末尾に _ を付けると google.script.run から呼べなくなるため付けない
+// 削除した行より下の名簿(A〜P列)を1行ずつ上に詰め、最後の行を空にする
+function deleteStaffRow(row) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var lastRosterRow = ROSTER_START_ROW + ROSTER_ROWS - 1;
+
+  if (row < lastRosterRow) {
+    // copyTo は値だけでなく「時刻の表示形式」などの書式もまとめて移動するため、
+    // getValues/setValues（値だけ）ではなくこちらを使う
+    var sourceRange = sheet.getRange(row + 1, 1, lastRosterRow - row, 16);
+    var destRange = sheet.getRange(row, 1, lastRosterRow - row, 16);
+    sourceRange.copyTo(destRange);
+  }
+  sheet.getRange(lastRosterRow, 1, 1, 16).clearContent();
+}

@@ -89,6 +89,34 @@ function doGet(e) {
     })).setMimeType(ContentService.MimeType.JSON);
   }
 
+  // ?lastError=1 で、直近に createNextWeekSheet 等で発生したエラー内容を返す（調査用）
+  if (params.lastError === '1') {
+    var lastError = PropertiesService.getDocumentProperties().getProperty('lastError') || '(エラーは記録されていません)';
+    return ContentService.createTextOutput(JSON.stringify({
+      lastError: lastError
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // ?cellCount=1 で、ワークブック全体のセル数（1000万上限との比較）を調べる（調査用）
+  // 実際に使っている範囲（lastRow/lastCol）も一緒に返し、縮めても安全な余白量を調べる
+  if (params.cellCount === '1') {
+    var sheetsInfo = ss.getSheets().map(function(s) {
+      var r = s.getMaxRows();
+      var c = s.getMaxColumns();
+      return {
+        name: s.getName(),
+        rows: r, cols: c, cells: r * c,
+        lastRow: s.getLastRow(), lastCol: s.getLastColumn()
+      };
+    });
+    var total = sheetsInfo.reduce(function(sum, s) { return sum + s.cells; }, 0);
+    return ContentService.createTextOutput(JSON.stringify({
+      totalCells: total,
+      limit: 10000000,
+      sheets: sheetsInfo
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
   var sheetName = params.sheet || ss.getSheets()[0].getName();
   var mode = params.mode || 'both'; // values / formulas / both
   var rows = parseInt(params.rows, 10) || 50;
@@ -235,6 +263,21 @@ function applyHolidayColoring_(sheet) {
     var dateCell = sheet.getRange(3, col);
     var color = isHoliday(dateCell.getValue()) ? '#ff0000' : '#ffffff';
     sheet.getRange(3, col, 2, 10).setBackground(color);
+  });
+
+  // 右側の曜日見出し（R23=月, R42=火, R61=水, DB3=木, DB23=金）も祝日なら赤くする
+  // ★土曜(R42系の土・DB42)・日曜(DB61)は元から色が付いているため対象外
+  [
+    { col: 18, labelRow: 23 },  // R23 月曜
+    { col: 18, labelRow: 42 },  // R42 火曜
+    { col: 18, labelRow: 61 },  // R61 水曜
+    { col: 106, labelRow: 3 },  // DB3 木曜
+    { col: 106, labelRow: 23 }  // DB23 金曜
+  ].forEach(function(h) {
+    var dateCell = sheet.getRange(h.labelRow + 2, h.col); // 見出しの2行下に実際の日付が入っている
+    var labelCell = sheet.getRange(h.labelRow, h.col);
+    var color = isHoliday(dateCell.getValue()) ? '#ff0000' : '#ffffff';
+    labelCell.setBackground(color);
   });
 }
 
