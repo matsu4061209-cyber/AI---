@@ -145,14 +145,23 @@ function onOpen() {
     { name: 'イベント追加フォーム',            functionName: 'showEventForm_' },
     { name: 'キャンペーン商品の登録フォーム',   functionName: 'showCpForm_' },
     { name: 'CPの実績出食率を今すぐ更新（CP設定に書き出す）', functionName: 'updateCpServingRatesNow' },
+    { name: 'CP商品の実績を見る（商品別の出数・売上比・出食比）', functionName: 'buildCpProductActuals' },
     { name: '過去CP実績を今のCPに引き継ぐ（部分一致だけ確認）', functionName: 'linkPastCpNow' },
     { name: '暫定日イベントの日付確認メールを今すぐ送る', functionName: 'remindProvisionalEventsNow_' },
-    { name: 'デバッグ：未登録コード診断メール', functionName: 'debugMenuCodes_' },
     null,
     { name: '売上予測を更新（buildSalesForecast）', functionName: 'buildSalesForecast' },
     { name: '実績データから日次売上・売上予測を直す（訂正の反映）', functionName: 'resyncActualsFromRaw' },
     { name: '予測精度を分析（日別＋週別合計）', functionName: 'analyzeForecastAccuracy' },
-    { name: '予測精度レポートを今すぐメールで送る（週次通知のテスト）', functionName: 'weeklyForecastAccuracyReport' }
+    { name: '予測精度レポートを今すぐメールで送る（週次通知のテスト）', functionName: 'weeklyForecastAccuracyReport' },
+    { name: '本番 vs ブレンド予測を採点する（どちらが当たるか・過去データで比較）', functionName: 'forecastBlendBacktest' },
+    null,
+    { name: '① 過去データ(前年)を取り込む（Driveの過去データ→過去売上履歴）', functionName: 'importPastYearSales' },
+    { name: '② 季節指数を作る（過去売上履歴→季節指数シート・見える化）', functionName: 'buildSeasonalIndex' },
+    { name: '③ 季節調整を採点する（効くか確認・本番と比較）', functionName: 'seasonalBacktest' },
+    { name: '月次見込み（売上目標・翌12か月）を作る', functionName: 'buildMonthlyOutlook' },
+    { name: 'カレンダー効果を検定する（給料日・月末など・自動蓄積）', functionName: 'calendarEvaluateNow' },
+    { name: '見つかった効果を承認/却下する（予測へ反映）', functionName: 'showCalendarApproval' },
+    { name: '季節の元データ(フォルダ)を切り替える（他店/新規店用）', functionName: 'setSeasonalSourceFolder' }
   ]);
   // 💰 原価管理 … よく使う「理論原価率を計算」を先頭に、残りは用途別サブメニューへ整理
   const uiCost = SpreadsheetApp.getUi();
@@ -177,17 +186,14 @@ function onOpen() {
       .addItem('ドリンクの使用量を実測に合わせて更新する（旧レシピは履歴保存）', 'adjustDrinkUsageToActual'))
     .addSubMenu(uiCost.createMenu('原価の点検・修正')
       .addItem('原価の抜けを点検する（未登録の食材を検出）', 'checkMissingIngredients')
-      .addItem('点検で選んだ食材を食材マスタに復元する', 'applyIngredientRestore')
-      .addItem('原価調整設定を作成する（旧コードの読み替え候補を追加）', 'setupCostAdjustSheet')
-      .addItem('【9月CP】新食材2件を食材マスタに登録（621053/621059）', 'registerSeptCpIngredients'))
+      .addItem('点検で選んだ食材を食材マスタに復元する', 'applyIngredientRestore'))
     .addSubMenu(uiCost.createMenu('食材コードの切替・整理')
       .addItem('食材コードの切替を今すぐ実行する', 'applyFoodCodeSwitches')
       .addItem('商品マスタの#REF!を直す（切替のスピル復活）', 'repairProductMasterSpill')
       .addItem('商品マスタを商品コード順に整える＋罫線（食材マスタも罫線）', 'tidyMasterSheets')
       .addItem('コードの稼働を点検する（旧コード・再利用・切替を検出）', 'buildCodeUsageCheck')
       .addItem('点検で選んだ商品コードを削除待ちに移す（元に戻せます）', 'archiveCheckedProductCodes')
-      .addItem('削除待ちから商品コードを元に戻す', 'restoreArchivedProductCodes')
-      .addItem('ワイルドにおろしにんにく1gを一括追加（店内＋TO）', 'addOroshiGarlicToWildSteak'))
+      .addItem('削除待ちから商品コードを元に戻す', 'restoreArchivedProductCodes'))
     .addToUi();
   // 🖨 発注書と仕込み・解凍表 … 発注書・仕込み表を今週分/来週分でセットに、調整はサブメニューへ整理
   const uiOrder = SpreadsheetApp.getUi();
@@ -199,12 +205,12 @@ function onOpen() {
     .addItem('仕込み・解凍表を作る（来週分）', 'buildPrepThawSheet')
     .addItem('仕込み・解凍表の入力フォームを開く（在庫・調整・品目）', 'showPrepForm')
     .addItem('予測値（上限/中/下限）を品目ごとに変える', 'openPrepTierSetting')
-    .addItem('ロスを入力する（余った食材を記録）', 'showLossForm')
-    .addItem('ロスの傾向を見る（食材別・直近28日）', 'showLossSummary')
     .addItem('売り切れた食材を登録／解除（最低ストック+1ロット）', 'markSoldOut')
     .addItem('発注書の数字のこまかさを決める（整数／小数第1位／第2位・食材ごと）', 'markOrderDigit')
     .addItem('自己判断食材を登録／解除（最低ストックを付けない・在庫を見て発注）', 'markSelfJudge')
     .addItem('連休明けの傾向を見る（下降カーブ・蓄積中）', 'showPostHolidayCurve')
+    .addItem('欠品しない在庫を確率で見る＋SL効果の確認（欠品率・廃棄期待）', 'buildStockProbabilityAnalysis')
+    .addItem('欠品しない確率(サービスレベル)を食材ごとに決める→発注へ反映', 'markServiceLevel')
     .addSeparator()
     .addSubMenu(uiOrder.createMenu('発注書の調整（ときどき）')
       .addItem('発注書のレイアウトを作り直す（食材を変えた時）', 'buildOrderSheetWide')
@@ -213,8 +219,6 @@ function onOpen() {
       .addItem('トレンド履歴の曜日別平均を再計算', 'buildTrendHistoryAverages')
       .addItem('食材マスタの区分を点検＋プルダウン設定（6区分）', 'setupIngredientCategoryValidation')
       .addItem('生鮮の消費期限欄を用意する（O列・廃棄対策）', 'setupFreshShelfColumn')
-      .addItem('安全係数を自動最適化する（サービス水準・欠品を減らす）', 'autoSetSafetyFactorsSL')
-      .addItem('安全係数を自動最適化の前に戻す', 'restoreSafetyFactorsBackup')
       .addItem('食材マスタ・発注書を発注画面の順に並べ替える', 'sortIngredientMaster'))
     .addSubMenu(uiOrder.createMenu('表に出す食材の調整')
       .addItem('食材を手動で「不使用」にする（表から外す）', 'orderIngredientSetUnused')
@@ -222,10 +226,12 @@ function onOpen() {
       .addItem('手動設定を解除（自動判定に戻す）', 'orderIngredientClearManual')
       .addItem('手動設定の一覧を見る', 'orderIngredientListManual')
       .addItem('不使用食材の一覧・変化を見る（理由つき）', 'orderDeadIngReport')
-      .addItem('ミル塩を店内ワイルド商品に登録（1回だけ・0.1g）', 'addSaltToWildDineIn')
-      .addItem('ハバネロソースを各ペッパーライスに登録（0.1）', 'addHabaneroToPepperRice')
       .addItem('不使用の行を表示／隠す（切替・確認用）', 'orderToggleDeadRows'))
     .addToUi();
+  SpreadsheetApp.getActiveSpreadsheet().addMenu('🗑 廃棄登録', [
+    { name: '廃棄を登録する（食材・商品を選ぶだけ／金額は自動）', functionName: 'showLossForm' },
+    { name: '廃棄の傾向・金額を見る（廃棄分析シート）', functionName: 'buildWasteAnalysis' }
+  ]);
   SpreadsheetApp.getActiveSpreadsheet().addMenu('🗂 シート整理', [
     { name: '使っていないシートを「_削除待ち_」にする（削除はしません）', functionName: 'archiveUnusedSheets' },
     { name: '「_削除待ち_」のシートを元に戻す', functionName: 'restoreArchivedSheets' }
@@ -3049,6 +3055,12 @@ function buildSalesForecast() {
   const statusColorMap = { '実績確定':'#f0f0f0','除外':'#ffe0e0','予報反映中':'#e8f4fd','天候未定':'#fff9e6','予測':'#ffffff' };
   forecastRows.forEach((row, i) => { fSheet.getRange(i+2,1,1,12).setBackground(statusColorMap[row[9]] || '#ffffff'); });
 
+  try { applyCalendarToForecast_(ss); } catch (e) { console.log('カレンダー反映をスキップ: ' + e); }   // 承認済みカレンダー倍率を未来予測(I)に。MARKER_CALENDAR_EFFECT
+  try { computeForecastBlend_(ss); } catch (e) { console.log('ブレンド列の計算をスキップ: ' + e); }   // 本番×回帰ブレンドをM/N列に。MARKER_FORECAST_BLEND
+  try { if (ss.getSheetByName(SEASONAL_HIST_SHEET_)) seasonalRebuildIndex_(ss); } catch (e) { console.log('季節指数の自動更新をスキップ: ' + e); }   // 取込済みの店だけ・実績が増えたら季節指数(見える化)を自動更新。MARKER_SEASONAL_INDEX
+  // ※季節指数は検証の結果「予測に掛けると悪化」だったので、予測へは反映しない(computeSeasonalAdjust_/P・Q列は不使用)。季節指数シートは傾向を見る用として残す。
+  try { if (ss.getSheetByName(SEASONAL_HIST_SHEET_)) calendarAutoStep_(ss); } catch (e) { console.log('カレンダー検定をスキップ: ' + e); }   // 給料日/月末等を自動検定→有意なら通知。MARKER_CALENDAR_EFFECT
+
   if (newProductList.length > 0) writeNewProductEstimates_(ss, newProductList, estDailyDishes, today);
 
   const countOf = s => forecastRows.filter(r => r[9] === s).length;
@@ -3059,6 +3071,654 @@ function buildSalesForecast() {
 
   // 天候解析シートを降水量ベースで更新
   updateWeatherAnalysis_(ss, precipCoeffMap, wxSheetForPrecip);
+}
+
+// ===== 売上予測ブレンド（本番×回帰）＝核は触らず新列で並べて様子見。MARKER_FORECAST_BLEND =====
+// 回帰＝log(売上)~曜日ダミー+日付トレンド+祝日+イベント（直近150日OLS）。ブレンド＝0.5×本番+0.5×回帰。
+// 実測バックテスト(2026-08-31・直近150日)：本番MAPE18.3%→ブレンド16.1%・RMSE−10%（天候不要）。
+// ※発注はこの売上予測を使わない（食材の曜日平均で回る）ので、効くのは主に表示・シフト・心構え。
+function forecastOLS_(X, y) {   // 正規方程式でOLS係数を解く（ガウス消去）
+  const n = X.length, p = X[0].length;
+  const A = Array.from({ length: p }, () => new Array(p).fill(0)), B = new Array(p).fill(0);
+  for (let i = 0; i < n; i++) for (let a = 0; a < p; a++) { B[a] += X[i][a] * y[i]; for (let b = 0; b < p; b++) A[a][b] += X[i][a] * X[i][b]; }
+  for (let a = 0; a < p; a++) A[a][a] += 1e-6;   // 微小リッジで安定化
+  const M = A.map((r, i) => r.concat(B[i]));
+  for (let c = 0; c < p; c++) {
+    let pv = c; for (let r = c + 1; r < p; r++) if (Math.abs(M[r][c]) > Math.abs(M[pv][c])) pv = r;
+    const tmp = M[c]; M[c] = M[pv]; M[pv] = tmp;
+    if (Math.abs(M[c][c]) < 1e-12) return null;
+    for (let r = 0; r < p; r++) { if (r === c) continue; const f = M[r][c] / M[c][c]; for (let k = c; k <= p; k++) M[r][k] -= f * M[c][k]; }
+  }
+  return M.map((r, i) => r[p] / M[i][i]);
+}
+function forecastFeat_(dow, idx, hol, event) {   // 特徴量：定数+曜日ダミー(火〜土)+トレンド+祝日+イベント
+  const f = [1]; for (let d = 2; d <= 7; d++) f.push(dow === d ? 1 : 0); f.push(idx / 100); f.push(hol); f.push((Number(event) || 1) - 1); return f;
+}
+// 売上予測シートを読み、回帰予測(M)・ブレンド予測(N)・ブレンド誤差率(O)を書く。
+//   過去(実績あり)の行は「その日より前のデータだけ」でOLS＝後知恵なし＝本番L列とフェア比較・採点メニューと一致。
+//   未来(実績なし)の行は、確定済みの全実績で学習した予測。誤差率O=(ブレンド−実績)÷実績（本番L列と同じ式）。
+function computeForecastBlend_(ss) {
+  const sh = ss.getSheetByName('売上予測'); if (!sh || sh.getLastRow() < 2) return null;
+  const n = sh.getLastRow() - 1;
+  const vals = sh.getRange(2, 1, n, 12).getValues();   // A..L（日付昇順）
+  const t0 = new Date(vals[0][0]).getTime();
+  const idxOf = d => (new Date(d).getTime() - t0) / 86400000;
+  const training = [];   // これより前の「確定した実績日」だけを貯める（後知恵防止）
+  const outM = [], outN = [], outO = [];
+  for (let i = 0; i < n; i++) {
+    const r = vals[i];
+    const I = (r[8] === '' || r[8] == null) ? null : Number(r[8]);
+    const K = (r[10] === '' || r[10] == null) ? null : Number(r[10]);
+    const dow = Number(r[1]), hol = (r[4] !== '' && r[4] != null) ? 1 : 0, event = Number(r[5]) || 1;
+    let reg = null;
+    if (training.length >= 25) {
+      const tr = training.slice(-150);
+      const beta = forecastOLS_(tr.map(t => forecastFeat_(t.dow, t.idx, t.hol, t.event)), tr.map(t => Math.log(t.y)));
+      if (beta) { const f = forecastFeat_(dow, idxOf(r[0]), hol, event); let lp = 0; for (let a = 0; a < f.length; a++) lp += f[a] * beta[a]; reg = Math.exp(lp); }
+    }
+    const blend = (reg != null && I != null && I > 0) ? (0.5 * I + 0.5 * reg) : (I != null ? I : null);
+    outM.push([reg != null ? Math.round(reg) : '']);
+    outN.push([blend != null ? Math.round(blend) : '']);
+    outO.push([(blend != null && K != null && K > 0) ? Math.round((blend - K) / K * 1000) / 1000 : '']);
+    if (K != null && K > 0) training.push({ idx: idxOf(r[0]), dow: dow, hol: hol, event: event, y: K });
+  }
+  sh.getRange(1, 13).setValue('回帰予測'); sh.getRange(1, 14).setValue('ブレンド予測'); sh.getRange(1, 15).setValue('ブレンド誤差率');
+  sh.getRange(2, 13, n, 1).setValues(outM);
+  sh.getRange(2, 14, n, 1).setValues(outN);
+  sh.getRange(2, 15, n, 1).setValues(outO);
+  sh.getRange(2, 13, n, 2).setNumberFormat('#,##0');
+  sh.getRange(2, 15, n, 1).setNumberFormat('0.0%');
+  return true;
+}
+// メニュー：本番 vs ブレンドを「過去データだけ」で正直に採点（rolling out-of-sample）。どちらが当たるか数字で確認。
+function forecastBlendBacktest() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(), ui = SpreadsheetApp.getUi();
+  const sh = ss.getSheetByName('売上予測'); if (!sh || sh.getLastRow() < 2) { ui.alert('売上予測がありません'); return; }
+  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 12).getValues();
+  const recs = [];
+  vals.forEach(r => { const k = (r[10] === '' || r[10] == null) ? null : Number(r[10]); if (k == null || k <= 0) return;
+    recs.push({ t: new Date(r[0]).getTime(), dow: Number(r[1]), hol: (r[4] !== '' && r[4] != null) ? 1 : 0, event: Number(r[5]) || 1, y: k, prodF: (r[8] === '' || r[8] == null) ? null : Number(r[8]) }); });
+  recs.sort((a, b) => a.t - b.t);
+  if (recs.length < 80) { ui.alert('売上予測 採点', 'データが少なすぎます（' + recs.length + '日）。もう少したまってから。', ui.ButtonSet.OK); return; }
+  const t0 = recs[0].t, idxOf = t => (t - t0) / 86400000;
+  const H = Math.min(150, recs.length - 60), start = recs.length - H;
+  let sumI = 0, sumN = 0, c = 0, seI = 0, seN = 0, win = 0;
+  for (let i = start; i < recs.length; i++) {
+    const t = recs[i]; if (t.prodF == null) continue;
+    const tr = recs.slice(Math.max(0, i - 150), i).filter(r => r.y > 0);
+    if (tr.length < 25) continue;
+    const beta = forecastOLS_(tr.map(r => forecastFeat_(r.dow, idxOf(r.t), r.hol, r.event)), tr.map(r => Math.log(r.y)));
+    if (!beta) continue;
+    const f = forecastFeat_(t.dow, idxOf(t.t), t.hol, t.event); let lp = 0; for (let a = 0; a < f.length; a++) lp += f[a] * beta[a];
+    const reg = Math.exp(lp), blend = 0.5 * t.prodF + 0.5 * reg;
+    const eI = Math.abs(t.prodF - t.y) / t.y, eN = Math.abs(blend - t.y) / t.y;
+    sumI += eI; sumN += eN; c++; seI += (t.prodF - t.y) ** 2; seN += (blend - t.y) ** 2; if (eN < eI) win++;
+  }
+  if (!c) { ui.alert('売上予測 採点', '採点できるデータがありません。', ui.ButtonSet.OK); return; }
+  const mapeI = (sumI / c * 100).toFixed(1), mapeN = (sumN / c * 100).toFixed(1);
+  const rmseI = Math.round(Math.sqrt(seI / c)), rmseN = Math.round(Math.sqrt(seN / c));
+  ui.alert('売上予測 採点（過去' + c + '日・過去データのみで比較）',
+    '本番予測　：MAPE ' + mapeI + '％ ／ RMSE ' + rmseI + '\n' +
+    'ブレンド　：MAPE ' + mapeN + '％ ／ RMSE ' + rmseN + '\n\n' +
+    'ブレンドが本番より当たった日：' + win + '／' + c + '日\n' +
+    '（MAPEが小さいほど当たり。ブレンド＝本番×回帰の半々）', ui.ButtonSet.OK);
+}
+
+// ===== 過去データ(前年)で季節指数を作り予測に反映＝新規店にも移植可。MARKER_SEASONAL_INDEX =====
+// 目的：成長トレンドと曜日を除いた「純粋な季節のうねり(月別倍率)」を過去1年から抽出し、
+//   祝日タグの日を除外して二重掛けを防ぎつつ、opt-inの新列(季節調整予測P/誤差率Q)で本番と並べて採点する。
+//   元データ＝自店の過去(既定フォルダ)。他店/新規店はフォルダIDを差し替えるだけで同じ仕組みが動く。
+//   データ形式＝ホットパレットの日別売上集計CSV(fdsal03014)。列1=売上・列11=前年同曜・列27=客数。
+var SEASONAL_DEFAULT_FOLDER_ID_ = '1zuZbWtPRLrHRkTR35k6yBNvmKGbcQfRZ';   // Driveの「過去データ」フォルダ(自店)
+var SEASONAL_HIST_SHEET_ = '過去売上履歴';
+var SEASONAL_IDX_SHEET_ = '季節指数';
+var SEASONAL_PROP_ = 'seasonalMonthIndex';          // {1..12:倍率}をJSONで保存
+var SEASONAL_FOLDER_PROP_ = 'seasonalSourceFolderId';
+
+function seasonalFolderId_() {
+  const p = PropertiesService.getDocumentProperties().getProperty(SEASONAL_FOLDER_PROP_);
+  return (p && p.trim()) ? p.trim() : SEASONAL_DEFAULT_FOLDER_ID_;
+}
+
+// メニュー：季節の元データ(Driveフォルダ)を切り替える。他店/新規店用。URLでもIDでも可。
+function setSeasonalSourceFolder() {
+  const ui = SpreadsheetApp.getUi();
+  const cur = seasonalFolderId_();
+  const res = ui.prompt('季節の元データ(フォルダ)を切り替える',
+    '過去データのDriveフォルダの「URL」か「ID」を貼り付けてください。\n（空欄でOK＝自店の既定に戻します）\n\n今の設定：' + cur, ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  let v = (res.getResponseText() || '').trim();
+  const props = PropertiesService.getDocumentProperties();
+  if (!v) { props.deleteProperty(SEASONAL_FOLDER_PROP_); ui.alert('自店の既定フォルダに戻しました。'); return; }
+  const m = v.match(/[-\w]{25,}/); if (m) v = m[0];   // URLからフォルダID抽出
+  let name = ''; try { name = DriveApp.getFolderById(v).getName(); } catch (e) { ui.alert('そのフォルダを開けませんでした。IDかURLを確認してください。'); return; }
+  props.setProperty(SEASONAL_FOLDER_PROP_, v);
+  ui.alert('元データフォルダを切り替えました：\n「' + name + '」\n' + v + '\n\nこのあと「過去データを取り込む」→「季節指数を作る」を実行してください。');
+}
+
+// メニュー：Driveの過去データフォルダ(fdsal03014の月次CSV)を読み、過去売上履歴シートに日次売上・客数を蓄積。
+function importPastYearSales() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(), ui = SpreadsheetApp.getUi();
+  const fid = seasonalFolderId_();
+  let folder; try { folder = DriveApp.getFolderById(fid); } catch (e) { ui.alert('過去データフォルダを開けません（ID：' + fid + '）。「季節の元データを切り替える」で設定し直してください。'); return; }
+  const files = folder.getFiles();
+  const map = {};   // 'yyyy/MM/dd' → {sales,guests,prev}
+  let fileCount = 0;
+  while (files.hasNext()) {
+    const f = files.next();
+    if (f.getName().indexOf('fdsal03014') < 0) continue;   // 日別売上集計だけ取り込む
+    fileCount++;
+    let rows; try { rows = Utilities.parseCsv(f.getBlob().getDataAsString('Shift_JIS')); } catch (e) { continue; }
+    rows.forEach(c => {
+      if (!c || !c[0]) return;
+      if (!/^\d{4}\/\d{2}\/\d{2}$/.test(String(c[0]).trim())) return;   // 日付行だけ(合計・見出しは無視)
+      const num = x => Number(String(x == null ? '' : x).replace(/[^\d.-]/g, '')) || 0;
+      map[String(c[0]).trim()] = { sales: num(c[1]), guests: num(c[26]), prev: num(c[10]) };
+    });
+  }
+  const dates = Object.keys(map).sort();
+  if (!dates.length) { ui.alert('過去データが見つかりませんでした（fdsal03014のCSVを' + fileCount + '個確認）。フォルダの中身を確認してください。'); return; }
+  const sh = ss.getSheetByName(SEASONAL_HIST_SHEET_) || ss.insertSheet(SEASONAL_HIST_SHEET_);
+  sh.clear();
+  sh.getRange(1, 1, 1, 4).setValues([['日付', '売上', '客数', '前年同曜売上']]);
+  const out = dates.map(d => [d, map[d].sales, map[d].guests, map[d].prev]);
+  sh.getRange(2, 1, out.length, 4).setValues(out);
+  sh.getRange(2, 2, out.length, 3).setNumberFormat('#,##0');
+  sh.setFrozenRows(1);
+  ui.alert('過去売上を取り込みました',
+    'ファイル：' + fileCount + '個\n日数：' + out.length + '日\n期間：' + dates[0] + ' 〜 ' + dates[dates.length - 1] +
+    '\n\n※今の実績データ・発注には一切触れていません。\nこのあと「季節指数を作る」を実行してください。', ui.ButtonSet.OK);
+}
+
+// 日次レコード(祝日タグ日フラグ付き)＋成長トレンドを算出する共通部品。
+//   材料＝「過去売上履歴」(①で取り込んだ昔の分・前年列あり)＋「日次売上実績」(毎日たまる生データ)を日付で合体。
+//   → 実績が増えるほど季節指数が自動で育つ。重なる日は生データを優先(訂正反映)。
+function seasonalReadRecords_(ss) {
+  const map = {};   // ds → {y, prev}
+  const hist = ss.getSheetByName(SEASONAL_HIST_SHEET_);
+  if (hist && hist.getLastRow() > 1) {
+    hist.getRange(2, 1, hist.getLastRow() - 1, 4).getValues().forEach(r => {
+      const ds = toDateStr_(r[0]); if (!/^\d{4}\/\d{2}\/\d{2}$/.test(ds)) return;
+      map[ds] = { y: Number(r[1]) || 0, prev: Number(r[3]) || 0 };
+    });
+  }
+  const live = ss.getSheetByName('日次売上実績');   // 日付/曜日コード/曜日名/総売上/総客数
+  if (live && live.getLastRow() > 1) {
+    live.getRange(2, 1, live.getLastRow() - 1, 5).getValues().forEach(r => {
+      const ds = toDateStr_(r[0]); if (!/^\d{4}\/\d{2}\/\d{2}$/.test(ds)) return;
+      const y = Number(r[3]) || 0;   // 総売上
+      if (map[ds]) { if (y > 0) map[ds].y = y; } else map[ds] = { y: y, prev: 0 };   // 生を優先・前年は過去履歴の値を保持
+    });
+  }
+  const off = {};
+  const hm = ss.getSheetByName('祝日マスタ');
+  if (hm && hm.getLastRow() > 1) hm.getRange(2, 1, hm.getLastRow() - 1, 9).getValues().forEach(r => { if (r[0] && r[2]) off[toDateStr_(r[0])] = true; });
+  const rec = [];
+  Object.keys(map).forEach(ds => {
+    const s = map[ds].y || 0; if (s <= 0) return;   // 休業日(0)は除外
+    const p = ds.split('/'), yy = +p[0], mm = +p[1], dd = +p[2];
+    const d = new Date(yy, mm - 1, dd);   // ローカル日付（曜日・並べ替え用。タイムゾーンずれを避ける）
+    rec.push({ d: d, ds: ds, y: s, prev: map[ds].prev || 0, dow: d.getDay(), mon: mm, off: !!off[ds] });
+  });
+  rec.sort((a, b) => a.d - b.d);
+  const n = rec.length; if (n < 60) return null;
+  // log一次トレンド(成長を除く)
+  const ly = rec.map(r => Math.log(r.y));
+  let mt = 0, mly = 0; for (let i = 0; i < n; i++) { mt += i; mly += ly[i]; } mt /= n; mly /= n;
+  let sxy = 0, sxx = 0; for (let i = 0; i < n; i++) { sxy += (i - mt) * (ly[i] - mly); sxx += (i - mt) * (i - mt); }
+  const b = sxy / sxx, a = mly - b * mt;
+  const ratio = rec.map((r, i) => r.y / Math.exp(a + b * i));
+  // 曜日中立化(曜日は本番モデルが別で持っているので季節から抜く)
+  const dsum = new Array(7).fill(0), dcnt = new Array(7).fill(0);
+  for (let i = 0; i < n; i++) { dsum[rec[i].dow] += ratio[i]; dcnt[rec[i].dow]++; }
+  const dmean = dsum.map((v, i) => dcnt[i] ? v / dcnt[i] : 1);
+  for (let i = 0; i < n; i++) rec[i].seas = ratio[i] / (dmean[rec[i].dow] || 1);
+  return { rec: rec, n: n, growth: Math.exp(b * 365) - 1 };
+}
+
+// 月別の純季節指数(平均1に正規化)を rec から作る。includeOff=false で祝日タグ日を除外(適用向け)、true で祝日込み(月全体を見る用)。
+function seasonalMonthIndexFrom_(rec, includeOff) {
+  const msum = new Array(13).fill(0), mcnt = new Array(13).fill(0);
+  rec.forEach(r => { if (!includeOff && r.off) return; msum[r.mon] += r.seas; mcnt[r.mon]++; });
+  const idx = new Array(13).fill(1);
+  for (let m = 1; m <= 12; m++) idx[m] = mcnt[m] ? msum[m] / mcnt[m] : 1;
+  let wsum = 0, wn = 0; for (let m = 1; m <= 12; m++) { wsum += idx[m] * mcnt[m]; wn += mcnt[m]; }
+  const gm = wn ? wsum / wn : 1;
+  for (let m = 1; m <= 12; m++) idx[m] = gm ? idx[m] / gm : 1;
+  return { idx: idx, cnt: mcnt };
+}
+
+// 季節指数を静かに再計算＋「季節指数」シート描画＋保存。R(レコード)を返す。材料が60日未満ならnull。
+//   ※buildSalesForecastから毎回呼ばれ、実績が増えるたび自動で作り直される。
+function seasonalRebuildIndex_(ss) {
+  const R = seasonalReadRecords_(ss);
+  if (!R) return null;
+  const rec = R.rec, n = R.n;
+  const Mf = seasonalMonthIndexFrom_(rec, true), idxFull = Mf.idx;    // 祝日込み(正月・お盆・GW込みの月全体＝見る用)
+  const M = seasonalMonthIndexFrom_(rec, false), idx = M.idx, mcnt = M.cnt;   // 祝日除く(参考)
+  const mall = new Array(13).fill(0); rec.forEach(r => mall[r.mon]++);
+  PropertiesService.getDocumentProperties().setProperty(SEASONAL_PROP_, JSON.stringify(idx));
+  const sh = ss.getSheetByName(SEASONAL_IDX_SHEET_) || ss.insertSheet(SEASONAL_IDX_SHEET_);
+  sh.clear();
+  const mn = ['', '1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
+  const body = [['月', '季節指数(祝日込み・月全体)', '季節指数(祝日除く・参考)', '日数', 'うち祝日']];
+  for (let m = 1; m <= 12; m++) body.push([mn[m], Math.round(idxFull[m] * 1000) / 1000, Math.round(idx[m] * 1000) / 1000, mall[m], mall[m] - mcnt[m]]);
+  sh.getRange(1, 1, body.length, 5).setValues(body);
+  sh.getRange(2, 2, 12, 2).setNumberFormat('0.000');
+  for (let m = 1; m <= 12; m++) { const v = idxFull[m]; const c = v >= 1.03 ? '#d9ead3' : (v <= 0.97 ? '#fce5cd' : null); if (c) sh.getRange(m + 1, 2).setBackground(c); }
+  sh.getRange(1, 7, 9, 1).setValues([
+    ['【この表の見方】'],
+    ['1.00＝その時期の平常。1.05なら平常より+5%高い月・0.95なら-5%低い月。'],
+    ['成長(右肩上がり)と曜日は除いた"季節だけ"の倍率です。'],
+    ['B列＝祝日込み(正月・お盆・GWも含む月全体の姿)。見る用はこちら。'],
+    ['C列＝祝日除く(祝日はモデルが別で対応するため抜いた参考値)。'],
+    ['材料＝過去売上履歴＋日次売上実績(毎日の生データ)。実績が増えると自動で更新。'],
+    ['年間成長率(このデータ)：約 ' + Math.round(R.growth * 100) + '％/年'],
+    ['元データ期間：' + rec[0].ds + ' 〜 ' + rec[n - 1].ds + '（' + n + '日）'],
+    ['※検証の結果この倍率は予測には掛けません(掛けると悪化)。傾向を"見る"ための表です。']
+  ]);
+  sh.setColumnWidth(7, 520);
+  sh.setFrozenRows(1);
+  return R;
+}
+
+// メニュー：季節指数を今すぐ作り直して見える化。
+function buildSeasonalIndex() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(), ui = SpreadsheetApp.getUi();
+  const R = seasonalRebuildIndex_(ss);
+  if (!R) { ui.alert('データが足りません。先に「① 過去データを取り込む」を実行してください（または日次売上実績が60日以上たまるのをお待ちください）。'); return; }
+  ui.alert('季節指数を作りました',
+    '期間：' + R.rec[0].ds + ' 〜 ' + R.rec[R.n - 1].ds + '（' + R.n + '日）\n年間成長率：約' + Math.round(R.growth * 100) + '％\n\n' +
+    '月別の倍率を「季節指数」シートに出しました。\nこれから実績が増えるたび、売上予測を更新すると自動で作り直されます。\n効くかは「③ 季節調整を採点」で確認できます。', ui.ButtonSet.OK);
+}
+
+function readSeasonalMonthIndex_() {
+  try { const j = PropertiesService.getDocumentProperties().getProperty(SEASONAL_PROP_); if (!j) return null; const a = JSON.parse(j); return Array.isArray(a) ? a : null; } catch (e) { return null; }
+}
+
+// 売上予測に「季節調整予測」(P=16)と「季節誤差率」(Q=17)を書く。ブレンド予測(N)×季節指数(その月・祝日日は掛けない)。
+//   opt-in：季節指数が未作成なら何もしない。核(I)・ブレンド(N)は不変。buildSalesForecast末尾で呼ぶ。
+function computeSeasonalAdjust_(ss) {
+  const idx = readSeasonalMonthIndex_(); if (!idx) return null;
+  const sh = ss.getSheetByName('売上予測'); if (!sh || sh.getLastRow() < 2) return null;
+  const n = sh.getLastRow() - 1;
+  const vals = sh.getRange(2, 1, n, 15).getValues();   // A..O
+  const outP = [], outQ = [];
+  for (let i = 0; i < n; i++) {
+    const r = vals[i];
+    const base = (r[13] !== '' && r[13] != null) ? Number(r[13]) : ((r[8] !== '' && r[8] != null) ? Number(r[8]) : null);  // N(ブレンド)優先・無ければI(本番)
+    const K = (r[10] === '' || r[10] == null) ? null : Number(r[10]);
+    const hol = (r[4] !== '' && r[4] != null);
+    const ds0 = toDateStr_(r[0]); const m = /^\d{4}\/\d{2}\/\d{2}$/.test(ds0) ? (+ds0.split('/')[1]) : 0;
+    const f = hol ? 1 : (idx[m] || 1);   // 祝日日は掛けない(二重掛け防止)
+    const adj = (base != null) ? base * f : null;
+    outP.push([adj != null ? Math.round(adj) : '']);
+    outQ.push([(adj != null && K != null && K > 0) ? Math.round((adj - K) / K * 1000) / 1000 : '']);
+  }
+  sh.getRange(1, 16).setValue('季節調整予測'); sh.getRange(1, 17).setValue('季節誤差率');
+  sh.getRange(2, 16, n, 1).setValues(outP); sh.getRange(2, 17, n, 1).setValues(outQ);
+  sh.getRange(2, 16, n, 1).setNumberFormat('#,##0'); sh.getRange(2, 17, n, 1).setNumberFormat('0.0%');
+  return true;
+}
+
+// メニュー：季節調整が効くかを採点。①同一年の指数で本番×季節を採点(参考・甘め)②前年同曜×成長で過去1年を当てる完全OOS。
+function seasonalBacktest() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(), ui = SpreadsheetApp.getUi();
+  const idx = readSeasonalMonthIndex_();
+  if (!idx) { ui.alert('先に「季節指数を作る」を実行してください。'); return; }
+  // ① 売上予測の確定日で 本番 vs 本番×季節指数
+  const sh = ss.getSheetByName('売上予測');
+  let msg = '';
+  if (sh && sh.getLastRow() > 1) {
+    const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 15).getValues();
+    let sA = 0, sB = 0, c = 0, winB = 0;
+    vals.forEach(r => {
+      const K = (r[10] === '' || r[10] == null) ? null : Number(r[10]);
+      const P = (r[8] === '' || r[8] == null) ? null : Number(r[8]);   // 本番予測I
+      if (K == null || K <= 0 || P == null) return;
+      const hol = (r[4] !== '' && r[4] != null);
+      const ds0 = toDateStr_(r[0]); const mm = /^\d{4}\/\d{2}\/\d{2}$/.test(ds0) ? (+ds0.split('/')[1]) : 0;
+      const f = hol ? 1 : (idx[mm] || 1);
+      const eA = Math.abs(P - K) / K, eB = Math.abs(P * f - K) / K;
+      sA += eA; sB += eB; c++; if (eB < eA) winB++;
+    });
+    if (c > 0) msg += '① 本番 vs 本番×季節指数（過去' + c + '日・参考※同一年の指数なので甘めに出ます）\n' +
+      '　本番　　：MAPE ' + (sA / c * 100).toFixed(1) + '％\n' +
+      '　季節調整：MAPE ' + (sB / c * 100).toFixed(1) + '％\n' +
+      '　季節調整が本番より当たった日：' + winB + '／' + c + '日\n\n';
+  }
+  // ② 完全OOS：前年同曜×成長率 で過去1年を当てる（前年→今年＝後知恵なし）
+  const R = seasonalReadRecords_(ss);
+  if (R) {
+    const rec = R.rec.filter(r => r.prev > 0);
+    if (rec.length >= 60) {
+      const yoy = rec.map(r => r.y / r.prev).sort((a, b) => a - b);
+      const G = yoy[Math.floor(yoy.length / 2)];   // 成長率の中央値
+      let s = 0; rec.forEach(r => { s += Math.abs(r.prev * G - r.y) / r.y; });
+      msg += '② 前年同曜×成長率(' + Math.round((G - 1) * 100) + '％) で過去1年を当てる（完全に過去データのみ）\n' +
+        '　誤差(MAPE)：' + (s / rec.length * 100).toFixed(1) + '％（' + rec.length + '日）\n' +
+        '　→ この数字が本番並みなら、前年データに予測力あり。\n\n';
+    }
+  }
+  if (!msg) { ui.alert('採点できるデータがありません。取込と季節指数の作成を先に。'); return; }
+  ui.alert('季節調整の採点', msg + '※季節指数は「配分」なので普通の月は±数%の微調整。効きは年末年始/お盆/GW等の特異日に集中(そこは祝日マスタ側で対応)。', ui.ButtonSet.OK);
+}
+
+// メニュー：翌12か月の月別「売上目標」を作る。目標＝前年の同じ月の実績×(1+成長率)。季節・祝日は前年実績に内包。MARKER_MONTHLY_OUTLOOK
+function buildMonthlyOutlook() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(), ui = SpreadsheetApp.getUi();
+  const R = seasonalReadRecords_(ss);
+  if (!R) { ui.alert('先に「① 過去データを取り込む」を実行してください（前年の月別実績が必要です）。'); return; }
+  const rec = R.rec;
+  const idxFull = seasonalMonthIndexFrom_(rec, true).idx;
+  const mt = {};   // 'YYYY/MM' → 月合計
+  rec.forEach(r => { const k = r.ds.slice(0, 7); mt[k] = (mt[k] || 0) + r.y; });
+  // 成長率の初期値＝直近120日の前年比(中央値)
+  const withPrev = rec.filter(r => r.prev > 0);
+  let g = 0.1;
+  if (withPrev.length >= 30) { const a = withPrev.slice(-120).map(r => r.y / r.prev).sort((x, y) => x - y); g = a[Math.floor(a.length / 2)] - 1; }
+  g = Math.max(0, Math.round(g * 1000) / 1000);
+  const now = new Date(), sy = now.getFullYear(), sm = now.getMonth() + 1;
+  const dim = (y, m) => new Date(y, m, 0).getDate();
+  const sh = ss.getSheetByName('月次見込み') || ss.insertSheet('月次見込み');
+  sh.clear();
+  sh.getRange('A1').setValue('成長率(前年比)'); sh.getRange('B1').setValue(g); sh.getRange('B1').setNumberFormat('0.0%');
+  sh.getRange('C1').setValue('← B1を変えると全月の目標が再計算されます(例 0.10=前年比+10%)');
+  sh.getRange('A2').setValue('前年12か月 合計'); sh.getRange('B2').setFormula('=SUM(B6:B17)'); sh.getRange('B2').setNumberFormat('#,##0');
+  sh.getRange('A3').setValue('目標12か月 合計(年商)'); sh.getRange('B3').setFormula('=SUM(D6:D17)'); sh.getRange('B3').setNumberFormat('#,##0');
+  sh.getRange(5, 1, 1, 6).setValues([['対象月', '前年同月実績', '季節指数(祝日込)', '目標売上', '翌年日数', '目標1日平均']]);
+  const rows = [];
+  for (let k = 0; k < 12; k++) {
+    let m = sm + k, y = sy; while (m > 12) { m -= 12; y++; }
+    const key = (y - 1) + '/' + ('0' + m).slice(-2);
+    rows.push([y + '/' + ('0' + m).slice(-2), (mt[key] != null ? mt[key] : ''), Math.round(idxFull[m] * 1000) / 1000, '', dim(y, m), '']);
+  }
+  sh.getRange(6, 1, 12, 6).setValues(rows);
+  for (let i = 0; i < 12; i++) {
+    const r = 6 + i;
+    sh.getRange(r, 4).setFormula('=IF(B' + r + '="","",ROUND(B' + r + '*(1+$B$1),-2))');
+    sh.getRange(r, 6).setFormula('=IF(D' + r + '="","",ROUND(D' + r + '/E' + r + ',-1))');
+  }
+  sh.getRange(6, 2, 12, 1).setNumberFormat('#,##0');
+  sh.getRange(6, 3, 12, 1).setNumberFormat('0.000');
+  sh.getRange(6, 4, 12, 1).setNumberFormat('#,##0');
+  sh.getRange(6, 6, 12, 1).setNumberFormat('#,##0');
+  sh.getRange(19, 1, 6, 1).setValues([
+    ['【使い方】'],
+    ['目標売上＝前年の同じ月の実績×(1+成長率)。季節も祝日も前年実績に含まれています。'],
+    ['成長率(B1)を変えると全月が再計算。強気/控えめを試せます(初期値＝直近の前年比)。'],
+    ['季節指数(祝日込)は"なぜその月が高い/低いか"の参考。目標計算には前年実績を使用。'],
+    ['注意：前年に特殊要因があった月は手で調整を。例＝2月は前年に冬季五輪(在宅観戦で減)→翌年五輪が無ければ目標を少し上げてよい。'],
+    ['日々の予測・発注には使いません。月の計画・売上目標づくり用です。']
+  ]);
+  sh.setColumnWidth(1, 90); sh.setColumnWidth(2, 120); sh.setColumnWidth(3, 130); sh.setColumnWidth(4, 120); sh.setColumnWidth(6, 120);
+  sh.setFrozenRows(5);
+  ui.alert('月次見込み(売上目標)を作りました',
+    '成長率' + Math.round(g * 100) + '%（前年比・直近から自動設定）で、翌12か月の月別目標を出しました。\n' +
+    '「月次見込み」シートのB1で強気/控えめを調整できます。年商の目安も上に出しています。', ui.ButtonSet.OK);
+}
+
+// メニュー：CP商品が実際に何個出たか(実数)・売上比を商品別に集計。実績データ×商品マスタ単価。新シート「CP商品実績」。MARKER_CP_PRODUCT_ACTUALS
+//   対象＝実施中＋直近90日以内に終了＋繰り返し(肉の日等)。売上は定価×出数の概算(セット割引前)。既存シート・発注は不変。
+function buildCpProductActuals() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(), ui = SpreadsheetApp.getUi();
+  const cpSh = ss.getSheetByName('CP設定'); if (!cpSh || cpSh.getLastRow() < 2) { ui.alert('CP設定がありません。'); return; }
+  const jSh = ss.getSheetByName('実績データ'); if (!jSh || jSh.getLastRow() < 2) { ui.alert('実績データがありません。'); return; }
+  const pmSh = ss.getSheetByName('商品マスタ');
+  const WINDOW_BACK = 90;
+  const todayStr = toDateStr_(new Date());
+  const backStr = toDateStr_(new Date(Date.now() - WINDOW_BACK * 86400000));
+  // 価格・名前マップ（商品コード→販売価格C列/商品名B列。同コードは最大価格を採用）
+  const priceMap = {}, nameMap = {};
+  if (pmSh && pmSh.getLastRow() > 1) {
+    pmSh.getRange(2, 1, pmSh.getLastRow() - 1, 3).getValues().forEach(r => {
+      const code = Number(r[0]); if (!code) return;
+      const p = Number(r[2]) || 0;
+      if (!(code in priceMap) || p > priceMap[code]) priceMap[code] = p;
+      if (r[1] && !nameMap[code]) nameMap[code] = String(r[1]);
+    });
+  }
+  // CP日付の解析（8桁数値20260318・ISO文字列・Date・空欄に対応）
+  const cpDateStr = v => {
+    if (v === '' || v == null) return null;
+    if (v instanceof Date) return toDateStr_(v);
+    const s = String(v).trim();
+    if (/^\d{8}$/.test(s)) return s.slice(0, 4) + '/' + s.slice(4, 6) + '/' + s.slice(6, 8);
+    const d = new Date(s); return isNaN(d) ? null : toDateStr_(d);
+  };
+  // 対象CPを収集（除外・休止行はスキップ）
+  const cpVals = cpSh.getRange(2, 1, cpSh.getLastRow() - 1, 17).getValues();
+  const cps = [], codeSet = {};
+  cpVals.forEach(r => {
+    const name = String(r[0] || '').trim(); if (!name) return;
+    const kind = String(r[8] || '').trim();
+    if (kind === '除外' || kind === '休止') return;
+    const repeat = String(r[6] || '').trim();
+    const s = cpDateStr(r[1]), e = cpDateStr(r[2]);
+    let endEff = e ? (e > todayStr ? todayStr : e) : todayStr;
+    let startEff = s;
+    if (!startEff) startEff = (e ? toDateStr_(new Date(new Date(e.replace(/\//g, '-')).getTime() - WINDOW_BACK * 86400000)) : backStr);
+    if (repeat && !s && !e) { startEff = backStr; endEff = todayStr; }
+    if (endEff < backStr) return;   // 直近90日より前に終わったCPは対象外
+    const codes = parseCpCodes_(r[3]); if (!codes.length) return;
+    codes.forEach(c => codeSet[c] = true);
+    cps.push({ name, s: startEff, e: endEff, codes });
+  });
+  if (!cps.length) { ui.alert('対象CPがありません（直近90日）。'); return; }
+  // 実績データを1パス集計
+  const jVals = jSh.getRange(2, 1, jSh.getLastRow() - 1, 7).getValues();
+  const perDay = {}, codeDay = {};
+  jVals.forEach(r => {
+    if (!r[0]) return; const ds = toDateStr_(r[0]);
+    if (!perDay[ds]) perDay[ds] = { total: 0, served: 0 };
+    perDay[ds].served += Number(r[6]) || 0;
+    if ((Number(r[2]) || 0) > perDay[ds].total) perDay[ds].total = Number(r[2]) || 0;
+    const code = Number(r[4]);
+    if (code && codeSet[code]) {
+      (codeDay[code] || (codeDay[code] = {}))[ds] = (codeDay[code][ds] || 0) + (Number(r[6]) || 0);
+      if (r[5] && !nameMap[code]) nameMap[code] = String(r[5]);
+    }
+  });
+  const allDays = Object.keys(perDay).sort();
+  // 出力
+  const out = [['CP名', 'コード', '商品名', '出数合計', '1日平均', '売上概算', '売上比', '出食比', '期間']];
+  const boldRows = [];
+  cps.sort((a, b) => (a.s < b.s ? 1 : -1));   // 新しいCPを上に
+  cps.forEach(cp => {
+    const winDays = allDays.filter(ds => ds >= cp.s && ds <= cp.e);
+    if (!winDays.length) return;
+    const activeDays = winDays.length;
+    let storeSales = 0, storeServed = 0;
+    winDays.forEach(ds => { storeSales += perDay[ds].total; storeServed += perDay[ds].served; });
+    const prod = cp.codes.map(c => {
+      let qty = 0; const cd = codeDay[c]; if (cd) winDays.forEach(ds => { if (cd[ds]) qty += cd[ds]; });
+      return { c: c, name: nameMap[c] || ('コード' + c), qty: qty, sales: qty * (priceMap[c] || 0) };
+    }).filter(p => p.qty > 0);
+    if (!prod.length) return;
+    prod.sort((a, b) => b.qty - a.qty);
+    const cpQty = prod.reduce((s, p) => s + p.qty, 0), cpSales = prod.reduce((s, p) => s + p.sales, 0);
+    prod.forEach((p, i) => {
+      out.push([i === 0 ? cp.name : '', p.c, p.name, p.qty, Math.round(p.qty / activeDays * 10) / 10, p.sales,
+        storeSales > 0 ? p.sales / storeSales : '', storeServed > 0 ? p.qty / storeServed : '',
+        i === 0 ? (cp.s + '〜' + cp.e + ' ' + activeDays + '日') : '']);
+    });
+    out.push(['　└ CP計', '', '', cpQty, Math.round(cpQty / activeDays * 10) / 10, cpSales,
+      storeSales > 0 ? cpSales / storeSales : '', storeServed > 0 ? cpQty / storeServed : '', '']);
+    boldRows.push(out.length);
+    out.push(['', '', '', '', '', '', '', '', '']);
+  });
+  if (out.length < 2) { ui.alert('対象CPの実績がまだありません（売れた記録なし）。'); return; }
+  const sh = ss.getSheetByName('CP商品実績') || ss.insertSheet('CP商品実績');
+  sh.clear();
+  sh.getRange(1, 1, out.length, 9).setValues(out);
+  sh.getRange(1, 1, 1, 9).setFontWeight('bold');
+  sh.getRange(2, 4, out.length - 1, 1).setNumberFormat('#,##0');
+  sh.getRange(2, 5, out.length - 1, 1).setNumberFormat('#,##0.0');
+  sh.getRange(2, 6, out.length - 1, 1).setNumberFormat('#,##0');
+  sh.getRange(2, 7, out.length - 1, 2).setNumberFormat('0.0%');
+  boldRows.forEach(rn => sh.getRange(rn, 1, 1, 9).setFontWeight('bold').setBackground('#eef3fb'));
+  sh.setColumnWidth(1, 200); sh.setColumnWidth(3, 200); sh.setColumnWidth(9, 190);
+  sh.setFrozenRows(1);
+  ui.alert('CP商品実績を作りました',
+    '対象CP：' + cps.length + '件（直近90日）\n商品別に「出数合計・1日平均・売上概算・売上比・出食比」を「CP商品実績」シートに出しました。\n' +
+    '※売上は定価×出数の概算(セット割引前)。押すたび最新に更新されます。', ui.ButtonSet.OK);
+}
+
+// ===== カレンダー効果の自動検定→通知→ワンクリック承認→予測反映。MARKER_CALENDAR_EFFECT =====
+// 給料日・月末等の"日付のクセ"を、成長と曜日を除いた残差で毎日自動検定。①有意(95%)②2年以上③バックテストで
+// 誤差が縮む、の3条件を満たしたら「有意・未承認」にしてメール通知。店長がワンクリック承認したものだけ、未来予測(I列)に
+// ±15%以内で反映(過去は触らない/発注量は食材曜日平均で回るので不変)。多重検定を避けるため仮説は少数に絞る。
+var CAL_APPROVED_PROP_ = 'calendarApproved';   // {key:{mult,label}}
+var CAL_REJECTED_PROP_ = 'calendarRejected';   // {key:true}
+var CAL_NOTIFIED_PROP_ = 'calendarNotified';   // {key:true}（通知済み＝重複通知防止）
+var CAL_SHEET_ = 'カレンダー効果';
+var CAL_MIN_SAMPLES_ = 24;                     // 採用に必要な最低サンプル(≒2年)
+
+function calendarHypotheses_() {
+  return [
+    { key: 'pay25',       label: '給料日(25日)', def: '毎月25日',         pred: r => r.D === 25 },
+    { key: 'pay2426',     label: '給料日前後',   def: '24〜26日',         pred: r => r.D >= 24 && r.D <= 26 },
+    { key: 'd15',         label: '15日',        def: '毎月15日',         pred: r => r.D === 15 },
+    { key: 'monthEnd',    label: '月末最終日',   def: '月の最終日',        pred: r => r.D === r.dim },
+    { key: 'monthEnd3',   label: '月末3日',      def: '末-2〜末',         pred: r => r.D >= r.dim - 2 },
+    { key: 'monthStart1', label: '月初1日',      def: '毎月1日',          pred: r => r.D === 1 },
+    { key: 'monthStart3', label: '月初3日',      def: '1〜3日',           pred: r => r.D <= 3 },
+    { key: 'gotobi',      label: 'ごとおび',      def: '5/10/15/20/25/末', pred: r => [5, 10, 15, 20, 25].indexOf(r.D) >= 0 || r.D === r.dim }
+  ];
+}
+function calDateParts_(v) {
+  const ds = toDateStr_(v); const p = ds.split('/'), Y = +p[0], M = +p[1], D = +p[2];
+  return { D: D, dim: new Date(Y, M, 0).getDate(), dow: new Date(Y, M - 1, D).getDay() };
+}
+function calReadJson_(prop) { try { const j = PropertiesService.getDocumentProperties().getProperty(prop); return j ? JSON.parse(j) : {}; } catch (e) { return {}; } }
+function calWriteJson_(prop, obj) { PropertiesService.getDocumentProperties().setProperty(prop, JSON.stringify(obj)); }
+
+// 検定：季節指数と同じ残差(seas=成長・曜日を除いた平常比)を使い、各仮説の平常比・有意・LOOバックテスト改善を出す
+function calendarEval_(ss) {
+  const R = seasonalReadRecords_(ss); if (!R) return null;
+  const rec = R.rec.filter(r => !r.off).map(r => { const pt = calDateParts_(r.ds); return { seas: r.seas, D: pt.D, dim: pt.dim, dow: r.dow }; });
+  const approved = calReadJson_(CAL_APPROVED_PROP_), rejected = calReadJson_(CAL_REJECTED_PROP_);
+  return calendarHypotheses_().map(h => {
+    const a = rec.filter(h.pred).map(r => r.seas);
+    const n = a.length;
+    const mean = n ? a.reduce((s, x) => s + x, 0) / n : 1;
+    const sd = n > 1 ? Math.sqrt(a.reduce((s, x) => s + (x - mean) * (x - mean), 0) / (n - 1)) : 0;
+    const se = n ? sd / Math.sqrt(n) : 1;
+    const sig = n >= 2 && Math.abs(mean - 1) > 1.96 * se;
+    let ew = 0, wo = 0;   // LOOバックテスト：他の回の平均で当てて、誤差が縮むか
+    if (n >= 4) { for (let i = 0; i < n; i++) { let s2 = 0; for (let j = 0; j < n; j++) if (j !== i) s2 += a[j]; const est = s2 / (n - 1); ew += Math.abs(a[i] - est); wo += Math.abs(a[i] - 1); } }
+    const btImprove = (n >= 4) ? (wo - ew) / n : 0;
+    const mult = Math.min(1.15, Math.max(0.85, Math.round(mean * 1000) / 1000));
+    const pass = n >= CAL_MIN_SAMPLES_ && sig && btImprove > 0 && Math.abs(mean - 1) >= 0.03;
+    let state;
+    if (approved[h.key]) state = '採用';
+    else if (rejected[h.key]) state = '見送り';
+    else if (pass) state = '有意・未承認';
+    else state = '蓄積中(' + n + '/' + CAL_MIN_SAMPLES_ + ')';
+    return { key: h.key, label: h.label, def: h.def, n: n, mean: mean, sig: sig, btImprove: btImprove, mult: mult, pass: pass, state: state };
+  });
+}
+function calendarWriteSheet_(ss, results) {
+  const sh = ss.getSheetByName(CAL_SHEET_) || ss.insertSheet(CAL_SHEET_);
+  sh.clear();
+  const head = ['要因', '定義', '平常比', 'サンプル数', '有意(95%)', '予測改善(BT)', '状態', '適用倍率', '更新日'];
+  const body = [head];
+  results.forEach(r => body.push([r.label, r.def, Math.round((r.mean - 1) * 1000) / 1000, r.n, r.sig ? '○' : '', r.btImprove > 0 ? '○' : '', r.state, (r.state === '採用') ? r.mult : '', new Date()]));
+  sh.getRange(1, 1, body.length, head.length).setValues(body);
+  sh.getRange(1, 1, 1, head.length).setFontWeight('bold');
+  sh.getRange(2, 3, results.length, 1).setNumberFormat('+0.0%;-0.0%');
+  sh.getRange(2, 9, results.length, 1).setNumberFormat('yyyy/MM/dd HH:mm');
+  results.forEach((r, i) => { const bg = r.state === '採用' ? '#d9ead3' : (r.state === '有意・未承認' ? '#fff2cc' : null); if (bg) sh.getRange(i + 2, 1, 1, head.length).setBackground(bg); });
+  sh.getRange(results.length + 3, 1).setValue('※平常比＝成長と曜日を除いた残差。○は95%有意/バックテストで誤差が縮む。「有意・未承認」を承認すると未来予測に反映(±15%上限)。祝日・お盆等は除外。仮説は多重検定を避け少数に限定。');
+  sh.setColumnWidth(1, 140); sh.setColumnWidth(2, 150); sh.setColumnWidth(7, 150);
+  sh.setFrozenRows(1);
+}
+// buildSalesForecastから毎日呼ぶ：検定→シート更新→新たに有意になったらメール通知(重複防止)
+function calendarAutoStep_(ss) {
+  const results = calendarEval_(ss); if (!results) return;
+  calendarWriteSheet_(ss, results);
+  const notified = calReadJson_(CAL_NOTIFIED_PROP_);
+  const newly = results.filter(r => r.state === '有意・未承認' && !notified[r.key]);
+  if (newly.length) {
+    try {
+      MailApp.sendEmail('matsu4061209@gmail.com', '【発注システム】カレンダー効果が見つかりました（承認待ち）',
+        '売上に効く"日付のクセ"が基準(有意・2年以上・予測改善)を満たしました。予測へ反映するか承認してください。\n\n' +
+        newly.map(r => '・' + r.label + '（' + r.def + '）平常比 ' + (r.mean >= 1 ? '+' : '') + Math.round((r.mean - 1) * 100) + '％ / ' + r.n + '回').join('\n') +
+        '\n\nスプレッドシート→メニュー「📅イベント管理」→「見つかった効果を承認/却下する」から1クリックで反映できます。');
+    } catch (e) {}
+    newly.forEach(r => notified[r.key] = true);
+    calWriteJson_(CAL_NOTIFIED_PROP_, notified);
+  }
+}
+// メニュー：今すぐ検定
+function calendarEvaluateNow() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(), ui = SpreadsheetApp.getUi();
+  const results = calendarEval_(ss); if (!results) { ui.alert('先に「① 過去データを取り込む」を実行してください。'); return; }
+  calendarWriteSheet_(ss, results);
+  const pend = results.filter(r => r.state === '有意・未承認'), adopt = results.filter(r => r.state === '採用');
+  ui.alert('カレンダー効果を検定しました',
+    '「カレンダー効果」シートに結果を出しました。\n有意・未承認：' + (pend.length ? pend.map(r => r.label).join('・') : 'なし') +
+    '\n採用中：' + (adopt.length ? adopt.map(r => r.label).join('・') : 'なし') +
+    '\n\n承認は「見つかった効果を承認/却下する」から。', ui.ButtonSet.OK);
+}
+// メニュー：承認ダイアログ（ワンクリック）
+function showCalendarApproval() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(), ui = SpreadsheetApp.getUi();
+  const results = calendarEval_(ss); if (!results) { ui.alert('先に「① 過去データを取り込む」を実行してください。'); return; }
+  calendarWriteSheet_(ss, results);
+  const pend = results.filter(r => r.state === '有意・未承認'), appr = results.filter(r => r.state === '採用');
+  if (!pend.length) { ui.alert('カレンダー効果', '承認待ちの要因はありません。\n採用中：' + (appr.length ? appr.map(r => r.label).join('・') : 'なし') + '\n「カレンダー効果」シートで状況を確認できます。', ui.ButtonSet.OK); return; }
+  ui.showModalDialog(HtmlService.createHtmlOutput(calendarApprovalHtml_(pend, appr)).setWidth(470).setHeight(430), 'カレンダー効果の承認');
+}
+function calendarApprovalHtml_(pend, appr) {
+  let s = '<div style="font-family:sans-serif;font-size:13px">';
+  s += '<p>予測に反映する要因を選んでください（±15%上限・未来の予測のみ）。</p>';
+  pend.forEach(r => {
+    s += '<div style="border:1px solid #ddd;border-radius:6px;padding:8px;margin:6px 0">'
+      + '<b>' + r.label + '</b>（' + r.def + '）<br>平常比 ' + (r.mean >= 1 ? '+' : '') + Math.round((r.mean - 1) * 100) + '％・' + r.n + '回・適用倍率 ' + r.mult
+      + '<br><button onclick="ap(\'' + r.key + '\')">承認して反映</button> '
+      + '<button onclick="rj(\'' + r.key + '\')">却下</button></div>';
+  });
+  if (appr.length) s += '<p style="color:#666">採用中：' + appr.map(r => r.label).join('・') + '</p>';
+  s += '<div id="msg" style="color:green"></div>';
+  s += '<script>function ap(k){document.getElementById("msg").innerText="反映中...";google.script.run.withSuccessHandler(function(){document.getElementById("msg").innerText="反映しました。『売上予測を更新』を押すと予測に効きます。";setTimeout(google.script.host.close,1600);}).calendarApprove(k);}'
+    + 'function rj(k){google.script.run.withSuccessHandler(function(){document.getElementById("msg").innerText="却下しました。";setTimeout(google.script.host.close,1200);}).calendarReject(k);}</script></div>';
+  return s;
+}
+// google.script.run 用（末尾_なし）
+function calendarApprove(key) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const results = calendarEval_(ss); const r = (results || []).find(x => x.key === key); if (!r) return;
+  const approved = calReadJson_(CAL_APPROVED_PROP_); approved[key] = { mult: r.mult, label: r.label }; calWriteJson_(CAL_APPROVED_PROP_, approved);
+  const rej = calReadJson_(CAL_REJECTED_PROP_); delete rej[key]; calWriteJson_(CAL_REJECTED_PROP_, rej);
+  try { calendarWriteSheet_(ss, calendarEval_(ss)); } catch (e) {}
+}
+function calendarReject(key) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const rej = calReadJson_(CAL_REJECTED_PROP_); rej[key] = true; calWriteJson_(CAL_REJECTED_PROP_, rej);
+  const approved = calReadJson_(CAL_APPROVED_PROP_); delete approved[key]; calWriteJson_(CAL_APPROVED_PROP_, approved);
+  try { calendarWriteSheet_(ss, calendarEval_(ss)); } catch (e) {}
+}
+// 予測(未来行のI列)に採用中のカレンダー倍率を掛ける。過去(実績確定)は触らない。発注量は不変(食材曜日平均で回るため)。
+function applyCalendarToForecast_(ss) {
+  const approved = calReadJson_(CAL_APPROVED_PROP_); if (!Object.keys(approved).length) return;
+  const useHyp = calendarHypotheses_().filter(h => approved[h.key]); if (!useHyp.length) return;
+  const sh = ss.getSheetByName('売上予測'); if (!sh || sh.getLastRow() < 2) return;
+  const n = sh.getLastRow() - 1;
+  const vals = sh.getRange(2, 1, n, 11).getValues();   // A..K
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const r = vals[i]; let I = (r[8] === '' || r[8] == null) ? null : Number(r[8]);
+    const hasActual = !(r[10] === '' || r[10] == null);   // K実績あり＝過去
+    if (I != null && !hasActual) {
+      const pt = calDateParts_(r[0]); let f = 1;
+      useHyp.forEach(h => { if (h.pred(pt)) f *= approved[h.key].mult; });
+      f = Math.min(1.20, Math.max(0.80, f));
+      if (f !== 1) I = Math.round(I * f);
+    }
+    out.push([I == null ? '' : I]);
+  }
+  sh.getRange(2, 9, n, 1).setValues(out);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -5553,42 +6213,100 @@ function buildPeakFloorLots_(ss) {
 }
 
 // 売り切れた食材を登録/解除する（登録品は翌朝の発注計算で最低ストックを+1ロット）
+// 売り切れ食材の登録／解除。リストから選ぶ形（手入力プロンプトから変更）。MARKER_SOLDOUT_FORM
 function markSoldOut() {
+  const html = HtmlService.createHtmlOutput(SOLDOUT_FORM_HTML_()).setWidth(500).setHeight(640);
+  SpreadsheetApp.getUi().showModalDialog(html, '売り切れ食材の登録 / 解除（リストから選択）');
+}
+// フォーム初期データ：食材一覧(消耗品除く)＋登録状態。google.script.runから呼ぶので末尾_なし。
+function soldOutGetData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const ui = SpreadsheetApp.getUi();
+  let set = {};
+  try { set = JSON.parse(PropertiesService.getScriptProperties().getProperty(SOLDOUT_PROP_) || '{}'); } catch (e) { set = {}; }
+  const foods = [];
+  const m = ss.getSheetByName('食材マスタ');
+  if (m && m.getLastRow() > 1) {
+    m.getRange(2, 1, m.getLastRow() - 1, 3).getValues().forEach(r => {
+      if (r[0] === '' || r[0] === null) return;
+      if (String(r[2] || '').trim() === '消耗品') return;
+      const code = String(Number(r[0]));
+      foods.push({ code: code, name: String(r[1] || ''), cat: String(r[2] || ''), on: !!set[code] });
+    });
+  }
+  return { foods: foods };
+}
+// 登録/解除トグル。google.script.runから呼ぶので末尾_なし。
+function soldOutToggle(code) {
   const prop = PropertiesService.getScriptProperties();
   let set = {};
   try { set = JSON.parse(prop.getProperty(SOLDOUT_PROP_) || '{}'); } catch (e) { set = {}; }
-  const resp = ui.prompt('売り切れ食材の登録 / 解除',
-    '売り切れた食材の「名前の一部」か「食材コード」を入力してください。\n' +
-    '・未登録なら登録（＝最低ストック+1ロット）／登録済みなら解除。\n' +
-    '・空欄でOK＝現在の登録一覧を表示。\n' +
-    '※需要が落ち着いたら解除してください。', ui.ButtonSet.OK_CANCEL);
-  if (resp.getSelectedButton() !== ui.Button.OK) return;
-  const q = resp.getResponseText().trim();
-  if (q === '') {
-    const names = Object.values(set).map(v => '・' + v.name + '（' + v.code + '／登録' + (v.at || '') + '）');
-    ui.alert('売り切れ登録中の食材', names.length ? names.join('\n') : '（なし）', ui.ButtonSet.OK);
-    return;
-  }
+  code = String(Number(code));
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let name = code;
   const m = ss.getSheetByName('食材マスタ');
-  let found = null;
   if (m && m.getLastRow() > 1) {
     const mv = m.getRange(2, 1, m.getLastRow() - 1, 2).getValues();
-    for (const r of mv) {
-      if (r[0] === '' || r[0] === null) continue;
-      if (String(Number(r[0])) === String(Number(q)) || (q.length >= 2 && String(r[1]).indexOf(q) >= 0)) { found = { code: String(Number(r[0])), name: String(r[1]) }; break; }
-    }
+    for (const r of mv) { if (String(Number(r[0])) === code) { name = String(r[1] || code); break; } }
   }
-  if (!found) { ui.alert('見つかりません', '「' + q + '」に一致する食材が食材マスタにありません。名前の一部かコードで再入力してください。', ui.ButtonSet.OK); return; }
-  if (set[found.code]) {
-    delete set[found.code]; prop.setProperty(SOLDOUT_PROP_, JSON.stringify(set));
-    ui.alert('解除しました', found.name + '（' + found.code + '）の売り切れ登録を解除。翌朝の発注計算で最低ストックが通常に戻ります。', ui.ButtonSet.OK);
-  } else {
-    set[found.code] = { code: found.code, name: found.name, at: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd') };
-    prop.setProperty(SOLDOUT_PROP_, JSON.stringify(set));
-    ui.alert('登録しました', found.name + '（' + found.code + '）を売り切れ登録。翌朝の発注計算で最低ストックを+1ロットします。\n（今すぐ反映は発注バッファのステップ2）', ui.ButtonSet.OK);
-  }
+  let msg;
+  if (set[code]) { delete set[code]; msg = name + '（' + code + '）を解除しました。翌朝の発注で最低ストックが通常に戻ります。'; }
+  else { set[code] = { code: code, name: name, at: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd') }; msg = name + '（' + code + '）を売り切れ登録。翌朝の発注で最低ストックを+1ロットします。'; }
+  prop.setProperty(SOLDOUT_PROP_, JSON.stringify(set));
+  return { msg: msg, data: soldOutGetData() };
+}
+function SOLDOUT_FORM_HTML_() {
+  return [
+'<style>',
+'  body{font-family:sans-serif;margin:0;padding:14px;color:#222;font-size:14px}',
+'  h3{margin:0 0 6px}.note{color:#666;font-size:12px;margin:0 0 10px;line-height:1.5}',
+'  input[type=text]{width:100%;box-sizing:border-box;padding:8px;font-size:14px;margin-bottom:6px}',
+'  select{width:100%;box-sizing:border-box;padding:6px;font-size:14px}',
+'  button{padding:9px 14px;font-size:14px;cursor:pointer;border:1px solid #888;border-radius:6px;background:#f5f5f5}',
+'  button.primary{background:#1a73e8;color:#fff;border-color:#1a73e8}',
+'  #msg{min-height:18px;color:#137333;font-size:13px;margin:8px 0}',
+'  .reg{margin-top:12px}.reg h4{margin:0 0 6px;font-size:13px}',
+'  .chip{display:inline-block;background:#e8f0fe;border:1px solid #c6dafc;border-radius:14px;padding:3px 10px;margin:3px 4px 0 0;font-size:13px;cursor:pointer}',
+'  .chip:hover{background:#fce8e6;border-color:#f2b8b5}',
+'</style>',
+'<h3>売り切れ食材（リストから選択）</h3>',
+'<p class="note">売り切れて<b>いつもより多く必要な食材</b>を選びます。登録すると翌朝の発注で<b>最低ストックを+1ロット</b>します。<br>需要が落ち着いたら<b>解除</b>してください。反映は翌朝の発注計算（今すぐは「発注書を作る」）。</p>',
+'<input type="text" id="filter" placeholder="絞り込み（名前やコードの一部）" oninput="renderOptions()">',
+'<select id="sel" size="12"></select>',
+'<div style="margin-top:8px"><button class="primary" onclick="toggle()">選んだ食材を登録／解除</button></div>',
+'<div id="msg"></div>',
+'<div class="reg"><h4>売り切れ登録中（クリックで解除）</h4><div id="reglist">読み込み中…</div></div>',
+'<script>',
+'  var FOODS=[];',
+'  function load(){ google.script.run.withSuccessHandler(function(d){ FOODS=d.foods; renderOptions(); renderReg(); }).soldOutGetData(); }',
+'  function renderOptions(){',
+'    var q=(document.getElementById("filter").value||"").trim();',
+'    var sel=document.getElementById("sel"); var keep=sel.value; sel.innerHTML="";',
+'    FOODS.forEach(function(f){',
+'      if(q && f.name.indexOf(q)<0 && f.code.indexOf(q)<0) return;',
+'      var o=document.createElement("option"); o.value=f.code;',
+'      o.text=(f.on?"\\u2713 ":"")+f.name+"（"+f.code+"）";',
+'      if(f.on) o.style.color="#1a73e8";',
+'      sel.appendChild(o);',
+'    });',
+'    if(keep) sel.value=keep;',
+'  }',
+'  function renderReg(){',
+'    var box=document.getElementById("reglist"); var on=FOODS.filter(function(f){return f.on;});',
+'    if(!on.length){ box.textContent="（なし）"; return; }',
+'    box.innerHTML=""; on.forEach(function(f){',
+'      var c=document.createElement("span"); c.className="chip"; c.textContent=f.name+"（"+f.code+"）✕";',
+'      c.title="クリックで解除"; c.onclick=function(){ doToggle(f.code); }; box.appendChild(c);',
+'    });',
+'  }',
+'  function toggle(){ var sel=document.getElementById("sel"); if(!sel.value){ document.getElementById("msg").textContent="食材を選んでください"; return; } doToggle(sel.value); }',
+'  function doToggle(code){',
+'    document.getElementById("msg").textContent="処理中…";',
+'    google.script.run.withSuccessHandler(function(r){ FOODS=r.data.foods; renderOptions(); renderReg(); document.getElementById("msg").textContent=r.msg; })',
+'      .withFailureHandler(function(e){ document.getElementById("msg").style.color="#c5221f"; document.getElementById("msg").textContent="エラー: "+e; }).soldOutToggle(code);',
+'  }',
+'  load();',
+'</script>'
+  ].join('\n');
 }
 
 // 自己判断食材の登録／解除。登録した食材は最低ストックを付けず、基準を「生の小数」で表示する（在庫を見て自分で発注判断）。MARKER_SELFJUDGE
@@ -6027,6 +6745,10 @@ const todayO = new Date(); todayO.setHours(0, 0, 0, 0);
   // ── C案：祝日は「その日の売上予測の水準」に食材を合わせる（発注・仕込みで共通）。MARKER_HOLIDAY_FORECAST_MULT
   const holidayMultByDate = buildHolidayMultByDate_(ss);
 
+  // ②確率＋⑥在庫理論：SLを設定した食材だけ「統計の安全在庫(Z×σ×√日数)」で発注（未設定は従来の安全係数）。MARKER_SERVICE_LEVEL
+  const slMap = readServiceLevelMap_();                        // {code:'p90'|'p95'|'p99'}
+  const statsByCode = Object.keys(slMap).length ? ingredientDailyStats_(ss, 90).data : {};   // SL設定がある時だけσを計算
+
   const data = sheet.getRange(2,1,lastRow-1,10).getValues();
   // 発注数(O列)の1日基準は「トレンド履歴の曜日平均(=E列/曜日平均・col4)」を使う。
   //   理由：食材日時実績は曜日に欠測がある(例:米は土日のデータが無い)ため発注数が過小になる。
@@ -6170,7 +6892,16 @@ let baseTotal = 0;
     }
     // 実測補正(P列)：発注の土台(トレンド履歴=理論使用量)を実測使用量の水準へ寄せる。空=1.0で無影響。MARKER_MEASURED_CORRECTION
     const corrF = correctionByCode[String(Number(code))] || 1;
-    let result=baseTotal*(Number(trd)||1)*(evtSum/days)*(wtrSum/days)*(hldSum/days)*(Number(sft)||1)*corrF;
+    // 平均需要（安全のぶんは下で足す/掛ける）
+    let result=baseTotal*(Number(trd)||1)*(evtSum/days)*(wtrSum/days)*(hldSum/days)*corrF;
+    // ②確率＋⑥在庫理論：SL設定食材は「統計の安全在庫 Z×σ×√カバー日数」を加算（安全係数の代わり）。未設定/σ無しは従来の安全係数。MARKER_SERVICE_LEVEL
+    const slKey = slMap[String(Number(code))];
+    const st = statsByCode[String(Number(code))];
+    if (slKey && SERVICE_LEVEL_Z_[slKey] !== undefined && st) {
+      result += SERVICE_LEVEL_Z_[slKey] * (st.sigma * Math.sqrt(days));
+    } else {
+      result *= (Number(sft) || 1);
+    }
     // 生鮮：消費期限(日)ぶんに基準を制限（カバー日数が日持ちを超える分だけ縮小）＝作りすぎ廃棄を防ぐ。MARKER_FRESH_SHELF_CAP
     { const shelf = freshShelfDays[String(Number(code))];
       if (shelf && days > shelf) result = result * (shelf / days); }
@@ -7148,21 +7879,25 @@ function prepFmtDate_(v) {
 // 対象は仕込みマスタのflag=TRUE品（＝プレップする生鮮＝CP主要＋高価な生鮮）。手作業のリスト管理不要（仕込み品目に追随）。
 function ensureLossSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const HEAD = ['日付', '種別', 'コード', '名前', '数量', '単位', '金額(円)', 'メモ'];   // 種別=食材/商品。金額は原価から自動計上。MARKER_WASTE_V2
   let sh = ss.getSheetByName('ロス実績');
-  if (!sh) {
-    sh = ss.insertSheet('ロス実績');
-    sh.getRange(1, 1, 1, 6).setValues([['日付', '食材コード', '食材名', 'ロス量', '単位', 'メモ']]);
-    sh.getRange(1, 1, 1, 6).setFontWeight('bold');
+  if (!sh) sh = ss.insertSheet('ロス実績');
+  // 見出しが新形式でなく、かつデータ0件なら整える（旧6列は空なので安全に作り直す）
+  const curHead = sh.getLastRow() >= 1 ? sh.getRange(1, 1, 1, HEAD.length).getValues()[0].join('|') : '';
+  if (curHead !== HEAD.join('|') && sh.getLastRow() <= 1) {
+    sh.clear();
+    sh.getRange(1, 1, 1, HEAD.length).setValues([HEAD]);
+    sh.getRange(1, 1, 1, HEAD.length).setFontWeight('bold');
     sh.setFrozenRows(1);
     sh.getRange(2, 1, sh.getMaxRows() - 1, 1).setNumberFormat('yyyy/mm/dd');
-    sh.setColumnWidth(3, 200);
+    sh.setColumnWidth(4, 200); sh.setColumnWidth(7, 90);
   }
   return sh;
 }
 
 function showLossForm() {
-  const html = HtmlService.createHtmlOutput(LOSS_FORM_HTML_()).setWidth(460).setHeight(620);
-  SpreadsheetApp.getUi().showModalDialog(html, 'ロス入力（余った食材を記録）');
+  const html = HtmlService.createHtmlOutput(LOSS_FORM_HTML_()).setWidth(480).setHeight(680);
+  SpreadsheetApp.getUi().showModalDialog(html, '🗑 廃棄登録（食材・商品を選ぶだけ）');
 }
 
 // 対象品目（全てグラム入力・たまごのみ個）。クロ・バラは複合＝入力はg1つ、内部で比率分割して食材別に記録。
@@ -7196,135 +7931,304 @@ function lossIngNameMap_() {
   return map;
 }
 
-// フォーム初期データ：対象品目（LOSS_ITEMS_・名前は食材マスタから）＋日付候補（今日〜6日前）＋既存値
-function lossForm_getData() {
-  const nameMap = lossIngNameMap_();
-  const items = LOSS_ITEMS_.map(function(it) {
-    var nm = it.label || nameMap[it.parts[0].code] || String(it.parts[0].code);
-    return { key: it.key, name: nm, unit: it.unit, parts: it.parts };
-  });
-  const days = [];
-  const names = ['日', '月', '火', '水', '木', '金', '土'];
-  const base = new Date(); base.setHours(0, 0, 0, 0);
-  for (var i = 0; i < 7; i++) {
-    var d = new Date(base); d.setDate(base.getDate() - i);
-    var pre = (i === 0 ? '今日 ' : (i === 1 ? '昨日 ' : ''));
-    days.push({ value: Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy/MM/dd'),
-      label: pre + (d.getMonth() + 1) + '/' + d.getDate() + '(' + names[d.getDay()] + ')' });
-  }
-  const sh = ensureLossSheet_();
-  const stored = {};
-  if (sh.getLastRow() >= 2) {
-    sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues().forEach(function(r) {
-      if (!r[0]) return;
-      var ds = (r[0] instanceof Date) ? Utilities.formatDate(r[0], Session.getScriptTimeZone(), 'yyyy/MM/dd') : String(r[0]);
-      stored[String(r[1]) + '@' + ds] = Number(r[3]) || 0;
+// 特殊単位の食材：入力を"別単位"で受け、原価計算時に係数で生換算する。MARKER_LOSS_UNIT_OVERRIDE
+//   610008 国産ペッパー米＝廃棄はたいてい炊き上がり量。入力＝炊上がりg、原価は生米(=炊上がり×0.5)で計算する。
+var LOSS_UNIT_OVERRIDE_ = {
+  '610008': { unit: 'g(炊上がり)', costFactor: 0.5 }
+};
+
+// 食材ごとの「名前・区分・円/単位」。円/単位＝払出単価÷仕入規格量÷歩留率（理論原価と同じ基準）。MARKER_WASTE_V2
+function lossFoodInfo_() {
+  const fs = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('食材マスタ');
+  const map = {};
+  if (fs && fs.getLastRow() >= 2) {
+    fs.getRange(2, 1, fs.getLastRow() - 1, 8).getValues().forEach(function(r) {   // A..H（D払出単価/E仕入単位/F仕入規格量/H歩留率）
+      const code = r[0]; if (code === '' || code == null) return;
+      const buy = Number(r[3]) || 0, spec = Number(r[5]) || 0;
+      let yld = Number(r[7]) || 0; if (yld <= 0) yld = 1;
+      const yen = spec > 0 ? (buy / spec / yld) : 0;             // 円/単位（規格量の単位＝gか個）
+      const buyUnit = String(r[4] || '').trim();
+      const unit = /^(個|枚|本|玉)$/.test(buyUnit) ? '個' : 'g';   // 仕入単位が個/枚/本/玉なら個・それ以外はg（規格量の単位＝円/単位と一致）
+      map[String(code)] = { name: String(r[1] || ''), cat: String(r[2] || ''), yen: yen, unit: unit, costFactor: 1 };
     });
   }
-  return { items: items, days: days, stored: stored };
+  // 特殊単位の上書き（炊上がり入力→生換算など）。MARKER_LOSS_UNIT_OVERRIDE
+  Object.keys(LOSS_UNIT_OVERRIDE_).forEach(function(c) {
+    if (map[c]) { map[c].unit = LOSS_UNIT_OVERRIDE_[c].unit; map[c].costFactor = LOSS_UNIT_OVERRIDE_[c].costFactor; }
+  });
+  return map;
 }
 
-// 保存：複合は比率で食材別に按分して記録。同じ日付×食材は上書き（0/空欄は記録しない）。
+// 商品ごとの「名前・1個あたり原価(円)」。原価＝その商品コードのN金額(レシピ)合計。作り間違え・盛り置きの廃棄はこれで計上。MARKER_WASTE_V2
+function lossProductInfo_() {
+  const ps = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('商品マスタ');
+  const map = {};
+  if (ps && ps.getLastRow() >= 2) {
+    ps.getRange(2, 1, ps.getLastRow() - 1, 14).getValues().forEach(function(r) {   // A商品コード..N金額
+      const code = r[0]; if (code === '' || code == null) return;
+      const key = String(code);
+      if (!map[key]) map[key] = { name: String(r[1] || ''), yen: 0 };
+      map[key].yen += Number(r[13]) || 0;   // N金額
+    });
+  }
+  return map;
+}
+
+// 実際に売れたメニューだけ（実績データ・直近days日の商品コード）。商品検索を"売れている物"に絞る＝マスタ全部を出さない。MARKER_WASTE_V2
+function lossSoldProducts_(ss, days) {
+  const sh = ss.getSheetByName('実績データ');
+  const out = {};
+  if (!sh || sh.getLastRow() < 2) return out;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const from = new Date(today); from.setDate(today.getDate() - days);
+  sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues().forEach(function(r) {   // A日付..F メニュー名（E=CD）
+    if (!r[0]) return;
+    const d = (r[0] instanceof Date) ? new Date(r[0]) : new Date(String(r[0]).replace(/-/g, '/'));
+    if (isNaN(d.getTime())) return; d.setHours(0, 0, 0, 0);
+    if (d < from) return;
+    const code = r[4]; if (code === '' || code == null) return;
+    out[String(code)] = { name: String(r[5] || '') };   // 直近の名前で上書き
+  });
+  return out;
+}
+
+// 検索の正規化：NFKC（全半角統一）＋ひらがな→カタカナ＋小文字化。「ぺっぱー」「ﾍﾟｯﾊﾟｰ」「ペッパー」を同一視。MARKER_WASTE_V2
+function lossNorm_(s) {
+  return String(s || '').normalize('NFKC').replace(/[ぁ-ゖ]/g, function(c) { return String.fromCharCode(c.charCodeAt(0) + 96); }).toLowerCase();
+}
+
+// 検索用ブロブ：正規化＋略称の読み替え（Pﾗｲｽ→ペッパーライス 等）。「ペッパーライス」でもPﾗｲｽでも当たる。MARKER_WASTE_V2
+function buildSearchBlob_(name) {
+  const norm = lossNorm_(name);
+  let kw = norm;
+  if (norm.indexOf('pライス') >= 0) kw += ' ペッパーライス ペッパー';
+  if (norm.indexOf('ライス') >= 0) kw += ' ライス';
+  if (norm.indexOf('ワイルド') >= 0) kw += ' ワイルド';
+  if (norm.indexOf('チキン') >= 0) kw += ' チキン';
+  if (norm.indexOf('肉') >= 0) kw += ' 肉の日 にくのひ';
+  if (norm.indexOf('特') >= 0) kw += ' 特盛 とくもり';
+  if (norm.indexOf('バーグ') >= 0) kw += ' ハンバーグ';
+  if (norm.indexOf('コンボ') >= 0) kw += ' コンボ';
+  if (norm.indexOf('ランチ') >= 0) kw += ' ランチ';
+  if (norm.indexOf('サラダ') >= 0 || norm.indexOf('ポテ') >= 0) kw += ' ポテトサラダ ポテサラ サラダ';
+  return lossNorm_(kw);
+}
+
+// 直近90日の登録回数（種別:コード別）＝定番の並べ替え（よく捨てる物を上に）に使う。MARKER_WASTE_V2
+function lossFreqMap_(sh) {
+  const freq = {};
+  if (sh && sh.getLastRow() >= 2) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const from = new Date(today); from.setDate(today.getDate() - 90);
+    sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues().forEach(function(r) {
+      if (!r[0]) return;
+      const d = (r[0] instanceof Date) ? new Date(r[0]) : new Date(String(r[0]).replace(/-/g, '/')); d.setHours(0, 0, 0, 0);
+      if (d < from) return;
+      const k = String(r[2]);
+      freq[k] = (freq[k] || 0) + 1;
+    });
+  }
+  return freq;
+}
+
+// フォーム初期データ：定番（食材・頻度順）＋検索インデックス（食材＋"売れている"商品）＋日付（今日/昨日/カレンダー）
+function lossForm_getData() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const foodInfo = lossFoodInfo_();
+  const prodInfo = lossProductInfo_();
+  const sh = ensureLossSheet_();
+  const freq = lossFreqMap_(sh);
+  // 定番（LOSS_ITEMS_）＝初期表示。よく捨てる物（登録回数）が上に来るよう並べ替え。
+  const pinned = LOSS_ITEMS_.map(function(it) {
+    const c0 = String(it.parts[0].code);
+    const nm = it.label || (foodInfo[c0] ? foodInfo[c0].name : '') || c0;
+    const unit = (it.parts.length === 1 && foodInfo[c0]) ? foodInfo[c0].unit : it.unit;   // 単位はマスタ由来（個/g）に合わせる。複合は既定
+    return { type: '食材', key: it.key, code: c0, name: nm, unit: unit, f: freq[c0] || 0 };
+  });
+  pinned.sort(function(a, b) { return b.f - a.f; });   // 頻度の多い順（未記録は元の順）
+  // 検索インデックス：食材（消耗品除く）＋商品は「実際に売れたメニュー」だけ（マスタ全部は出さない）
+  const index = [];
+  Object.keys(foodInfo).forEach(function(c) {
+    const fi = foodInfo[c];
+    if (fi.cat === '消耗品' || fi.cat === '発注終了') return;
+    index.push({ type: '食材', code: c, name: fi.name, unit: fi.unit, search: buildSearchBlob_(fi.name) });
+  });
+  const sold = lossSoldProducts_(ss, 7);   // 直近1週間に売れた商品だけ（今作っている物しか廃棄に出ない）
+  Object.keys(sold).forEach(function(c) {
+    const cost = prodInfo[c];
+    if (!cost || !(cost.yen > 0)) return;     // レシピ原価があるものだけ（金額を出せる）
+    const nm = sold[c].name || cost.name;
+    index.push({ type: '商品', code: c, name: nm, unit: '個', search: buildSearchBlob_(nm + ' ' + cost.name) });
+  });
+  const tz = Session.getScriptTimeZone();
+  const base = new Date(); base.setHours(0, 0, 0, 0);
+  const y = new Date(base); y.setDate(base.getDate() - 1);
+  const fmt = function(d) { return Utilities.formatDate(d, tz, 'yyyy-MM-dd'); };
+  return { pinned: pinned, index: index, today: fmt(base), yesterday: fmt(y) };
+}
+
+// 保存：食材（複合は比率で按分）／商品（作り間違え・盛り置き）を金額つきで記録。同じ日付×コードは上書き。MARKER_WASTE_V2
 function lossForm_commit(dateStr, entries) {
   const sh = ensureLossSheet_();
-  const nameMap = lossIngNameMap_();
+  const foodInfo = lossFoodInfo_();
+  const prodInfo = lossProductInfo_();
   const cfg = {};
   LOSS_ITEMS_.forEach(function(it) { cfg[it.key] = it; });
   const d = new Date(String(dateStr).replace(/-/g, '/')); d.setHours(0, 0, 0, 0);
+  // 上書き対象コード（食材は複合の各パートも含める）
   const codeset = {};
   (entries || []).forEach(function(e) {
-    var it = cfg[e.key]; if (!it) return;
-    it.parts.forEach(function(p) { codeset[String(p.code)] = true; });
+    if (e.type === '食材' && e.key && cfg[e.key]) cfg[e.key].parts.forEach(function(p) { codeset[String(p.code)] = true; });
+    else codeset[String(e.code)] = true;
   });
   const lr = sh.getLastRow();
   if (lr >= 2) {
-    const vals = sh.getRange(2, 1, lr - 1, 2).getValues();
+    const vals = sh.getRange(2, 1, lr - 1, 3).getValues();   // 日付・種別・コード
     for (var i = vals.length - 1; i >= 0; i--) {
-      var rd = vals[i][0]; var rc = String(vals[i][1]);
+      var rd = vals[i][0]; var rc = String(vals[i][2]);
       var rt = (rd instanceof Date) ? rd.getTime() : new Date(String(rd).replace(/-/g, '/')).getTime();
       if (rt === d.getTime() && codeset[rc]) sh.deleteRow(i + 2);
     }
   }
+  const rows = [];
   var cnt = 0;
   (entries || []).forEach(function(e) {
-    var it = cfg[e.key]; if (!it) return;
-    var q = Number(e.qty);
-    if (!q || q <= 0) return;
-    var W = it.parts.reduce(function(s, p) { return s + p.w; }, 0) || 1;
-    it.parts.forEach(function(p) {
-      var share = Math.round(q * (p.w / W) * 10) / 10;
-      if (share <= 0) return;
-      var nm = nameMap[String(p.code)] || (it.label || '');
-      var codeCell = isNaN(Number(p.code)) ? String(p.code) : Number(p.code);
-      sh.appendRow([d, codeCell, nm, share, it.unit, (it.parts.length > 1 ? (it.label + 'から按分') : '')]);
-    });
-    cnt++;
+    var q = Number(e.qty); if (!q || q <= 0) return;
+    if (e.type === '商品') {
+      var pi = prodInfo[String(e.code)]; if (!pi) return;
+      rows.push([d, '商品', Number(e.code), pi.name, q, '個', Math.round(pi.yen * q), e.memo || '']);
+      cnt++;
+    } else {
+      var it = (e.key && cfg[e.key]) ? cfg[e.key] : null;
+      var parts = it ? it.parts : [{ code: String(e.code), w: 1 }];
+      var W = parts.reduce(function(s, p) { return s + p.w; }, 0) || 1;
+      parts.forEach(function(p) {
+        var share = Math.round(q * (p.w / W) * 10) / 10; if (share <= 0) return;
+        var fi = foodInfo[String(p.code)] || { name: '', yen: 0, unit: 'g' };
+        var codeCell = isNaN(Number(p.code)) ? String(p.code) : Number(p.code);
+        rows.push([d, '食材', codeCell, fi.name, share, (fi.unit || 'g'), Math.round(fi.yen * share * (fi.costFactor || 1)), (parts.length > 1 ? (it.label + 'から按分') : (e.memo || ''))]);
+      });
+      cnt++;
+    }
   });
-  return cnt > 0 ? ('ロスを保存しました（' + cnt + '品）') : 'この日のロスを記録なしにしました';
+  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, 8).setValues(rows);
+  return cnt > 0 ? ('廃棄を保存しました（' + cnt + '件）') : 'この日を記録なしにしました';
 }
 
-// 集計：直近28日の食材別ロス合計（多い順）。溜まったら週平均・CP明け増加を分析予定。
-function showLossSummary() {
-  const sh = ensureLossSheet_();
+// 【#1 廃棄の金額分析】直近28日の廃棄を「円」で多い順に。原価率への影響も表示。MARKER_WASTE_ANALYSIS
+function buildWasteAnalysis() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
-  if (sh.getLastRow() < 2) { ui.alert('ロス実績', 'まだロスの記録がありません。\n「ロスを入力する」から記録してください。', ui.ButtonSet.OK); return; }
+  const sh = ensureLossSheet_();
+  if (sh.getLastRow() < 2) { ui.alert('廃棄分析', 'まだ廃棄の記録がありません。\nメニュー「🗑 廃棄登録」→「廃棄を登録する」から記録してください。', ui.ButtonSet.OK); return; }
+  const WIN = 28;
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const from = new Date(today); from.setDate(today.getDate() - 28);
-  const agg = {};
-  sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues().forEach(function(r) {
+  const from = new Date(today); from.setDate(today.getDate() - WIN + 1);
+  const agg = {}; let minD = null, maxD = null;
+  sh.getRange(2, 1, sh.getLastRow() - 1, 7).getValues().forEach(function(r) {
     if (!r[0]) return;
-    var d = (r[0] instanceof Date) ? new Date(r[0]) : new Date(String(r[0]).replace(/-/g, '/')); d.setHours(0, 0, 0, 0);
-    if (d < from) return;
-    var c = String(r[1]);
-    if (!agg[c]) agg[c] = { name: r[2], total: 0, days: 0, unit: r[4] || '' };
-    agg[c].total += Number(r[3]) || 0; agg[c].days++;
+    const d = (r[0] instanceof Date) ? new Date(r[0]) : new Date(String(r[0]).replace(/-/g, '/')); d.setHours(0, 0, 0, 0);
+    if (d < from || d > today) return;
+    const key = String(r[1]) + ':' + String(r[2]);
+    if (!agg[key]) agg[key] = { type: String(r[1] || ''), name: String(r[3] || ''), qty: 0, unit: String(r[5] || ''), yen: 0, days: 0 };
+    agg[key].qty += Number(r[4]) || 0; agg[key].yen += Number(r[6]) || 0; agg[key].days++;
+    if (!minD || d < minD) minD = d; if (!maxD || d > maxD) maxD = d;
   });
-  const arr = Object.keys(agg).map(function(c) { return agg[c]; }).sort(function(a, b) { return b.total - a.total; });
-  if (arr.length === 0) { ui.alert('ロス実績', '直近28日のロス記録がありません。', ui.ButtonSet.OK); return; }
-  const lines = arr.map(function(x) { return '・' + x.name + '：合計 ' + (Math.round(x.total * 10) / 10) + x.unit + '（' + x.days + '日）'; });
-  ui.alert('ロスの傾向（直近28日・多い順）', lines.join('\n') + '\n\n※記録が溜まると、週平均やCP明けの増加を分析して発注・仕込みに反映します。', ui.ButtonSet.OK);
+  const arr = Object.keys(agg).map(function(k) { return agg[k]; });
+  if (!arr.length) { ui.alert('廃棄分析', '直近' + WIN + '日の記録がありません。', ui.ButtonSet.OK); return; }
+  arr.sort(function(a, b) { return b.yen - a.yen; });
+  const totalYen = arr.reduce(function(s, x) { return s + x.yen; }, 0);
+  const spanDays = (minD && maxD) ? Math.round((maxD - minD) / 86400000) + 1 : WIN;
+  const monthly = spanDays > 0 ? totalYen * 30 / spanDays : 0;
+  // 原価率影響用：原価月次履歴の最新「税抜売上」
+  let monthSales = 0;
+  { const h = ss.getSheetByName(COST_HISTORY_SHEET_); if (h && h.getLastRow() > 1) monthSales = Number(h.getRange(h.getLastRow(), 3).getValue()) || 0; }
+  const impact = monthSales > 0 ? (monthly / monthSales * 100) : '';
+
+  const name = '廃棄分析';
+  let out = ss.getSheetByName(name);
+  if (!out) out = ss.insertSheet(name); else out.clear();
+  const W = 7;
+  const pad = a => { const b = a.slice(); while (b.length < W) b.push(''); return b; };
+  const rows = [];
+  rows.push(pad(['廃棄分析（金額・多い順）']));
+  rows.push(pad(['対象', '直近' + WIN + '日（' + toDateStr_(from) + '〜' + toDateStr_(today) + '）', '記録のあった期間', spanDays + '日']));
+  rows.push(pad(['合計 廃棄額', Math.round(totalYen) + ' 円', '月換算', Math.round(monthly) + ' 円/月' + (impact !== '' ? '（売上の約' + (Math.round(impact * 100) / 100) + '％＝原価率+' + (Math.round(impact * 100) / 100) + 'pt）' : '')]));
+  rows.push(pad(['※金額＝食材は払出単価、商品はレシピ原価から自動計上。多い品目＝ここを減らすと一番効く。']));
+  rows.push(pad(['']));
+  const headRow = rows.length + 1;
+  rows.push(pad(['種別', '品目', '数量', '単位', '廃棄額(円)', '記録日数', '1日平均(円)']));
+  const startRow = rows.length + 1;
+  arr.forEach(function(x) {
+    rows.push(pad([x.type, x.name, Math.round(x.qty * 10) / 10, x.unit, Math.round(x.yen), x.days, Math.round(x.yen / WIN)]));
+  });
+  out.getRange(1, 1, rows.length, W).setValues(rows);
+  out.getRange(1, 1).setFontSize(14).setFontWeight('bold');
+  out.getRange(3, 1, 1, 4).setFontWeight('bold');
+  out.getRange(headRow, 1, 1, W).setFontWeight('bold').setBackground('#f4cccc');
+  const n = arr.length;
+  out.getRange(startRow, 5, n, 1).setNumberFormat('#,##0');
+  out.getRange(startRow, 7, n, 1).setNumberFormat('#,##0');
+  out.setFrozenRows(headRow);
+  [70, 240, 80, 60, 100, 90, 100].forEach((w, i) => out.setColumnWidth(i + 1, w));
+  const maxC = out.getMaxColumns(); if (maxC > W) out.deleteColumns(W + 1, maxC - W);
+  ss.setActiveSheet(out);
+  ui.alert('廃棄分析', '直近' + WIN + '日の廃棄は合計 約' + Math.round(totalYen) + '円（月換算 約' + Math.round(monthly) + '円）でした。\n\nシート「廃棄分析」に、廃棄額の多い品目順で出しました。上にある品目を減らすのが一番効きます。', ui.ButtonSet.OK);
 }
+
+// 旧メニュー互換（「ロスの傾向を見る」→金額分析へ）
+function showLossSummary() { buildWasteAnalysis(); }
 
 function LOSS_FORM_HTML_() {
   return '' +
 '<!DOCTYPE html><html><head><base target="_top"><meta name="viewport" content="width=device-width,initial-scale=1">' +
 '<style>' +
 'body{font-family:sans-serif;margin:10px;font-size:15px;color:#222;}' +
-'h3{margin:2px 0 6px;}' +
-'.hint{color:#666;font-size:12px;margin:0 0 10px;}' +
-'.drow{display:flex;align-items:center;justify-content:space-between;padding:7px 2px;border-bottom:1px solid #eee;}' +
-'.nm{flex:1;padding-right:6px;}' +
-'input[type=number]{width:72px;font-size:16px;text-align:right;padding:5px;}' +
-'.u{width:36px;color:#666;text-align:left;margin-left:6px;}' +
-'select{font-size:15px;padding:6px;}' +
-'button{background:#1a56db;color:#fff;border:none;border-radius:6px;padding:11px 16px;margin-top:12px;width:100%;font-size:16px;}' +
+'h3{margin:2px 0 4px;} .hint{color:#666;font-size:12px;margin:0 0 8px;}' +
+'.datebar{margin:6px 0;} .datebar button{width:auto;display:inline-block;margin:0 6px 0 0;padding:7px 12px;background:#eee;color:#222;border:1px solid #ccc;border-radius:6px;font-size:14px;}' +
+'.datebar button.on{background:#1a56db;color:#fff;border-color:#1a56db;}' +
+'input[type=date]{font-size:15px;padding:5px;}' +
+'.sec{font-weight:bold;margin:12px 0 4px;color:#444;border-bottom:2px solid #ddd;padding-bottom:2px;}' +
+'.drow{display:flex;align-items:center;justify-content:space-between;padding:6px 2px;border-bottom:1px solid #eee;}' +
+'.nm{flex:1;padding-right:6px;} .tag{font-size:11px;color:#fff;background:#888;border-radius:3px;padding:1px 5px;margin-right:5px;}' +
+'.tag.p{background:#c026d3;} .tag.f{background:#0891b2;}' +
+'input[type=number]{width:70px;font-size:16px;text-align:right;padding:5px;}' +
+'.u{width:40px;color:#666;text-align:left;margin-left:6px;}' +
+'.rm{color:#b00;cursor:pointer;margin-left:8px;font-size:18px;}' +
+'#q{width:100%;font-size:15px;padding:8px;box-sizing:border-box;}' +
+'#results{max-height:180px;overflow:auto;border:1px solid #eee;} .ritem{padding:7px;border-bottom:1px solid #f0f0f0;cursor:pointer;} .ritem:hover{background:#eef4ff;}' +
+'button.save{background:#1a56db;color:#fff;border:none;border-radius:6px;padding:12px 16px;margin-top:14px;width:100%;font-size:16px;}' +
 '#msg{margin-top:8px;color:#137333;min-height:18px;}' +
 '</style></head><body>' +
-'<h3>ロス入力（余って捨てた量）</h3>' +
-'<div class="hint">余った食材だけ数字を入れて保存。空欄・0は記録しません。</div>' +
-'<div>日付：<select id="date"></select></div>' +
-'<div id="list">読み込み中…</div>' +
-'<button onclick="save()">保存する</button>' +
-'<div id="msg"></div>' +
+'<h3>🗑 廃棄登録</h3>' +
+'<div class="hint">捨てた物を選んで数量を入れるだけ。金額は原価から自動計算します。</div>' +
+'<div class="datebar">日付：<button id="bt" onclick="setDay(D.today,this)">今日</button><button id="by" onclick="setDay(D.yesterday,this)">昨日</button>' +
+'<input type="date" id="date" onchange="clearDayBtn()"></div>' +
+'<div class="sec">定番（廃棄頻度が高い物）</div><div id="pin">読み込み中…</div>' +
+'<div class="sec">その他を探す（作り間違え・盛り置き…商品名/食材名で検索）</div>' +
+'<input id="q" placeholder="例：ペッパーライス／ポテサラ／青葱" oninput="filter()" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">' +
+'<div id="results"></div><div id="added"></div>' +
+'<button class="save" onclick="save()">保存する</button><div id="msg"></div>' +
 '<script>' +
-'var ITEMS=[],STORED={};' +
-'function load(){google.script.run.withSuccessHandler(function(d){ITEMS=d.items;STORED=d.stored||{};' +
-'var sel=document.getElementById("date");sel.innerHTML="";' +
-'d.days.forEach(function(x){var o=document.createElement("option");o.value=x.value;o.text=x.label;sel.appendChild(o);});' +
-'sel.onchange=render;render();}).lossForm_getData();}' +
-'function render(){var ds=document.getElementById("date").value;var h="";' +
-'ITEMS.forEach(function(it){var p0=it.parts[0];var W=0;it.parts.forEach(function(p){W+=p.w;});var factor=p0.w/W;' +
-'var raw=STORED[String(p0.code)+"@"+ds];var v=((raw===undefined||raw===null)?"":Math.round(raw/factor));' +
-'h+="<div class=\\"drow\\"><span class=\\"nm\\">"+it.name+"</span>"' +
-'+"<input type=\\"number\\" min=\\"0\\" step=\\"1\\" id=\\"q_"+it.key+"\\" value=\\""+v+"\\">"' +
-'+"<span class=\\"u\\">"+it.unit+"</span></div>";});' +
-'document.getElementById("list").innerHTML=h;}' +
-'function save(){var ds=document.getElementById("date").value;' +
-'var entries=ITEMS.map(function(it){return {key:it.key,qty:document.getElementById("q_"+it.key).value};});' +
-'document.getElementById("msg").innerText="保存中…";' +
-'google.script.run.withSuccessHandler(function(m){document.getElementById("msg").innerText=m;})' +
-'.withFailureHandler(function(e){document.getElementById("msg").innerText="エラー："+e.message;})' +
-'.lossForm_commit(ds,entries);}' +
+'var D={},PIN=[],IDX=[],ADD=[];' +
+'function load(){google.script.run.withSuccessHandler(function(d){D=d;PIN=d.pinned||[];IDX=d.index||[];' +
+'document.getElementById("date").value=d.today;setDay(d.today,document.getElementById("bt"));renderPin();}).lossForm_getData();}' +
+'function setDay(v,btn){document.getElementById("date").value=v;document.getElementById("bt").classList.remove("on");document.getElementById("by").classList.remove("on");if(btn)btn.classList.add("on");}' +
+'function clearDayBtn(){document.getElementById("bt").classList.remove("on");document.getElementById("by").classList.remove("on");}' +
+'function renderPin(){var h="";PIN.forEach(function(p,i){h+="<div class=\\"drow\\"><span class=\\"nm\\">"+esc(p.name)+"</span><input type=\\"number\\" min=\\"0\\" step=\\"1\\" id=\\"p_"+i+"\\"><span class=\\"u\\">"+p.unit+"</span></div>";});document.getElementById("pin").innerHTML=h;}' +
+'function nrm(s){return String(s||"").normalize("NFKC").replace(/[\\u3041-\\u3096]/g,function(c){return String.fromCharCode(c.charCodeAt(0)+96);}).toLowerCase();}' +
+'function filter(){var q=document.getElementById("q").value.trim();var box=document.getElementById("results");if(!q){box.innerHTML="";return;}var qn=nrm(q);var hit=[];for(var i=0;i<IDX.length&&hit.length<30;i++){var it=IDX[i];var blob=it.search||nrm(it.name);if(blob.indexOf(qn)>=0||String(it.code).indexOf(q)>=0)hit.push(it);}' +
+'box.innerHTML=hit.map(function(it){return "<div class=\\"ritem\\" onclick=\\"add(\'"+it.type+"\',\'"+it.code+"\')\\"><span class=\\"tag "+(it.type===\'商品\'?"p":"f")+"\\">"+it.type+"</span>"+esc(it.name)+"</div>";}).join("");}' +
+'function add(type,code){var it=null;for(var i=0;i<IDX.length;i++){if(IDX[i].type===type&&String(IDX[i].code)===String(code)){it=IDX[i];break;}}if(!it)return;for(var j=0;j<ADD.length;j++){if(ADD[j].type===type&&String(ADD[j].code)===String(code)){document.getElementById("q").value="";document.getElementById("results").innerHTML="";return;}}ADD.push({type:it.type,code:it.code,name:it.name,unit:it.unit});document.getElementById("q").value="";document.getElementById("results").innerHTML="";renderAdd();}' +
+'function renderAdd(){var h=ADD.length?"<div class=\\"sec\\">追加した品目</div>":"";ADD.forEach(function(a,i){h+="<div class=\\"drow\\"><span class=\\"nm\\"><span class=\\"tag "+(a.type===\'商品\'?"p":"f")+"\\">"+a.type+"</span>"+esc(a.name)+"</span><input type=\\"number\\" min=\\"0\\" step=\\"1\\" id=\\"a_"+i+"\\"><span class=\\"u\\">"+a.unit+"</span><span class=\\"rm\\" onclick=\\"del("+i+")\\">×</span></div>";});document.getElementById("added").innerHTML=h;}' +
+'function del(i){ADD.splice(i,1);renderAdd();}' +
+'function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}' +
+'function save(){var ds=document.getElementById("date").value;if(!ds){document.getElementById("msg").innerText="日付を選んでください";return;}var entries=[];' +
+'PIN.forEach(function(p,i){var v=Number(document.getElementById("p_"+i).value);if(v>0)entries.push({type:"食材",key:p.key,code:p.code,qty:v});});' +
+'ADD.forEach(function(a,i){var v=Number(document.getElementById("a_"+i).value);if(v>0)entries.push({type:a.type,code:a.code,qty:v});});' +
+'if(!entries.length){document.getElementById("msg").innerText="数量が入っていません";return;}document.getElementById("msg").innerText="保存中…";' +
+'google.script.run.withSuccessHandler(function(m){document.getElementById("msg").innerText=m;ADD=[];renderAdd();PIN.forEach(function(p,i){document.getElementById("p_"+i).value="";});setTimeout(function(){google.script.host.close();},1000);})' +
+'.withFailureHandler(function(e){document.getElementById("msg").innerText="エラー："+e.message;}).lossForm_commit(ds,entries);}' +
 'load();' +
 '</script></body></html>';
 }
@@ -12367,3 +13271,273 @@ function buildCostAnalysis() {
             + ' 直近7日原価率=' + Math.round(avgOf(7, false) * 1000) / 10 + '%'
             + ' 直近30日原価率=' + Math.round(avgOf(30, false) * 1000) / 10 + '%');
 }
+
+// ── ②確率＋⑥在庫理論：サービスレベル(欠品しない確率)の共通部品 ─────────────
+//   サービスレベル(SL)＝補充1サイクルで欠品しない確率。安全在庫 = Z(SL)×σ×√(カバー日数)。
+//   目標在庫 = 平均需要 + 安全在庫。単位は仕入規格量（袋/箱数）。MARKER_SERVICE_LEVEL
+const SERVICE_LEVEL_Z_ = { p90: 1.2816, p95: 1.6449, p99: 2.3263 };   // 正規分布係数（90/95/99%）
+const SERVICELEVEL_PROP_ = 'serviceLevelByCode';   // 発注の安全在庫をSLで決める食材 {code:{sl:'p90'|'p95'|'p99'}}。未登録＝従来の安全係数。
+
+// 食材ごとの1日使用量の平均μ・ばらつきσを食材日時実績から算出（直近windowDays・営業日のみ・使わない日は0・推定行は除く）
+function ingredientDailyStats_(ss, windowDays) {
+  const empty = { data: {}, nDays: 0, from: null, to: null };
+  const ji = ss.getSheetByName('食材日時実績');
+  if (!ji || ji.getLastRow() < 2) return empty;
+  const rows = ji.getRange(2, 1, ji.getLastRow() - 1, 6).getValues();
+  let maxD = null;
+  rows.forEach(r => { if (!r[0]) return; const d = new Date(r[0]); if (!isNaN(d.getTime())) { d.setHours(0,0,0,0); if (!maxD || d > maxD) maxD = d; } });
+  if (!maxD) return empty;
+  const fromD = new Date(maxD); fromD.setDate(fromD.getDate() - windowDays + 1);
+  const usage = {}, bizDays = {};
+  rows.forEach(r => {
+    if (!r[0]) return;
+    if ((r[5] || '').toString().trim() === '推定') return;   // 推定は除く＝実際のばらつきだけ見る
+    const d = new Date(r[0]); if (isNaN(d.getTime())) return; d.setHours(0,0,0,0);
+    if (d < fromD || d > maxD) return;
+    const ds = toDateStr_(d);
+    const code = String(Number(r[2])); if (!/^\d+$/.test(code)) return;
+    bizDays[ds] = true;
+    if (!usage[code]) usage[code] = {};
+    usage[code][ds] = (usage[code][ds] || 0) + (Number(r[4]) || 0);
+  });
+  const days = Object.keys(bizDays); const nDays = days.length;
+  if (nDays < 2) return { data: {}, nDays: nDays, from: fromD, to: maxD };
+  const out = {};
+  Object.keys(usage).forEach(code => {
+    let sum = 0; const vals = [];
+    days.forEach(ds => { const v = usage[code][ds] || 0; vals.push(v); sum += v; });   // 使わなかった日は0で数える
+    const mu = sum / nDays;
+    let sq = 0; vals.forEach(v => { sq += (v - mu) * (v - mu); });
+    out[code] = { mu: mu, sigma: Math.sqrt(sq / (nDays - 1)), nDays: nDays };
+  });
+  return { data: out, nDays: nDays, from: fromD, to: maxD };
+}
+
+// 発注が実際に使う「食材→SL文字列」マップを返す（{code:{sl}} でも {code:'p95'} でも受ける）
+function readServiceLevelMap_() {
+  let map = {};
+  try { map = JSON.parse(PropertiesService.getScriptProperties().getProperty(SERVICELEVEL_PROP_) || '{}'); } catch (e) { map = {}; }
+  const out = {};
+  Object.keys(map).forEach(k => { const v = map[k]; const sl = (v && v.sl) ? v.sl : v; if (sl === 'p90' || sl === 'p95' || sl === 'p99') out[String(Number(k))] = sl; });
+  return out;
+}
+
+// 正規分布：確率密度φと累積分布Φ（SL効果の見える化＝欠品率・廃棄期待の計算用）。MARKER_SL_SIM
+function normPdf_(z) { return Math.exp(-z * z / 2) / 2.5066282746310002; }   // 1/√(2π)=0.39894...
+function normCdf_(x) {   // Zelen & Severo 近似（誤差<7.5e-8）
+  const b1 = 0.319381530, b2 = -0.356563782, b3 = 1.781477937, b4 = -1.821255978, b5 = 1.330274429, p = 0.2316419;
+  const z = Math.abs(x), t = 1 / (1 + p * z);
+  const y = 1 - normPdf_(z) * t * (b1 + t * (b2 + t * (b3 + t * (b4 + t * b5))));
+  return x >= 0 ? y : 1 - y;
+}
+
+// ── 試作：食材ごとに「◯%欠品しない目標在庫」を計算して見せる（このシートは見るだけ）。MARKER_STOCK_PROB ──
+function buildStockProbabilityAnalysis() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const WINDOW_DAYS = 90;
+  const coverByCat = { '生鮮': 2, '冷凍': 3, '食材': 3, 'ドリンク': 3, '酒': 3 };
+  const recSLByCat = { '生鮮': 'p90', '冷凍': 'p99', '酒': 'p99', 'ドリンク': 'p95', '食材': 'p95' };
+
+  const im = ss.getSheetByName('食材マスタ');
+  if (!im || im.getLastRow() < 2) { ui.alert('食材マスタがありません'); return; }
+  const info = {};
+  const FRESH_SHELF_DEFAULT_LOCAL = 2;   // 消費期限が空の生鮮の既定日持ち
+  im.getRange(2, 1, im.getLastRow() - 1, 15).getValues().forEach(r => {   // O列(15)=消費期限まで読む
+    if (r[0] === '' || r[0] === null) return;
+    const cat = String(r[2] || '').trim();
+    if (cat === '消耗品' || cat === '発注終了') return;
+    const shelf = Number(r[14]) > 0 ? Number(r[14]) : FRESH_SHELF_DEFAULT_LOCAL;
+    info[String(Number(r[0]))] = { name: String(r[1] || ''), cat: cat, shelf: shelf };
+  });
+
+  const S = ingredientDailyStats_(ss, WINDOW_DAYS);
+  const stats = S.data, nDays = S.nDays;
+  if (nDays < 10 || !Object.keys(stats).length) { ui.alert('食材日時実績のデータが少なすぎます（' + nDays + '日）。もう少したまってから実行してください。'); return; }
+
+  const slMap = readServiceLevelMap_();   // 今フォームで設定中のSL（未設定＝従来）
+  const list = [];
+  Object.keys(stats).forEach(code => {
+    if (!info[code]) return;
+    const mu = stats[code].mu, sigma = stats[code].sigma;
+    if (mu <= 0) return;
+    const cat = info[code].cat || '食材';
+    const L = coverByCat[cat] || 3;
+    const meanL = mu * L, sigmaL = sigma * Math.sqrt(L);
+    const target = sl => meanL + SERVICE_LEVEL_Z_[sl] * sigmaL;
+    const recSL = recSLByCat[cat] || 'p95';
+    // ── SL効果の見える化：今の設定（未設定は推奨で試算）での欠品率・廃棄期待 ──
+    const isFresh = (cat === '生鮮');
+    const shelf = info[code].shelf || 2;
+    const setSL = slMap[code] || null;      // フォームで設定中（未設定=null）
+    const evalSL = setSL || recSL;          // 評価に使うSL（未設定は推奨で試算）
+    let Tc = target(evalSL);
+    if (isFresh && L > shelf) Tc = Tc * (shelf / L);   // 生鮮の日持ち上限で頭打ち（発注と同じ考え）
+    const zEff = sigmaL > 0 ? (Tc - meanL) / sigmaL : 5;
+    const stockoutP = 1 - normCdf_(zEff);              // 補充1サイクルで欠品する確率
+    let wastePerWeek = '';                             // 廃棄期待（生鮮のみ・袋/週）
+    if (isFresh && sigma > 0 && Tc > 0) {
+      const mS = mu * shelf, sS = sigma * Math.sqrt(shelf), z = (Tc - mS) / sS;
+      const spoilPerCycle = sS * (z * normCdf_(z) + normPdf_(z));   // 1補充あたり廃棄＝E[max(0, 在庫 − 日持ち中の需要)]
+      const cyclesPerWeek = 7 * mu / Tc;                            // 1回転＝在庫を使い切る日数(在庫÷μ)。廃棄は必ず売上以下に収まる
+      wastePerWeek = spoilPerCycle * cyclesPerWeek;
+    }
+    list.push({ code: code, name: info[code].name, cat: cat, mu: mu, sigma: sigma,
+      cv: mu > 0 ? sigma / mu : 0, L: L, meanL: meanL,
+      t90: target('p90'), t95: target('p95'), t99: target('p99'), recSL: recSL, recTarget: target(recSL),
+      setSL: setSL, evalSL: evalSL, isFresh: isFresh, shelf: shelf, evalTarget: Tc, stockoutP: stockoutP, wastePerWeek: wastePerWeek });
+  });
+  if (!list.length) { ui.alert('対象食材がありませんでした'); return; }
+  const catOrder = { '酒': 1, 'ドリンク': 2, '冷凍': 3, '生鮮': 4, '食材': 5 };
+  list.sort((a, b) => (catOrder[a.cat] || 9) - (catOrder[b.cat] || 9) || b.mu - a.mu);
+
+  const name = '欠品しない在庫（確率）';
+  let sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name); else sh.clear();
+  const W = 17;
+  const pad = a => { const b = a.slice(); while (b.length < W) b.push(''); return b; };
+  const out = [];
+  out.push(pad(['欠品しない在庫（確率）＋SL効果の見える化']));
+  out.push(pad(['更新', Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'), '対象期間', WINDOW_DAYS + '日（' + toDateStr_(S.from) + '〜' + toDateStr_(S.to) + '／営業' + nDays + '日）']));
+  out.push(pad(['考え方：目標在庫 = 平均需要μ×カバー日数L ＋ Z×σ×√L。SL=補充1回で欠品しない確率（95%＝約20回に1回だけ欠品）。単位は仕入規格量（袋・箱数）。※このシートは見るだけ。発注へ効かせるにはメニュー「欠品しない確率(サービスレベル)を食材ごとに決める」で設定。']));
+  out.push(pad(['SL係数Z：90%=1.28／95%=1.64／99%=2.33。カバー日数Lの既定：生鮮2日・その他3日。おすすめSL：生鮮90%（廃棄抑制）／冷凍・酒99%／ドリンク・食材95%。']));
+  out.push(pad(['右の追加列＝SL効果の確認：設定中SL＝今フォームで設定した確率（未設定は「従来→推奨」で試算）。目標在庫(設定)＝その設定での在庫（生鮮は日持ち上限で頭打ち）。欠品率(推定)＝補充1回で品切れする確率。廃棄期待＝生鮮が日持ち中に使い切れず捨てる見込み(袋/週・推定)。判定＝下げ/上げの目安。']));
+  out.push(pad(['']));
+  const headRow = out.length + 1;
+  out.push(pad(['食材コード', '食材名', '区分', '1日平均μ', 'ばらつきσ', '変動係数', 'カバー日数L', '平均需要μ×L', '90%在庫', '95%在庫', '99%在庫', 'おすすめ→在庫', '設定中SL', '目標在庫(設定)', '欠品率(推定)', '廃棄期待(袋/週)', '判定']));
+  const startRow = out.length + 1;
+  const r1 = v => Math.round(v * 10) / 10;
+  list.forEach(x => {
+    const setLabel = x.setSL ? (x.setSL.replace('p', '') + '%') : ('従来→推奨' + x.recSL.replace('p', '') + '%');
+    const soP = Math.round(x.stockoutP * 1000) / 10;   // ％
+    const waste = x.wastePerWeek === '' ? '' : Math.round(x.wastePerWeek * 10) / 10;
+    let judge = 'OK';
+    if (x.isFresh && waste !== '' && waste >= 0.7) judge = '廃棄注意→SL下げ';
+    else if (x.stockoutP >= 0.15) judge = '欠品注意→SL上げ';
+    out.push(pad([Number(x.code), x.name, x.cat, r1(x.mu), r1(x.sigma), Math.round(x.cv * 100) / 100, x.L, r1(x.meanL),
+      r1(x.t90), r1(x.t95), r1(x.t99), x.recSL.replace('p', '') + '%→' + r1(x.recTarget),
+      setLabel, r1(x.evalTarget), soP + '%', waste, judge]));
+  });
+  sh.getRange(1, 1, out.length, W).setValues(out);
+
+  sh.getRange(1, 1).setFontSize(14).setFontWeight('bold');
+  sh.getRange(headRow, 1, 1, W).setFontWeight('bold').setBackground('#d9ead3');
+  const n = list.length;
+  sh.getRange(startRow, 4, n, 8).setNumberFormat('#,##0.0');
+  sh.getRange(startRow, 6, n, 1).setNumberFormat('0.00');
+  sh.getRange(startRow, 7, n, 1).setNumberFormat('0');
+  sh.getRange(startRow, 14, n, 1).setNumberFormat('#,##0.0');   // 目標在庫(設定)
+  sh.getRange(startRow, 16, n, 1).setNumberFormat('#,##0.0');   // 廃棄期待
+  // 判定に色（廃棄注意=橙／欠品注意=赤／OK=無色）
+  const judgeVals = list.map(x => {
+    const waste = x.wastePerWeek === '' ? '' : Math.round(x.wastePerWeek * 10) / 10;
+    if (x.isFresh && waste !== '' && waste >= 0.7) return '#fce5cd';
+    if (x.stockoutP >= 0.15) return '#f4cccc';
+    return null;
+  });
+  judgeVals.forEach((c, i) => { if (c) sh.getRange(startRow + i, 15, 1, 3).setBackground(c); });
+  sh.setFrozenRows(headRow);
+  [80, 200, 70, 90, 90, 80, 90, 100, 90, 90, 90, 130, 110, 110, 90, 110, 130].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  const maxC = sh.getMaxColumns(); if (maxC > W) sh.deleteColumns(W + 1, maxC - W);
+
+  ui.alert('欠品しない在庫（確率）', 'シート「' + name + '」を更新しました（' + n + '食材／営業' + nDays + '日）。\n\n右側に「SL効果の見える化」列を追加しました：\n・設定中SL＝今の設定（未設定は従来→推奨で試算）\n・欠品率(推定)＝品切れする確率\n・廃棄期待＝生鮮の捨てる見込み(袋/週)\n・判定＝下げ/上げの目安（橙=廃棄注意・赤=欠品注意）\n\n※このシートは見るだけ。設定変更は「欠品しない確率(サービスレベル)を食材ごとに決める」で。', ui.ButtonSet.OK);
+  console.log('buildStockProbabilityAnalysis: ' + n + '食材 / ' + nDays + '営業日');
+}
+
+// ── SL設定フォーム：食材ごとに「◯%欠品しない」を選ぶ→発注へ反映 ＝MARKER_SERVICE_LEVEL ──
+function markServiceLevel() {
+  const html = HtmlService.createHtmlOutput(SERVICE_LEVEL_FORM_HTML_).setWidth(640).setHeight(640);
+  SpreadsheetApp.getUi().showModalDialog(html, '発注：欠品しない確率(サービスレベル)を食材ごとに決める');
+}
+function serviceLevelGetData() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let map = {};
+  try { map = JSON.parse(PropertiesService.getScriptProperties().getProperty(SERVICELEVEL_PROP_) || '{}'); } catch (e) { map = {}; }
+  const slOf = c => { const x = map[c]; const v = (x && x.sl) ? x.sl : x; return (v === 'p90' || v === 'p95' || v === 'p99') ? v : 'none'; };
+  const recByCat = { '生鮮': 'p90', '冷凍': 'p99', '酒': 'p99', 'ドリンク': 'p95', '食材': 'p95' };
+  const foods = [];
+  const m = ss.getSheetByName('食材マスタ');
+  if (m && m.getLastRow() > 1) {
+    m.getRange(2, 1, m.getLastRow() - 1, 3).getValues().forEach(r => {
+      if (r[0] === '' || r[0] === null) return;
+      const cat = String(r[2] || '').trim();
+      if (cat === '消耗品' || cat === '発注終了') return;
+      const code = String(Number(r[0]));
+      foods.push({ code: code, name: String(r[1] || ''), cat: cat, sl: slOf(code), rec: recByCat[cat] || 'p95' });
+    });
+  }
+  return { foods: foods };
+}
+function serviceLevelSetBatch(changes) {
+  const prop = PropertiesService.getScriptProperties();
+  let map = {};
+  try { map = JSON.parse(prop.getProperty(SERVICELEVEL_PROP_) || '{}'); } catch (e) { map = {}; }
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const nameByCode = {};
+  const m = ss.getSheetByName('食材マスタ');
+  if (m && m.getLastRow() > 1) m.getRange(2, 1, m.getLastRow() - 1, 2).getValues().forEach(r => { if (r[0] !== '' && r[0] !== null) nameByCode[String(Number(r[0]))] = String(r[1] || ''); });
+  let n = 0; const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  Object.keys(changes || {}).forEach(code => {
+    const cc = String(Number(code)); if (!cc || cc === 'NaN') return;
+    const sl = changes[code];
+    if (sl === 'none' || !sl) { if (map[cc] !== undefined) { delete map[cc]; n++; } }
+    else if (sl === 'p90' || sl === 'p95' || sl === 'p99') { map[cc] = { sl: sl, name: nameByCode[cc] || cc, at: today }; n++; }
+  });
+  if (n === 0) return { msg: '変更はありませんでした。', data: serviceLevelGetData() };
+  prop.setProperty(SERVICELEVEL_PROP_, JSON.stringify(map));
+  return { msg: n + '件を保存しました。次に「発注書を作る」を押すと発注に反映されます。', data: serviceLevelGetData() };
+}
+const SERVICE_LEVEL_FORM_HTML_ = `
+<style>
+  body{font-family:sans-serif;font-size:13px;margin:8px;color:#222;}
+  #hint{background:#e8f0fe;border:1px solid #b3c6f0;padding:6px 8px;border-radius:4px;margin-bottom:6px;font-size:12px;line-height:1.5;}
+  #f{width:100%;box-sizing:border-box;padding:6px;font-size:13px;margin-bottom:6px;}
+  .row{display:flex;align-items:center;gap:8px;padding:3px 2px;border-bottom:1px solid #eee;}
+  .row.chg{background:#fff8e1;}
+  .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .cat{color:#888;font-size:11px;}
+  label.o{margin-right:8px;font-size:12px;cursor:pointer;white-space:nowrap;}
+  #bar{position:sticky;bottom:0;background:#fff;padding:8px 2px;border-top:2px solid #ccc;margin-top:4px;}
+  button{font-size:13px;padding:6px 14px;cursor:pointer;}
+  #msg{margin-left:8px;color:#137333;}
+</style>
+<div id="hint"><b>従来</b>＝今まで通り（安全係数）。90/95/99にすると、その食材は<b>統計の安全在庫（Z×σ×√日数）</b>で発注します。生鮮は廃棄を抑えたいので<b>90%</b>、看板の肉は欠品させたくないので<b>99%</b>が目安。黄=変更した行。反映は「変更を反映」→ その後「発注書を作る」。</div>
+<input id="f" placeholder="食材名でしぼり込み">
+<div id="list">読み込み中…</div>
+<div id="bar"><button onclick="apply()">変更を反映</button><span id="msg"></span></div>
+<script>
+  var FOODS=[], PEND={}, ORDER=["none","p90","p95","p99"], SHORT={none:"従来",p90:"90%",p95:"95%",p99:"99%"};
+  function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  google.script.run.withSuccessHandler(function(d){ FOODS=(d&&d.foods)||[]; render(); }).serviceLevelGetData();
+  function render(){
+    var q=(document.getElementById('f').value||'').trim();
+    var h='';
+    FOODS.forEach(function(fd){
+      if(q && fd.name.indexOf(q)<0) return;
+      var cur=(PEND[fd.code]!==undefined)?PEND[fd.code]:fd.sl;
+      var chg=(PEND[fd.code]!==undefined && PEND[fd.code]!==fd.sl);
+      h+='<div class="row'+(chg?' chg':'')+'" data-code="'+fd.code+'"><span class="nm">'+esc(fd.name)+' <span class="cat">'+esc(fd.cat)+'・推奨'+SHORT[fd.rec]+'</span></span><span>';
+      ORDER.forEach(function(k){
+        h+='<label class="o"><input type="radio" name="r_'+fd.code+'" value="'+k+'"'+(cur===k?' checked':'')+'>'+SHORT[k]+'</label>';
+      });
+      h+='</span></div>';
+    });
+    document.getElementById('list').innerHTML=h||'該当なし';
+  }
+  document.getElementById('f').addEventListener('input',render);
+  document.getElementById('list').addEventListener('change',function(e){
+    var inp=e.target; if(!inp||inp.tagName!=='INPUT'||inp.type!=='radio')return;
+    var row=inp.closest('.row'); if(!row)return; var code=row.getAttribute('data-code');
+    var fd=null; FOODS.forEach(function(x){if(x.code===code)fd=x;}); if(!fd)return;
+    if(inp.value===fd.sl) delete PEND[code]; else PEND[code]=inp.value;
+    if(PEND[code]!==undefined && PEND[code]!==fd.sl) row.classList.add('chg'); else row.classList.remove('chg');
+  });
+  function apply(){
+    var keys=Object.keys(PEND); if(!keys.length){document.getElementById('msg').textContent='変更がありません';return;}
+    document.getElementById('msg').textContent='反映中…';
+    google.script.run.withSuccessHandler(function(r){
+      document.getElementById('msg').textContent=r.msg+'（閉じます）';
+      setTimeout(function(){ google.script.host.close(); }, 900);
+    }).withFailureHandler(function(e){document.getElementById('msg').textContent='エラー:'+e.message;}).serviceLevelSetBatch(PEND);
+  }
+</script>`;
