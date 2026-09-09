@@ -197,7 +197,7 @@ function onOpen() {
     .addSubMenu(ui.createMenu('📊 時給変更届')
       .addItem('📊 時給変更届を更新（何度でも可）', 'updateSummarySheet')
       .addItem('🏢 店舗情報を変更（事業部名・店舗名・店長名）', 'setStoreInfo')
-      .addItem('🖊️ 押印欄の役職名を変更', 'setStampTitles'))
+      .addItem('📅 変更日を変更（既定21日）', 'setSummaryChangeDay'))
     .addSubMenu(ui.createMenu('📄 労働条件通知書')
       .addItem('① 差し込みテンプレートを作成（初回のみ）', 'setupContractTemplate')
       .addItem('② 全員ぶん作成（入力フォーム）', 'createContractNotices'))
@@ -743,11 +743,13 @@ function updateSummaryForPeriod(period) {
 }
 
 // ===== 時給変更届グリッドの共通定義（renderSummarySheet_ と 行単位更新で共用）★SUMMARY_SHARED★ =====
-const SUMMARY_GRID_COLS = 24;
-const SUMMARY_SEG   = { no:1, name:3, gender:2, age:1, tenure:3, oldCls:3, arrow1:1,
-                        newCls:3, oldWage:2, arrow2:1, newWage:2, diff:2 };
+const SUMMARY_GRID_COLS = 12;   // 公式フォーム＝A〜L の12列
+const SUMMARY_SEG   = { no:1, name:1, gender:1, age:1, tenure:1, oldCls:1, arrow1:1,
+                        newCls:1, oldWage:1, arrow2:1, newWage:1, diff:1 };
 const SUMMARY_ORDER = ['no','name','gender','age','tenure','oldCls','arrow1','newCls','oldWage','arrow2','newWage','diff'];
 const SUMMARY_START = (function(){ const s = {}; let c = 1; SUMMARY_ORDER.forEach(k => { s[k] = c; c += SUMMARY_SEG[k]; }); return s; })();
+// 公式フォームの行位置（★SUMMARY_LAYOUT★）
+const SUMMARY_ROWS = { title:1, info1:3, info2:4, info3:5, hdr1:7, hdr2:8, dataTop:9, dataN:34 };
 
 // 同じ氏名で複数行あれば、日付（列14＝index13）が最新の1件だけを残す
 function latestPerName_(rows, nameIdx, dateIdx) {
@@ -806,13 +808,78 @@ function buildSummaryRows_(ss, period, onlyNames) {
   return { rows: rows, evalCount: targets.length };
 }
 
-// 実際の時給変更届の生成（全体を作り直す）。結果メッセージ（文字列）を返す。※ getUi は使わない
+// 実際の時給変更届の生成。結果メッセージ（文字列）を返す。※ getUi は使わない
+//  既にシートがある＝データだけ入れ替え（点線・文字サイズ等の手動書式を残す）。
+//  無い＝従来どおりレイアウトごと生成。★DATAONLY★
 function runUpdateSummary_(period) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const built = buildSummaryRows_(ss, period);
   if (built.evalCount === 0)     return `${period}の評価データが見つかりません。`;
   if (built.rows.length === 0)   return '在籍スタッフが取得できませんでした。スタッフマスタを確認してください。';
+
+  const sh = ss.getSheetByName(SUMMARY_SHEET) || ss.getSheetByName('時給変更集計');
+  const built0 = sh && String(sh.getRange(SUMMARY_ROWS.hdr1, SUMMARY_START.name).getValue()).indexOf('氏名') !== -1;
+  if (built0) {
+    // 既存シート＝データだけ更新（書式・列幅・行高・図形はそのまま）
+    refreshSummaryDataOnly_(ss, period, built.rows);
+    ss.setActiveSheet(sh);
+    const changed = built.rows.filter(r => r.newW !== r.oldW || String(r.newCls) !== String(r.oldCls)).length;
+    return `在籍スタッフ ${built.rows.length}名を更新しました（うち変更あり ${changed}名）。\n※レイアウト・書式は変更していません。\n承認後に「名簿に時給を反映」を実行してください。`;
+  }
+  // シートが無い（または未作成）＝レイアウトごと生成
   return renderSummarySheet_(ss, period, built.rows, false);
+}
+
+// 既存シートの「値だけ」を最新化（書式・罫線・文字サイズ・列幅・行高・図形は一切触らない）★DATAONLY★
+function refreshSummaryDataOnly_(ss, period, rows) {
+  const sh = ss.getSheetByName(SUMMARY_SHEET) || ss.getSheetByName('時給変更集計');
+  if (!sh) return false;
+  const RT = SUMMARY_ROWS, S = SUMMARY_START;
+  const DATA_TOP = RT.dataTop, DATA_N = RT.dataN;
+  const pm = String(period).match(/(\d{4})年(\d{1,2})月/);
+
+  // タイトル・日付（値のみ）
+  if (pm) {
+    sh.getRange(RT.title, 1).setValue(`${pm[1]}年${pm[2]}月度時給変更届`);
+    sh.getRange(RT.info1, 2).setValue(`${pm[1]}年　${pm[2]}月　${getChangeDay_()}日　より変更`);
+  }
+  // 平均時給（変更前・変更後）
+  const oldWs = rows.map(r => r.oldW).filter(v => v > 0);
+  const newWs = rows.map(r => r.newW).filter(v => v > 0);
+  const avgOld = oldWs.length ? Math.round(oldWs.reduce((a,b)=>a+b,0) / oldWs.length) : 0;
+  const avgNew = newWs.length ? Math.round(newWs.reduce((a,b)=>a+b,0) / newWs.length) : 0;
+  sh.getRange(RT.info3, 3).setValue(`¥${avgOld.toLocaleString()}`);
+  sh.getRange(RT.info3, 6).setValue(`¥${avgNew.toLocaleString()}`);
+  // 店舗情報（事業部名・店舗名・店長名）値のみ ※値はJ列（10列目）
+  try {
+    const info = getStoreInfo_();
+    sh.getRange(RT.info1, 10).setValue(info.division || '');
+    sh.getRange(RT.info2, 10).setValue(info.name || '');
+    sh.getRange(RT.info3, 10).setValue(info.manager || '');
+  } catch (e) {}
+
+  // データ行（値のみ）
+  const staffCols = [S.name, S.gender, S.age, S.tenure, S.oldCls, S.newCls, S.oldWage, S.newWage, S.diff];
+  for (let i = 0; i < DATA_N; i++) {
+    const row = DATA_TOP + i;
+    const rw  = rows[i];
+    if (rw) {
+      const diff = rw.newW - rw.oldW;
+      sh.getRange(row, S.name).setValue(rw.name);
+      sh.getRange(row, S.gender).setValue(rw.gender);
+      sh.getRange(row, S.age).setValue(rw.age);
+      sh.getRange(row, S.tenure).setValue(rw.tenure);
+      sh.getRange(row, S.oldCls).setValue(rw.oldCls);
+      sh.getRange(row, S.newCls).setValue(rw.newCls);
+      sh.getRange(row, S.oldWage).setValue(`¥${rw.oldW.toLocaleString()}`);
+      sh.getRange(row, S.newWage).setValue(`¥${rw.newW.toLocaleString()}`);
+      sh.getRange(row, S.diff).setValue(diff > 0 ? `+${diff}円` : diff < 0 ? `${diff}円` : '');
+    } else {
+      // 空行：スタッフ列の値だけ消す（No.・矢印・書式は残す）
+      staffCols.forEach(c => sh.getRange(row, c).clearContent());
+    }
+  }
+  return true;
 }
 
 // 評価保存時：その人の行だけ時給変更届を更新（速い）。できなければ false（呼び出し側で全体を作り直す）
@@ -824,8 +891,8 @@ function refreshSummaryForStaff_(ss, period, name) {
   const built = buildSummaryRows_(ss, period);
   if (!built.rows.length) return false;
 
-  // 氏名の行を探す（データは4行目から。氏名は SUMMARY_START.name 列）
-  const DATA_TOP = 4;
+  // 氏名の行を探す（データは9行目から。氏名は SUMMARY_START.name 列＝B）
+  const DATA_TOP = SUMMARY_ROWS.dataTop;
   const n = Math.max(sh.getLastRow() - DATA_TOP + 1, 0);
   if (n === 0) return false;
   const nameCol = sh.getRange(DATA_TOP, SUMMARY_START.name, n, 1).getValues();
@@ -847,16 +914,15 @@ function refreshSummaryForStaff_(ss, period, name) {
   sh.getRange(rowIdx, SUMMARY_START.newCls).setValue(me.newCls);
   sh.getRange(rowIdx, SUMMARY_START.oldWage).setValue(`¥${me.oldW.toLocaleString()}`);
   sh.getRange(rowIdx, SUMMARY_START.newWage).setValue(`¥${me.newW.toLocaleString()}`);
-  sh.getRange(rowIdx, SUMMARY_START.diff).setValue(diff > 0 ? `+${diff}円` : diff < 0 ? `${diff}円` : '変更なし');
+  sh.getRange(rowIdx, SUMMARY_START.diff).setValue(diff > 0 ? `+${diff}円` : diff < 0 ? `${diff}円` : '');
 
-  // 平均時給（行2）を再計算（在籍全員の旧・新から）
+  // 平均時給（行5：C〜D＝変更前、F〜H＝変更後）を再計算
   const oldWs = built.rows.map(r => r.oldW).filter(v => v > 0);
   const newWs = built.rows.map(r => r.newW).filter(v => v > 0);
   const avgOld = oldWs.length ? Math.round(oldWs.reduce((a,b)=>a+b,0) / oldWs.length) : 0;
   const avgNew = newWs.length ? Math.round(newWs.reduce((a,b)=>a+b,0) / newWs.length) : 0;
-  const avgMid = Math.floor((5 + SUMMARY_GRID_COLS) / 2);
-  sh.getRange(2, 5).setValue(`変更前　¥${avgOld.toLocaleString()}`);
-  sh.getRange(2, avgMid + 1).setValue(`変更後　¥${avgNew.toLocaleString()}`);
+  sh.getRange(SUMMARY_ROWS.info3, 3).setValue(`¥${avgOld.toLocaleString()}`);
+  sh.getRange(SUMMARY_ROWS.info3, 6).setValue(`¥${avgNew.toLocaleString()}`);
   return true;
 }
 
@@ -876,8 +942,10 @@ function renderSummarySheet_(ss, period, rows, templateMode) {
   // シート準備
   // 新シート名で探し、無ければ旧シート名（時給変更集計）を引き継いで改名
   let sh = ss.getSheetByName(SUMMARY_SHEET) || ss.getSheetByName('時給変更集計');
+  let isNew = false;                     // 新規作成時だけ列幅・行高を設定（既存は手動調整を残す）★KEEPDIM★
   if (!sh) {
     sh = ss.insertSheet(SUMMARY_SHEET);
+    isNew = true;
   } else {
     if (sh.getName() !== SUMMARY_SHEET) sh.setName(SUMMARY_SHEET);
     sh.clearContents();
@@ -885,164 +953,177 @@ function renderSummarySheet_(ss, period, rows, templateMode) {
     try { sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart(); } catch(e){}
   }
 
-  // 行レイアウトの位置（全員分で行数が変わるため動的に計算）
-  const DATA_TOP  = 4;
-  const DATA_ROWS = rows.length;
-  const DATA_END  = DATA_TOP + DATA_ROWS - 1;
-  const SEP_ROW   = DATA_END + 1;
-  const FOOT_TOP  = SEP_ROW + 1;   // フッター3行
-  const FOOT_END  = FOOT_TOP + 2;
-  const SPACER    = FOOT_END + 1;  // A4下部へ押し下げる区切り
-  const STAMP_LBL = SPACER + 1;    // 押印欄ラベル
-  const STAMP_BOX = STAMP_LBL + 1; // 押印スペース
+  // ===== 公式フォーム(時給変更届 2022.10)と同じA〜L 12列レイアウト（★SUMMARY_LAYOUT★）=====
+  const COLS = SUMMARY_GRID_COLS;                       // 12（A〜L）
+  const RT = SUMMARY_ROWS;
+  const DATA_TOP = RT.dataTop, DATA_N = RT.dataN;       // 9行目から34行
+  const DATA_END = DATA_TOP + DATA_N - 1;               // 42
 
-  // ===== 升目グリッド（24等分で押印欄を完全等幅）★MASU_GRID_3★ =====
-  //  列位置は共通定義（★SUMMARY_SHARED★）を使用。行単位更新と必ず一致させる。
-  const GRID_COLS = SUMMARY_GRID_COLS;
-  const CELL_W    = 32;             // 各升の幅(px)。24×32=768px。印刷は「ページに合わせる」で横幅いっぱいに広がる
-  // シートの列数が足りない場合は不足分を追加（範囲外エラー防止）
-  if (sh.getMaxColumns() < GRID_COLS) sh.insertColumnsAfter(sh.getMaxColumns(), GRID_COLS - sh.getMaxColumns());
-  for (let c = 1; c <= GRID_COLS; c++) sh.setColumnWidth(c, CELL_W);
+  // 列幅（px）
+  // 列幅（ユーザー指定mm→px 96dpi）A5/B24/C9/D10/E27/F13/G8/H13/I13/J8/K13/L13 mm ★COLW★
+  const W = { 1:19, 2:91, 3:34, 4:38, 5:102, 6:49, 7:30, 8:49, 9:49, 10:30, 11:49, 12:49 };
+  if (sh.getMaxColumns() < COLS) sh.insertColumnsAfter(sh.getMaxColumns(), COLS - sh.getMaxColumns());
+  if (isNew) {
+    for (let c = 1; c <= COLS; c++) sh.setColumnWidth(c, W[c]);
+    for (let c = COLS + 1; c <= sh.getMaxColumns(); c++) { try { sh.setColumnWidth(c, 20); } catch (e) {} }
+  }
 
-  const SEG   = SUMMARY_SEG;
-  const ORDER = SUMMARY_ORDER;
-  const START = SUMMARY_START;
-
-  // 指定項目の升を結合するヘルパー
-  const seg = (row, key, val) => {
-    const rng = sh.getRange(row, START[key], 1, SEG[key]);
-    if (SEG[key] > 1) rng.merge();
-    if (val !== undefined) rng.setValue(val);
-    return rng;
-  };
-
-  const BLUE_D = '#1F4E79', BLUE_H = '#4472C4', BLUE_L = '#D6E4F7', BLUE_R = '#EBF3FB';
-  const GRAY = '#888888', LINE = '#BBBBBB';
+  const GRAY = '#000000';
+  const HDR_BG = '#E2EFDA';
   const SOLID = SpreadsheetApp.BorderStyle.SOLID;
 
-  // 行高さ設定
-  const H_TITLE = 28, H_AVG = 22, H_HDR = 22, H_DATA = 18, H_SEP1 = 8,
-        H_FOOT = 18, H_STAMP_LBL = 20, H_STAMP_BOX = 58;
-  sh.setRowHeight(1, H_TITLE); // タイトル
-  sh.setRowHeight(2, H_AVG);   // 平均時給
-  sh.setRowHeight(3, H_HDR);   // ヘッダー
-  for (let r = DATA_TOP; r <= DATA_END; r++) sh.setRowHeight(r, H_DATA); // データ（在籍全員）
-  sh.setRowHeight(SEP_ROW, H_SEP1); // 区切り
-  for (let r = FOOT_TOP; r <= FOOT_END; r++) sh.setRowHeight(r, H_FOOT); // フッター
-  sh.setRowHeight(STAMP_LBL, H_STAMP_LBL); // 押印欄：役職ラベル
-  sh.setRowHeight(STAMP_BOX, H_STAMP_BOX); // 押印欄：押印スペース
+  // 行高さ（ユーザー指定mm→px 96dpi）1:9 2:9 3:6 4:6 5:6 6:7 7:6 8:6 9〜42:5 mm ★ROWH★
+  if (isNew) {
+    sh.setRowHeight(1, 34);
+    sh.setRowHeight(2, 34);
+    sh.setRowHeight(3, 23);
+    sh.setRowHeight(4, 23);
+    sh.setRowHeight(5, 23);
+    sh.setRowHeight(6, 26);
+    sh.setRowHeight(7, 26);
+    sh.setRowHeight(8, 26);
+    for (let r = DATA_TOP; r <= DATA_END; r++) sh.setRowHeight(r, 21);
+  }
 
-  // ★押印欄を用紙下部に置く。前回の高さで約5cm(≈190px)はみ出したので、1枚に収まる高さに調整
-  const A4_ONE_PAGE_H = 1000;  // A4縦1枚に収まる高さ(px)の実測目安（これより上に押印欄を置く）
-  const usedH = H_TITLE + H_AVG + H_HDR + DATA_ROWS * H_DATA + H_SEP1 + 3 * H_FOOT
-              + H_STAMP_LBL + H_STAMP_BOX;
-  sh.setRowHeight(SPACER, Math.max(24, A4_ONE_PAGE_H - usedH)); // 押印欄を下部に、かつ1枚に収める
-
-  // 平均時給計算（在籍全員の旧・新）
+  // 平均時給（在籍全員の旧・新）
   const oldWages = rows.map(r => r.oldW).filter(v => v > 0);
   const newWages = rows.map(r => r.newW).filter(v => v > 0);
   const avgOld   = oldWages.length ? Math.round(oldWages.reduce((a,b)=>a+b,0) / oldWages.length) : 0;
   const avgNew   = newWages.length ? Math.round(newWages.reduce((a,b)=>a+b,0) / newWages.length) : 0;
 
+  const pm = String(period).match(/(\d{4})年(\d{1,2})月/);
+
   // ===== 行1：タイトル =====
-  sh.getRange(1, 1, 1, GRID_COLS).merge()
-    .setValue(templateMode ? '時給変更届' : `${period}　時給変更届`)
-    .setFontSize(13).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle')
-    .setBackground(BLUE_D).setFontColor('#FFFFFF');
+  const titleText = (templateMode || !pm) ? '○○○○年○○月度時給変更届' : `${pm[1]}年${pm[2]}月度時給変更届`;
+  sh.getRange(RT.title, 1, 1, COLS).merge()
+    .setValue(titleText).setFontSize(14).setFontWeight('bold')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBackground('#000000').setFontColor('#FFFFFF');
 
-  // ===== 行2：平均時給（見出しはA〜D列、E列から変更前→矢印→変更後）=====
-  const avgMid = Math.floor((5 + GRID_COLS) / 2); // 変更前と変更後の境目（矢印の位置）
-  sh.getRange(2, 1, 1, 4).merge()   // A〜D：見出し
-    .setValue('平均時給').setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle')
-    .setBackground(BLUE_L).setFontColor('#000000')
-    .setBorder(true, true, true, true, null, null, GRAY, SOLID);
-  sh.getRange(2, 5, 1, avgMid - 5).merge()   // E〜：変更前
-    .setValue(templateMode ? '変更前' : `変更前　¥${avgOld.toLocaleString()}`).setHorizontalAlignment('center').setVerticalAlignment('middle')
-    .setBorder(true, true, true, true, null, null, GRAY, SOLID);
-  sh.getRange(2, avgMid, 1, 1)               // 矢印
-    .setValue('⇒').setHorizontalAlignment('center').setVerticalAlignment('middle')
-    .setBorder(true, true, true, true, null, null, GRAY, SOLID);
-  sh.getRange(2, avgMid + 1, 1, GRID_COLS - avgMid).merge()   // 〜末尾：変更後
-    .setValue(templateMode ? '変更後' : `変更後　¥${avgNew.toLocaleString()}`).setHorizontalAlignment('center').setVerticalAlignment('middle')
+  // ===== 上段左：日付（行3）＝「○年○月○日 より変更」自動（変更日は設定可・既定21日）=====
+  const dateText = (templateMode || !pm) ? '　　年　　月　　日　　より変更' : `${pm[1]}年　${pm[2]}月　${getChangeDay_()}日　より変更`;
+  sh.getRange(RT.info1, 2, 1, 7).merge()  // B〜H
+    .setValue(dateText).setFontSize(10).setHorizontalAlignment('center').setVerticalAlignment('middle')
     .setBorder(true, true, true, true, null, null, GRAY, SOLID);
 
-  // ===== 行3：ヘッダー =====
-  const HDRS = { no:'No.', name:'氏名', gender:'性別', age:'年齢', tenure:'経験年数',
-                 oldCls:'旧クラスター', arrow1:'→', newCls:'新クラスター',
-                 oldWage:'旧時給', arrow2:'→', newWage:'新時給', diff:'昇給額' };
-  ORDER.forEach(k => {
-    seg(3, k, HDRS[k])
-      .setFontWeight('bold').setFontSize(9)
-      .setBackground(BLUE_H).setFontColor('#FFFFFF')
-      .setHorizontalAlignment('center').setVerticalAlignment('middle');
-  });
-  sh.getRange(3, 1, 1, GRID_COLS)
-    .setBorder(true, true, true, true, true, true, '#FFFFFF', SOLID);
+  // ===== 上段左：平均時給（行5）＝ 平均時給 [変更前] ⇒ [変更後] =====
+  sh.getRange(RT.info3, 2).setValue('平均時給').setFontSize(10).setFontWeight('bold')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, null, null, GRAY, SOLID);
+  sh.getRange(RT.info3, 3, 1, 2).merge()  // C〜D 変更前
+    .setValue(templateMode ? '' : `¥${avgOld.toLocaleString()}`)
+    .setFontSize(10).setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, null, null, GRAY, SOLID);
+  sh.getRange(RT.info3, 5).setValue('⇒').setFontSize(10)
+    .setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, null, null, GRAY, SOLID);
+  sh.getRange(RT.info3, 6, 1, 3).merge()  // F〜H 変更後
+    .setValue(templateMode ? '' : `¥${avgNew.toLocaleString()}`)
+    .setFontSize(10).setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, null, null, GRAY, SOLID);
 
-  // ===== データ（在籍スタッフ全員）=====
-  rows.forEach((rw, i) => {
-    const row  = DATA_TOP + i;
-    const bg   = i % 2 === 0 ? '#FFFFFF' : BLUE_R;
-    const diff = rw.newW - rw.oldW;
-    const vals = {
-      no: i + 1, name: rw.name, gender: rw.gender, age: rw.age, tenure: rw.tenure,
-      oldCls: rw.oldCls, arrow1: '→', newCls: rw.newCls,
-      oldWage: `¥${rw.oldW.toLocaleString()}`, arrow2: '→', newWage: `¥${rw.newW.toLocaleString()}`,
-      diff: diff > 0 ? `+${diff}円` : diff < 0 ? `${diff}円` : '変更なし'
-    };
-    ORDER.forEach(k => {
-      const align = (k === 'name') ? 'left'
-                  : (k === 'oldWage' || k === 'newWage' || k === 'diff') ? 'right' : 'center';
-      seg(row, k, vals[k]).setHorizontalAlignment(align);
-    });
-    sh.getRange(row, 1, 1, GRID_COLS)
-      .setBackground(bg).setFontSize(9).setVerticalAlignment('middle')
-      .setBorder(true, true, true, true, true, true, LINE, SOLID);
-  });
-
-  // ===== フッター（事業部・店舗・店長）=====
+  // ===== 上段右：事業部名/店舗名/店長名（行3〜5、I=ラベル、J〜L=値）=====
   const info = getStoreInfo_();
-  const footerItems = [
-    ['事業部名', templateMode ? '' : info.division],
-    ['店舗名',   templateMode ? '' : info.name],
-    ['店長名',   templateMode ? '' : info.manager],
+  const infoRows = [
+    [RT.info1, '事業部名', templateMode ? '' : info.division],
+    [RT.info2, '店舗名',   templateMode ? '' : info.name],
+    [RT.info3, '店長名',   templateMode ? '' : info.manager],
   ];
-  footerItems.forEach((fd, i) => {
-    const r = FOOT_TOP + i;
-    // 見出し：A〜D列（1〜4）左寄せ
-    sh.getRange(r, 1, 1, 4).merge().setValue(fd[0]).setFontWeight('bold')
-      .setHorizontalAlignment('left').setVerticalAlignment('middle').setBackground(BLUE_L)
-      .setBorder(true, true, true, true, null, null, GRAY, SOLID);
-    // 名称：E〜M列（5〜13）左寄せ
-    sh.getRange(r, 5, 1, 9).merge().setValue(fd[1]).setVerticalAlignment('middle')
-      .setHorizontalAlignment('left')
-      .setBorder(true, true, true, true, null, null, GRAY, SOLID);
-    // N列以降（14〜24）は空白のまま（枠線なし）
+  infoRows.forEach(ir => {
+    const isStore = ir[0] === RT.info2;          // 店名（値）だけ小さく右寄せ・見出しは通常
+    sh.getRange(ir[0], 9)                  // I ラベル（下線のみ）
+      .setValue(ir[1]).setFontSize(10).setFontWeight('bold')
+      .setHorizontalAlignment('center').setVerticalAlignment('middle')
+      .setBorder(false, false, true, false, false, false, GRAY, SOLID);
+    sh.getRange(ir[0], 10, 1, 3).merge()   // J〜L 値（下線のみ）
+      .setValue(ir[2]).setFontSize(isStore ? 6 : 10)
+      .setHorizontalAlignment(isStore ? 'right' : 'center').setVerticalAlignment('middle')
+      .setBorder(false, false, true, false, false, false, GRAY, SOLID);
   });
 
-  // ===== 会社回覧用 押印欄（最下部・完全等幅）=====
-  //  24升を役職数Nで割り切って各枠に同じ升数を割り当てる（既定6枠なら各4升で完全等幅）
-  const stampTitles = getStampTitles_();
-  const N = stampTitles.length;
-  let startCol = 1;
-  stampTitles.forEach((title, i) => {
-    const endBoundary = Math.round((GRID_COLS * (i + 1)) / N);
-    const span = endBoundary - Math.round((GRID_COLS * i) / N);
-    // 役職ラベル
-    sh.getRange(STAMP_LBL, startCol, 1, span).merge()
-      .setValue(title).setFontWeight('bold').setFontSize(9)
-      .setHorizontalAlignment('center').setVerticalAlignment('middle')
-      .setBackground(BLUE_L)
-      .setBorder(true, true, true, true, null, null, GRAY, SOLID);
-    // 押印スペース
-    sh.getRange(STAMP_BOX, startCol, 1, span).merge()
-      .setBorder(true, true, true, true, null, null, GRAY, SOLID);
-    startCol += span;
-  });
+  // ===== 見出し（行7〜8）=====
+  const setC = (r, c, v) => sh.getRange(r, c).setValue(v);
+  const vmerge = { 1:'', 2:'氏名', 3:'性別', 4:'年齢', 5:'経験年数', 12:'昇給額' };
+  Object.keys(vmerge).forEach(cc => sh.getRange(RT.hdr1, Number(cc), 2, 1).merge().setValue(vmerge[cc]));
+  sh.getRange(RT.hdr1, 6, 1, 3).merge().setValue('クラスター');  // F〜H
+  sh.getRange(RT.hdr1, 9, 1, 3).merge().setValue('時給');        // I〜K
+  setC(RT.hdr2, 6, '旧クラスター');
+  setC(RT.hdr2, 8, '新クラスター');
+  setC(RT.hdr2, 9, '旧時給');
+  setC(RT.hdr2, 11, '新時給');
+  sh.getRange(RT.hdr1, 1, 2, COLS)
+    .setFontSize(8).setFontWeight('bold').setBackground(HDR_BG)
+    .setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, true, true, GRAY, SOLID);
+  sh.getRange(RT.hdr2, 6).setFontSize(5);   // 旧クラスター
+  sh.getRange(RT.hdr2, 8).setFontSize(5);   // 新クラスター
+
+  // ===== データ（34行。在籍者ぶんを埋め、残りは空欄。矢印は常時表示）=====
+  for (let i = 0; i < DATA_N; i++) {
+    const row = DATA_TOP + i;
+    const rw  = rows[i];
+    setC(row, 1, i + 1);     // No.
+    setC(row, 7, '→');      // クラスター矢印
+    setC(row, 10, '→');     // 時給矢印
+    if (rw) {
+      const diff = rw.newW - rw.oldW;
+      setC(row, 2, rw.name);
+      setC(row, 3, rw.gender);
+      setC(row, 4, rw.age);
+      setC(row, 5, rw.tenure);
+      setC(row, 6, rw.oldCls);
+      setC(row, 8, rw.newCls);
+      setC(row, 9, `¥${rw.oldW.toLocaleString()}`);
+      setC(row, 11, `¥${rw.newW.toLocaleString()}`);
+      setC(row, 12, diff > 0 ? `+${diff}円` : diff < 0 ? `${diff}円` : '');
+    }
+  }
+  // データ範囲の書式・罫線・寄せ
+  const dataRange = sh.getRange(DATA_TOP, 1, DATA_N, COLS);
+  dataRange.setFontSize(9).setVerticalAlignment('middle')
+    .setBorder(true, true, true, true, true, true, GRAY, SOLID);
+  sh.getRange(DATA_TOP, 1, DATA_N, 1).setHorizontalAlignment('center');    // No.
+  sh.getRange(DATA_TOP, 2, DATA_N, 1).setHorizontalAlignment('left');      // 氏名
+  sh.getRange(DATA_TOP, 3, DATA_N, 6).setHorizontalAlignment('center');    // 性別〜新クラスター
+  sh.getRange(DATA_TOP, 5, DATA_N, 1).setHorizontalAlignment('right');     // 経験年数 右寄せ
+  sh.getRange(DATA_TOP, 6, DATA_N, 1).setFontSize(6);                      // 旧クラスター
+  sh.getRange(DATA_TOP, 8, DATA_N, 1).setFontSize(6);                      // 新クラスター
+  sh.getRange(DATA_TOP, 9, DATA_N, 1).setHorizontalAlignment('right');     // 旧時給
+  sh.getRange(DATA_TOP, 10, DATA_N, 1).setHorizontalAlignment('center');   // 矢印
+  sh.getRange(DATA_TOP, 11, DATA_N, 1).setHorizontalAlignment('right');    // 新時給
+  sh.getRange(DATA_TOP, 12, DATA_N, 1).setHorizontalAlignment('right');    // 昇給額
+
+  // ===== 役職表（押印欄）は「挿入→図形描画→テキスト」で手動作成（図形はコードで作れないため）=====
+  //  ※図形はフローティングでセル内容と独立。データ更新（clearContents/clearFormats）では消えない。
 
   ss.setActiveSheet(sh);
   const changedCount = rows.filter(r => r.newW !== r.oldW || String(r.newCls) !== String(r.oldCls)).length;
   return `在籍スタッフ ${rows.length}名を出力しました（うち変更あり ${changedCount}名）。\n承認後に「名簿に時給を反映」を実行してください。`;
+}
+
+// ------------------------------------------------------------
+//  変更日（「○月○日 より変更」の日）を取得。既定21日（3/21・9/21）。★CHANGEDAY★
+// ------------------------------------------------------------
+function getChangeDay_() {
+  const v = PropertiesService.getDocumentProperties().getProperty('SUMMARY_CHANGE_DAY');
+  const n = parseInt(v, 10);
+  return (n >= 1 && n <= 31) ? n : 21;
+}
+
+// ------------------------------------------------------------
+//  変更日を変更（メニュー）。1〜31を入力。保存後の更新で反映される。
+// ------------------------------------------------------------
+function setSummaryChangeDay() {
+  const ui = SpreadsheetApp.getUi();
+  const res = ui.prompt(
+    '📅 変更日を変更',
+    '「○月○日 より変更」の日を入力してください（1〜31）。\n例：21（→ 3月21日・9月21日）\n今の設定：' + getChangeDay_() + '日',
+    ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  const n = parseInt(String(res.getResponseText()).trim(), 10);
+  if (!(n >= 1 && n <= 31)) { ui.alert('1〜31の数字を入力してください。'); return; }
+  PropertiesService.getDocumentProperties().setProperty('SUMMARY_CHANGE_DAY', String(n));
+  ui.alert('変更日を ' + n + '日 にしました。\n「📊 時給変更届を更新」を押すと日付に反映されます。');
 }
 
 // ------------------------------------------------------------
@@ -1145,7 +1226,11 @@ function getStoreInfo_() {
 //  店舗情報を変更（事業部名・店舗名・店長名。変えたい欄だけ直せる）
 // ------------------------------------------------------------
 function setStoreInfo() {
-  const cur = getStoreInfo_();
+  // 初期値は「保存済みの値だけ」。未保存なら空欄にして、必ずその店の情報を入力させる
+  //  （飯塚の初期値を出さないことで、書き換え忘れによる誤保存を防ぐ）★STOREINFO_BLANK★
+  let cur = { division: '', name: '', manager: '' };
+  const raw = PropertiesService.getDocumentProperties().getProperty('STORE_INFO');
+  if (raw) { try { const o = JSON.parse(raw); cur = { division: o.division || '', name: o.name || '', manager: o.manager || '' }; } catch (e) {} }
   const fields = [
     ['division', '事業部名', cur.division],
     ['name',     '店舗名',   cur.name],
@@ -1229,19 +1314,16 @@ function applyStoreInfoToSummary_(ss) {
   const sh = ss.getSheetByName(SUMMARY_SHEET);
   if (!sh) return false;
   const info = getStoreInfo_();
-  const map  = { '事業部名': info.division, '店舗名': info.name, '店長名': info.manager };
-  const last = sh.getLastRow();
-  if (last < 1) return false;
-  const colA = sh.getRange(1, 1, last, 1).getValues();  // A列（結合セルの見出しはここに入る）
-  let updated = 0;
-  for (let r = 1; r <= last; r++) {
-    const lab = String(colA[r - 1][0]).trim();
-    if (Object.prototype.hasOwnProperty.call(map, lab)) {
-      sh.getRange(r, 5).setValue(map[lab]);  // 名称セル（E〜M列の結合＝先頭はE列）
-      updated++;
-    }
+  // 固定位置に確実に書き込む（行3/4/5・J列＝10列目＝値セル）★STOREINFO_FIXED★
+  try {
+    sh.getRange(SUMMARY_ROWS.info1, 10).setValue(info.division || '');  // 事業部名
+    sh.getRange(SUMMARY_ROWS.info2, 10).setValue(info.name     || '');  // 店舗名
+    sh.getRange(SUMMARY_ROWS.info3, 10).setValue(info.manager  || '');  // 店長名
+    return true;
+  } catch (e) {
+    console.log('店舗情報のシート反映エラー: ' + e.message);
+    return false;
   }
-  return updated > 0;
 }
 
 // ------------------------------------------------------------
@@ -2294,8 +2376,9 @@ function clearForTransfer() {
     const sumSh = ss.getSheetByName(SUMMARY_SHEET);
     if (sumSh) {
       const lastR = sumSh.getLastRow();
-      const lastC = Math.max(sumSh.getLastColumn(), 24);
-      if (lastR >= 4) sumSh.getRange(4, 1, lastR - 3, lastC).clearContent();
+      const lastC = Math.max(sumSh.getLastColumn(), SUMMARY_GRID_COLS);
+      const dtop = SUMMARY_ROWS.dataTop;
+      if (lastR >= dtop) sumSh.getRange(dtop, 1, lastR - dtop + 1, lastC).clearContent();
     }
   }
 
@@ -2334,6 +2417,17 @@ function doGet(e) {
     if (!sheet) {
       const names = ss.getSheets().map(s => s.getName());
       return jsonResponse_({ error: `シート "${sheetName}" が見つかりません`, availableSheets: names });
+    }
+
+    // 列幅・行高を返すモード（手動調整の読み取り用）★DIMS★
+    if (mode === 'dims') {
+      const nc = sheet.getMaxColumns();
+      const nr = Math.min(sheet.getMaxRows(), startRow + rows - 1);
+      const colW = [];
+      for (let c = 1; c <= Math.min(nc, 20); c++) colW.push(sheet.getColumnWidth(c));
+      const rowH = [];
+      for (let r = startRow; r <= nr; r++) rowH.push(sheet.getRowHeight(r));
+      return jsonResponse_({ sheetName, colWidths: colW, rowHeights: rowH, rowStart: startRow });
     }
 
     const lastCol = sheet.getLastColumn();
