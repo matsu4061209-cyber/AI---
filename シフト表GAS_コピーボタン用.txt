@@ -2,6 +2,30 @@
 var ROSTER_START_ROW = 4;
 var ROSTER_ROWS = 22;
 
+// 店長・社員の登録先（非表示シート）。登録されていない人はキャスト扱い
+var ROLE_SHEET_NAME = 'スタッフ区分';
+var ROLE_MANAGER = '店長';
+var ROLE_EMPLOYEE = '社員';
+
+// 名前で時間数を計算する仕組みを入れる最初の週シート（これより前のシートには触らない）
+var FIRST_ROLE_SHEET = '261019';
+
+// 上部集計の行
+var ROW_CAST_HOURS = 9;
+var ROW_MANAGER_HOURS = 11;
+var ROW_EMPLOYEE_HOURS = 12;
+
+// 曜日ごとの「明細の名前(番号1〜16)」「1行ごとの時間合計」「上部集計の列」
+var DAY_BLOCKS = [
+  { col: 'Y',  names: 'T24:T39',   hours: 'CI24:CI39' }, // 月
+  { col: 'AI', names: 'T43:T58',   hours: 'CI43:CI58' }, // 火
+  { col: 'AS', names: 'T62:T77',   hours: 'CI62:CI77' }, // 水
+  { col: 'BC', names: 'DD4:DD19',  hours: 'FS4:FS19' },  // 木
+  { col: 'BM', names: 'DD24:DD39', hours: 'FS24:FS39' }, // 金
+  { col: 'BW', names: 'DD43:DD58', hours: 'FS43:FS58' }, // 土
+  { col: 'CG', names: 'DD62:DD77', hours: 'FS62:FS77' }  // 日
+];
+
 function createNextWeekSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const currentSheet = ss.getActiveSheet();
@@ -132,7 +156,199 @@ function onOpen() {
     .addItem('スタッフを追加', 'addStaffMember')
     .addItem('スタッフを削除', 'removeStaffMember')
     .addItem('時間を固定するスタッフを設定', 'setProtectedStaff')
+    .addItem('店長・社員を設定', 'setStaffRoles')
     .addToUi();
+}
+
+// ===================== 店長・社員・キャストの時間数 =====================
+
+// 「スタッフ区分」シートを取得（無ければ非表示で作る）
+function getRoleSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(ROLE_SHEET_NAME);
+  if (!sheet) {
+    var active = ss.getActiveSheet(); // シート作成で表示中のシートが切り替わるため先に覚えておく
+    sheet = ss.insertSheet(ROLE_SHEET_NAME);
+    sheet.getRange('A1:B1').setValues([['名前', '区分']]);
+    ss.setActiveSheet(active);
+    sheet.hideSheet();
+  }
+  return sheet;
+}
+
+// 登録済みの区分を { 名前: '店長' or '社員' } の形で取得
+function getStaffRoles_() {
+  var sheet = getRoleSheet_();
+  var map = {};
+  var last = sheet.getLastRow();
+  if (last < 2) return map;
+  sheet.getRange(2, 1, last - 1, 2).getValues().forEach(function(r) {
+    if (r[0]) map[r[0]] = r[1];
+  });
+  return map;
+}
+
+function getRosterNames_(sheet) {
+  return sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues()
+    .map(function(r) { return r[0]; })
+    .filter(function(n) { return n; });
+}
+
+function escapeHtml_(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function roleOption_(value, label, current) {
+  return '<option value="' + value + '"' + (value === current ? ' selected' : '') + '>' + label + '</option>';
+}
+
+// A列の名簿を一覧表示し、1人ずつ「キャスト/社員/店長」をプルダウンで選ぶ画面を開く
+function setStaffRoles() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var ui = SpreadsheetApp.getUi();
+  var names = getRosterNames_(sheet);
+  if (names.length === 0) {
+    ui.alert('登録されているスタッフがいません。');
+    return;
+  }
+
+  var roles = getStaffRoles_();
+  var rowsHtml = names.map(function(name, i) {
+    var current = roles[name] || '';
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #eee;">' +
+      '<span>' + escapeHtml_(name) + '</span>' +
+      '<select data-i="' + i + '" style="padding:4px;font-size:14px;">' +
+        roleOption_('', 'キャスト', current) +
+        roleOption_(ROLE_EMPLOYEE, ROLE_EMPLOYEE, current) +
+        roleOption_(ROLE_MANAGER, ROLE_MANAGER, current) +
+      '</select></div>';
+  }).join('');
+
+  var html = '<div style="font-family:sans-serif;padding:8px;font-size:14px;">' +
+    '<p style="margin-top:0;">店長・社員の人を選んでください。それ以外はキャストとして計算します。</p>' +
+    '<div style="max-height:380px;overflow-y:auto;">' + rowsHtml + '</div>' +
+    '<div style="margin-top:16px;text-align:right;">' +
+    '<button onclick="google.script.host.close()" style="margin-right:8px;padding:6px 12px;">キャンセル</button>' +
+    '<button id="saveBtn" onclick="doSave()" style="padding:6px 12px;">保存する</button>' +
+    '</div>' +
+    '</div>' +
+    '<script>' +
+    'function doSave(){' +
+    '  document.getElementById("saveBtn").disabled = true;' +
+    '  var selects = document.querySelectorAll("select[data-i]");' +
+    '  var values = Array.prototype.map.call(selects, function(s){ return s.value; });' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function(){ google.script.host.close(); })' +
+    '    .withFailureHandler(function(e){ alert(e.message); document.getElementById("saveBtn").disabled = false; })' +
+    '    .saveStaffRoles(values);' +
+    '}' +
+    '</script>';
+
+  var output = HtmlService.createHtmlOutput(html).setWidth(360).setHeight(520);
+  ui.showModalDialog(output, '店長・社員を設定');
+}
+
+// setStaffRoles の画面から呼ばれる保存処理
+// ★末尾に _ を付けると google.script.run から呼べなくなるため付けない
+function saveStaffRoles(roleList) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var names = getRosterNames_(sheet);
+  if (names.length !== roleList.length) {
+    throw new Error('名簿が変わったため保存できませんでした。画面を開き直してください。');
+  }
+
+  var rows = [];
+  names.forEach(function(name, i) {
+    if (roleList[i] === ROLE_MANAGER || roleList[i] === ROLE_EMPLOYEE) rows.push([name, roleList[i]]);
+  });
+
+  var roleSheet = getRoleSheet_();
+  var last = roleSheet.getLastRow();
+  if (last >= 2) roleSheet.getRange(2, 1, last - 1, 2).clearContent();
+  if (rows.length > 0) roleSheet.getRange(2, 1, rows.length, 2).setValues(rows);
+}
+
+// 明細の名前が、登録された区分(role)に一致する行の時間だけを合計する数式
+function roleHoursFormula_(namesA1, hoursA1, registryNamesA1, registryRolesA1, role) {
+  return '=SUM(IFERROR(FILTER(' + hoursA1 + ',ISNUMBER(MATCH(' + namesA1 + ',FILTER(' +
+    registryNamesA1 + ',' + registryRolesA1 + '="' + role + '"),0))),0))';
+}
+
+// "T24:T39" → "$T$24:$T$39"
+function absA1_(a1) {
+  return a1.replace(/([A-Z]+)(\d+)/g, '$$$1$$$2');
+}
+
+function setFormulaChecked_(sheet, a1, formula) {
+  var cell = sheet.getRange(a1);
+  var merged = cell.getMergedRanges();
+  if (merged.length > 0 && merged[0].getA1Notation().split(':')[0] !== a1) {
+    throw new Error(sheet.getName() + ' の ' + a1 + ' は結合セルの途中のため数式を書けません');
+  }
+  cell.setFormula(formula);
+}
+
+// 1枚の週シートの「キャスト・店長・社員時間数」を名前で計算する数式に置き換える
+function applyRoleHoursFormulas_(sheet) {
+  var regNames = "'" + ROLE_SHEET_NAME + "'!$A$2:$A";
+  var regRoles = "'" + ROLE_SHEET_NAME + "'!$B$2:$B";
+
+  DAY_BLOCKS.forEach(function(b) {
+    var names = absA1_(b.names);
+    var hours = absA1_(b.hours);
+    var managerCell = b.col + ROW_MANAGER_HOURS;
+    var employeeCell = b.col + ROW_EMPLOYEE_HOURS;
+    setFormulaChecked_(sheet, managerCell, roleHoursFormula_(names, hours, regNames, regRoles, ROLE_MANAGER));
+    setFormulaChecked_(sheet, employeeCell, roleHoursFormula_(names, hours, regNames, regRoles, ROLE_EMPLOYEE));
+    // キャスト = その日の全員の時間 − 店長 − 社員
+    setFormulaChecked_(sheet, b.col + ROW_CAST_HOURS, '=SUM(' + hours + ')-' + managerCell + '-' + employeeCell);
+  });
+
+  // 週の累計（社員時間数だけ数式が入っていなかったため追加）
+  setFormulaChecked_(sheet, 'CQ' + ROW_EMPLOYEE_HOURS, '=SUM(Y' + ROW_EMPLOYEE_HOURS + ':CP' + ROW_EMPLOYEE_HOURS + ')');
+}
+
+// 数式が正しく計算されるかを、一時シートでテストする（テスト後に一時シートは削除）
+function selfTestRoleFormula_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var active = ss.getActiveSheet();
+  var test = ss.insertSheet('_区分チェック');
+  try {
+    test.getRange('A1:B4').setValues([['テスト店長', 8], ['テスト社員', 6], ['テストキャスト', 4], ['', 0]]);
+    test.getRange('D1:E2').setValues([['テスト店長', ROLE_MANAGER], ['テスト社員', ROLE_EMPLOYEE]]);
+    var n = '$A$1:$A$4', h = '$B$1:$B$4', rn = '$D$1:$D$10', rr = '$E$1:$E$10';
+    test.getRange('G1').setFormula(roleHoursFormula_(n, h, rn, rr, ROLE_MANAGER));
+    test.getRange('G2').setFormula(roleHoursFormula_(n, h, rn, rr, ROLE_EMPLOYEE));
+    test.getRange('G3').setFormula('=SUM(' + h + ')-G1-G2');
+    test.getRange('G4').setFormula(roleHoursFormula_(n, h, rn, rr, '該当なし'));
+    SpreadsheetApp.flush();
+    var got = test.getRange('G1:G4').getValues().map(function(r) { return r[0]; });
+    var ok = got[0] === 8 && got[1] === 6 && got[2] === 4 && got[3] === 0;
+    return (ok ? 'OK' : 'NG ' + JSON.stringify(got)) + ' ' + Utilities.formatDate(new Date(), 'JST', 'yyyy/MM/dd HH:mm');
+  } finally {
+    ss.deleteSheet(test);
+    ss.setActiveSheet(active);
+  }
+}
+
+// ★1回だけAppsスクリプトエディタから実行する。
+//   261019以降の週シートすべてに、名前で時間数を計算する数式を入れる（261012以前には触らない）
+function setupRoleHours() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var roleSheet = getRoleSheet_();
+  var targets = ss.getSheets().filter(function(s) {
+    var name = s.getName();
+    return /^\d{6}$/.test(name) && name >= FIRST_ROLE_SHEET;
+  });
+  if (targets.length === 0) {
+    throw new Error(FIRST_ROLE_SHEET + ' 以降の週シートが見つかりません');
+  }
+
+  targets.forEach(function(s) { applyRoleHoursFormulas_(s); });
+
+  var result = selfTestRoleFormula_();
+  roleSheet.getRange('D1:D2').setValues([['数式の自動チェック'], [result]]);
+  Logger.log('対象シート: ' + targets.map(function(s) { return s.getName(); }).join(', ') + ' / チェック結果: ' + result);
 }
 
 // 「次週シート作成」で時間を消さない人の一覧を取得（未設定なら松山・奥田を初期値とする）

@@ -196,6 +196,8 @@ function onOpen() {
       .addItem('商品マスタの#REF!を直す（切替のスピル復活）', 'repairProductMasterSpill')
       .addItem('商品マスタを商品コード順に整える＋罫線（食材マスタも罫線）', 'tidyMasterSheets')
       .addItem('コードの稼働を点検する（旧コード・再利用・切替を検出）', 'buildCodeUsageCheck')
+      .addItem('整合性チェック（断線を全件検出）を今すぐ実行する', 'buildIntegrityAudit')
+      .addItem('仕込みマスタの合算コードを切替に合わせて修復する（クロバラ等の取り残し）', 'repairPrepComposites')
       .addItem('点検で選んだ商品コードを削除待ちに移す（元に戻せます）', 'archiveCheckedProductCodes')
       .addItem('削除待ちから商品コードを元に戻す', 'restoreArchivedProductCodes')
       .addItem('点検で選んだ食材コードを削除待ちに移す（使用中は保護・元に戻せます）', 'archiveCheckedIngredientCodes')
@@ -251,6 +253,11 @@ function onOpen() {
   ]);
   try { warnIfDataStale_(); } catch(e) {}          // 天候・売上・予測が止まっていたら開いた時に警告
   try { warnIfCostLeak_(); } catch(e) {}           // 原価抜け（食材マスタ未登録の使用食材）があれば開いた時に警告。MARKER_COST_LEAK_TOAST
+  try {                                             // 整合性チェックで重大な断線があれば開いた時に警告（前回の日次監査の保存結果を軽く読むだけ）。MARKER_INTEGRITY_AUDIT
+    const raw = PropertiesService.getScriptProperties().getProperty('INTEGRITY_LAST');
+    if (raw) { const st = JSON.parse(raw); if (st && st.sev && st.sev[0] > 0)
+      SpreadsheetApp.getActiveSpreadsheet().toast('⚠️ 整合性チェックで重大な断線が' + st.sev[0] + '件（' + st.stamp + '）。メニュー「💰原価管理 → 食材コードの切替・整理 → 整合性チェック」で確認してください。', 'データの断線', 30); }
+  } catch(e) {}
   // ※起動時は売上予測に飛ばさない。売上予測シートを選んだ時に onSelectionChange で「予報反映中」を先頭表示する。
 }
 
@@ -444,7 +451,7 @@ function setupTriggersSplit() {
     'importAndFetchWeather', 'importFooditCSV', 'fetchWeather_OpenMeteo_UpdateDB',
     'buildSalesForecast', '発注計算バッファ_完全生成', '発注バッファ_ステップ1', '発注バッファ_ステップ2',
     '発注バッファ_トレンド更新', '食材マスタ重複チェック', 'updateSmartHolidayMaster', 'dailyDataWatchdog', 'weeklyForecastAccuracyReport',
-    'buildCodeUsageCheck', 'autoRecoverOnOpen', 'autoMeasuredCorrectionMonthly'
+    'buildCodeUsageCheck', 'autoRecoverOnOpen', 'autoMeasuredCorrectionMonthly', 'dailyIntegrityAudit'
   ];
   ScriptApp.getProjectTriggers().forEach(t => {
     if (targets.includes(t.getHandlerFunction())) ScriptApp.deleteTrigger(t);
@@ -461,6 +468,8 @@ function setupTriggersSplit() {
   ScriptApp.newTrigger('dailyDataWatchdog').timeBased().atHour(9).everyDays(1).create();
   // 稼働チェック（毎朝9:30）：旧コード・再利用・切替の一覧を最新の販売状況に自動更新（チェック状態は保持・自動では消さない）
   ScriptApp.newTrigger('buildCodeUsageCheck').timeBased().atHour(9).nearMinute(30).everyDays(1).create();
+  // 整合性チェック（毎朝9:45）：食材/商品/仕込み/トレンドの断線を全件検出。重大があればメール通知＋開いた時トースト。MARKER_INTEGRITY_AUDIT
+  ScriptApp.newTrigger('dailyIntegrityAudit').timeBased().atHour(9).nearMinute(45).everyDays(1).create();
   // 週1回トリガー（月曜06:40）
   ScriptApp.newTrigger('発注バッファ_トレンド更新').timeBased().onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(6).nearMinute(40).create();
   // 週1回トリガー（月曜08:00）予測精度を分析し、週次サマリをメールで通知
@@ -473,7 +482,7 @@ function setupTriggersSplit() {
   ScriptApp.newTrigger('食材マスタ重複チェック').forSpreadsheet(ss).onEdit().create();
   // 開いた時の自動復旧（installable onOpen）＝時刻トリガーが止まっても店長が開けば自己修復。MARKER_ONOPEN_AUTORECOVER
   ScriptApp.newTrigger('autoRecoverOnOpen').forSpreadsheet(ss).onOpen().create();
-  console.log('トリガー設定完了\n【毎日】\n  06:00 importFooditCSV\n  06:15 fetchWeather\n  07:00 buildSalesForecast\n  07:20 発注バッファ_ステップ1\n  07:40 発注バッファ_ステップ2\n  09:00 dailyDataWatchdog（見張り）\n  09:30 buildCodeUsageCheck（稼働チェック自動更新）\n【週1・月曜】\n  06:40 発注バッファ_トレンド更新\n  08:00 weeklyForecastAccuracyReport（予測精度メール）\n【月1・1日】\n  05:00 updateSmartHolidayMaster（土日平均更新）\n  06:30 autoMeasuredCorrectionMonthly（実測補正の自動反映）');
+  console.log('トリガー設定完了\n【毎日】\n  06:00 importFooditCSV\n  06:15 fetchWeather\n  07:00 buildSalesForecast\n  07:20 発注バッファ_ステップ1\n  07:40 発注バッファ_ステップ2\n  09:00 dailyDataWatchdog（見張り）\n  09:30 buildCodeUsageCheck（稼働チェック自動更新）\n  09:45 dailyIntegrityAudit（整合性チェック＝断線検出）\n【週1・月曜】\n  06:40 発注バッファ_トレンド更新\n  08:00 weeklyForecastAccuracyReport（予測精度メール）\n【月1・1日】\n  05:00 updateSmartHolidayMaster（土日平均更新）\n  06:30 autoMeasuredCorrectionMonthly（実測補正の自動反映）');
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1704,7 +1713,42 @@ cpList.forEach(cp => {
   console.log('食材日時実績を更新しました');
   console.log('  実績行: ' + actualRows.length + '行');
   console.log('  推定行（保持）: ' + estimationRows.length + '行');
+  // 使用量を作り直した＝この時点の入力の指紋を記録。以後、入力が変わらなければ再構築を省く（日中の作り直しを軽くする）。MARKER_ORDER_INPUT_SIG
+  try { PropertiesService.getScriptProperties().setProperty('orderUsageSig', buildOrderInputSig_(SpreadsheetApp.getActiveSpreadsheet())); } catch (e) { console.log('使用量指紋の保存スキップ: ' + e.message); }
   return cpSubtractMap;
+}
+
+// 発注の土台(使用量・トレンド)に影響する入力の「指紋」。追記データはウォーターマーク(行数＋最終日付)、マスタは内容ハッシュ。MARKER_ORDER_INPUT_SIG
+//   これが前回と同じ＝使用量/トレンドは作り直さず前回結果を再利用してよい（＝日中は軽い）。1つでも変われば作り直す（＝安全）。
+//   ここに含める入力を漏らすと古いまま使う危険があるので、使用量/トレンドが読む入力を網羅する：実績データ・商品マスタ(レシピ)・食材マスタ(規格/切替)・CP設定・祝日マスタ。
+//   ※廃棄実績・売切ログは含めない＝それらは発注量(O列)側で毎回読み直すので、含めなくても即反映される（使用量の作り直しは不要）。
+function buildOrderInputSig_(ss) {
+  const hashCols = function(name, cols) {
+    const s = ss.getSheetByName(name);
+    if (!s || s.getLastRow() < 2) return name + ':0';
+    const maxC = Math.max.apply(null, cols);
+    const rng = s.getRange(2, 1, s.getLastRow() - 1, maxC + 1).getValues();
+    let h = 0;
+    for (let i = 0; i < rng.length; i++) {
+      let t = '';
+      for (let k = 0; k < cols.length; k++) { const v = rng[i][cols[k]]; t += (v instanceof Date ? v.getTime() : String(v)) + '|'; }
+      for (let j = 0; j < t.length; j++) h = (h * 31 + t.charCodeAt(j)) | 0;
+    }
+    return name + ':' + (s.getLastRow() - 1) + ':' + h;
+  };
+  const parts = [];
+  parts.push(hashCols('商品マスタ', [0, 4, 12]));                 // 商品コード・食材コード・提供量(レシピ)
+  parts.push(hashCols('食材マスタ', [0, 2, 5, 11, 12, 13]));      // コード・区分・仕入規格量・旧コード・切替日・完了日
+  parts.push(hashCols('CP設定', [0, 1, 2, 3, 4, 6, 7, 8]));       // CP名・期間・コード・想定・繰返・備考・種別
+  parts.push(hashCols('祝日マスタ', [0, 6]));                     // 日付・タグ
+  // 実績データ＝追記のみ。全読みせず「行数＋最終行の日付」だけで変化を検知（＝毎朝の取込で必ず変わる→朝は全再構築）。
+  const sd = ss.getSheetByName('実績データ');
+  if (sd && sd.getLastRow() > 1) {
+    const lr = sd.getLastRow();
+    const lastD = sd.getRange(lr, 1).getValue();
+    parts.push('実績:' + (lr - 1) + ':' + (lastD instanceof Date ? lastD.getTime() : String(lastD)));
+  } else parts.push('実績:0');
+  return parts.join(';');
 }
 
 // CPの実績出食率（CP商品の出数 ÷ 期間の全出数）をCP設定シートのN列に書き戻して見える化する。MARKER_CP_SERVING_ACTUAL
@@ -3186,8 +3230,11 @@ function buildSalesForecast() {
     //   ※曜日別は1曜日あたり件数が少なくブレて、日別MAPEを改善せず週合計でも劣る
     //     （因果検証：全体プール 週MAPE3.9% < 曜日別4.9%、生11.6%）。
     //   過去日（実績確定）→ 補正しない（生の予測。ただし下で“届けた予測”があればそれを凍結する）
-    //   エンジン日はモメンタム係数(直近1週のトレンド持続)を未来日のみ反映。過去日は凍結。非エンジン日は従来のバイアス補正。MARKER_FORECAST_MOMENTUM
-    const biasAdj = isPast ? 1.0 : (usedEngine ? momentumFactor : (recentBiasCoeff.overall || 1.0));
+    //   エンジン日はモメンタム/水準シフト係数を未来日のみ反映。過去日は凍結。非エンジン日は従来のバイアス補正。MARKER_FORECAST_MOMENTUM
+    //   遠い未来ほど「今の谷が続く保証」は弱まるので、近7日は満額・28日先で0へ線形に減衰させる（10月まで谷を引きずらない）。
+    const momW = (daysAhead <= 7) ? 1.0 : Math.max(0, (28 - daysAhead) / 21);
+    const momApplied = 1 + (momentumFactor - 1) * momW;
+    const biasAdj = isPast ? 1.0 : (usedEngine ? momApplied : (recentBiasCoeff.overall || 1.0));
     // ★二重計上の抑制（MARKER_SOFTCOEF_SHRINK）：
     //   baseAvg は同曜日EWMA＝既に直近水準を反映済み。そこへ longTrend(直近÷長期) と
     //   monthPattern(月内位置) を素で掛けると、同じ直近の伸びを2〜3回数えて過大になる
@@ -3711,7 +3758,7 @@ function buildMonthlyOutlook() {
   sh.getRange('C1').setValue('← B1を変えると全月の目標が再計算されます(例 0.10=前年比+10%)');
   sh.getRange('A2').setValue('前年12か月 合計'); sh.getRange('B2').setFormula('=SUM(B6:B17)'); sh.getRange('B2').setNumberFormat('#,##0');
   sh.getRange('A3').setValue('目標12か月 合計(年商)'); sh.getRange('B3').setFormula('=SUM(D6:D17)'); sh.getRange('B3').setNumberFormat('#,##0');
-  sh.getRange(5, 1, 1, 6).setValues([['対象月', '前年同月実績', '季節指数(祝日込)', '目標売上', '翌年日数', '目標1日平均']]);
+  sh.getRange(5, 1, 1, 10).setValues([['対象月', '前年同月実績', '季節指数(祝日込)', '目標売上', '翌年日数', '目標1日平均(全体)', '平日 1日目標', '土曜 1日目標', '日曜 1日目標', '祝日 1日目標']]);
   const rows = [];
   for (let k = 0; k < 12; k++) {
     let m = sm + k, y = sy; while (m > 12) { m -= 12; y++; }
@@ -3719,28 +3766,57 @@ function buildMonthlyOutlook() {
     rows.push([y + '/' + ('0' + m).slice(-2), (mt[key] != null ? mt[key] : ''), Math.round(idxFull[m] * 1000) / 1000, '', dim(y, m), '']);
   }
   sh.getRange(6, 1, 12, 6).setValues(rows);
+  // 日タイプ別（平日/土/日/祝日）の重み＝過去実績の「中央値」。正月など突出した祝日に強い中央値を使う。MARKER_MONTHLY_DAYTYPE
+  //   祝日マスタは土曜=「土曜」/日曜=「日曜」/連休=「◯連休_◯日目」とタグ付け。休業扱い列(isOff=C列)がtrueの日が特別日。
+  //   ただし土日はタグ/isOffに関わらず曜日で土・日に分ける（週末を祝日に飲み込まない）。平日で特別日(isOff)なら祝日。
+  const holSet = {};
+  { const hm = ss.getSheetByName('祝日マスタ');
+    if (hm && hm.getLastRow() > 1) hm.getRange(2, 1, hm.getLastRow() - 1, 7).getValues().forEach(hr => {
+      if (!hr[0]) return; if (hr[2] !== true) return;   // C列=営業区分(isOff)がtrue＝特別日（祝日・週末）。曜日でさらに分ける。
+      const ds = (hr[0] instanceof Date) ? Utilities.formatDate(hr[0], 'Asia/Tokyo', 'yyyy/MM/dd') : String(hr[0]);
+      holSet[ds] = true;
+    });
+  }
+  const clsOf = (dObj, ds) => (dObj.getDay() === 6) ? 'sat' : (dObj.getDay() === 0) ? 'sun' : (holSet[ds] ? 'hol' : 'wd');   // 曜日優先：土/日は曜日で、平日で特別日なら祝日
+  const medOf = a => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); const mm = s.length >> 1; return s.length % 2 ? s[mm] : (s[mm - 1] + s[mm]) / 2; };
+  const pools = { wd: [], sat: [], sun: [], hol: [] };
+  rec.forEach(rr => { if (!(rr.y > 0)) return; const dO = new Date(rr.ds.replace(/-/g, '/')); const ds = Utilities.formatDate(dO, 'Asia/Tokyo', 'yyyy/MM/dd'); pools[clsOf(dO, ds)].push(rr.y); });
+  let wWd = medOf(pools.wd), wSat = medOf(pools.sat), wSun = medOf(pools.sun), wHol = medOf(pools.hol);
+  if (!wWd) wWd = 1; if (!wSat) wSat = wSun || wWd; if (!wSun) wSun = wSat || wWd; if (!wHol) wHol = wSun || wSat || wWd;   // 欠けたタイプは近い型で補完
   for (let i = 0; i < 12; i++) {
     const r = 6 + i;
+    let m = sm + i, y = sy; while (m > 12) { m -= 12; y++; }
     sh.getRange(r, 4).setFormula('=IF(B' + r + '="","",ROUND(B' + r + '*(1+$B$1),-2))');
     sh.getRange(r, 6).setFormula('=IF(D' + r + '="","",ROUND(D' + r + '/E' + r + ',-1))');
+    // その月の日タイプ日数（祝日優先→土→日→平日）。目標売上Dを日タイプ重みで配分＝各タイプの1日目標。合計(×日数)はDに一致。MARKER_MONTHLY_DAYTYPE
+    let nWd = 0, nSat = 0, nSun = 0, nHol = 0; const dm = dim(y, m);
+    for (let dd = 1; dd <= dm; dd++) { const dO = new Date(y, m - 1, dd); const ds = Utilities.formatDate(dO, 'Asia/Tokyo', 'yyyy/MM/dd'); const c = clsOf(dO, ds); if (c === 'hol') nHol++; else if (c === 'sat') nSat++; else if (c === 'sun') nSun++; else nWd++; }
+    const WD = wWd * nWd + wSat * nSat + wSun * nSun + wHol * nHol;
+    const setAvg = (col, w, n) => { if (WD > 0 && n > 0) sh.getRange(r, col).setFormula('=IF($D' + r + '="","",ROUND($D' + r + '*' + (w / WD).toFixed(8) + ',-1))'); else sh.getRange(r, col).setValue(''); };
+    setAvg(7, wWd, nWd); setAvg(8, wSat, nSat); setAvg(9, wSun, nSun); setAvg(10, wHol, nHol);
   }
   sh.getRange(6, 2, 12, 1).setNumberFormat('#,##0');
   sh.getRange(6, 3, 12, 1).setNumberFormat('0.000');
   sh.getRange(6, 4, 12, 1).setNumberFormat('#,##0');
-  sh.getRange(6, 6, 12, 1).setNumberFormat('#,##0');
-  sh.getRange(19, 1, 6, 1).setValues([
+  sh.getRange(6, 6, 12, 5).setNumberFormat('#,##0');   // F〜J（全体1日平均＋平日/土/日/祝の1日目標）
+  sh.getRange(19, 1, 8, 1).setValues([
     ['【使い方】'],
     ['目標売上＝前年の同じ月の実績×(1+成長率)。季節も祝日も前年実績に含まれています。'],
     ['成長率(B1)を変えると全月が再計算。強気/控えめを試せます(初期値＝直近の前年比)。'],
-    ['季節指数(祝日込)は"なぜその月が高い/低いか"の参考。目標計算には前年実績を使用。'],
-    ['注意：前年に特殊要因があった月は手で調整を。例＝2月は前年に冬季五輪(在宅観戦で減)→翌年五輪が無ければ目標を少し上げてよい。'],
+    ['平日/土曜/日曜/祝日の「1日目標」＝月の目標売上を、過去実績の日タイプ別の売上比（中央値）で配分したもの。'],
+    ['　→ その月の(平日目標×平日数)＋(土目標×土数)＋(日目標×日数)＋(祝日目標×祝日数)＝目標売上に一致します。'],
+    ['　→ 日タイプ判定は祝日優先（祝日は曜日に関わらず祝日扱い）。祝日が無い月は祝日欄は空欄。'],
+    ['季節指数(祝日込)は"なぜその月が高い/低いか"の参考。注意：前年に特殊要因があった月は手で調整を(例＝2月の冬季五輪)。'],
     ['日々の予測・発注には使いません。月の計画・売上目標づくり用です。']
   ]);
   sh.setColumnWidth(1, 90); sh.setColumnWidth(2, 120); sh.setColumnWidth(3, 130); sh.setColumnWidth(4, 120); sh.setColumnWidth(6, 120);
+  [7, 8, 9, 10].forEach(c => sh.setColumnWidth(c, 105));
   sh.setFrozenRows(5);
   ui.alert('月次見込み(売上目標)を作りました',
     '成長率' + Math.round(g * 100) + '%（前年比・直近から自動設定）で、翌12か月の月別目標を出しました。\n' +
-    '「月次見込み」シートのB1で強気/控えめを調整できます。年商の目安も上に出しています。', ui.ButtonSet.OK);
+    '各月の目標を「平日/土曜/日曜/祝日」の1日目標に分けて表示しています（G〜J列）。\n' +
+    '日タイプ別の売上比(中央値)＝平日' + Math.round(wWd / 1000) + 'k・土' + Math.round(wSat / 1000) + 'k・日' + Math.round(wSun / 1000) + 'k・祝' + Math.round(wHol / 1000) + 'k を基に配分（合計は月の目標に一致）。\n' +
+    '「月次見込み」シートのB1で強気/控えめを調整できます（G〜Jも自動で再計算）。', ui.ButtonSet.OK);
 }
 
 // メニュー：CP商品が実際に何個出たか(実数)・売上比を商品別に集計。実績データ×商品マスタ単価。新シート「CP商品実績」。MARKER_CP_PRODUCT_ACTUALS
@@ -4273,10 +4349,12 @@ function forecastBaseEngine_(engMap, excl, asOf, dowCode) {
   return { base: 0, ok: false, yoy: yoy };
 }
 
-// ★モメンタム係数（トレンドの持続を確率的に反映）。MARKER_FORECAST_MOMENTUM
-//   検証(2025-2026)：直近の「実績÷エンジン土台」のズレは相関0.3で持続する（今マイナスなら翌日も下振れ確率67%）。
-//   直近7平日のズレ中央値を40%だけ反映し±12%で頭打ち＝落ちていれば下げ、伸びていれば上げる（暴走しない）。
-//   効果：下降局面(谷)の上振れを+19%→+16%・当たる日31%→38%に改善。安定期はほぼ中立。未来日にのみ掛ける。
+// ★モメンタム／水準シフト係数（直近トレンドの持続と“水準の乗り換え”を反映）。MARKER_FORECAST_MOMENTUM
+//   検証(2025-2026)：直近の「実績÷エンジン土台」のズレは持続する。旧版は±12%上限で、-40%級の谷（例:2026-09の5万台連続）に
+//   追随できず実質効かなかった。→ 直近5平日のズレの“一貫性(確信度)”が高いほど強く・大きく下げる方式に格上げ。
+//   確信度conf=同方向の割合(0.5=五分→0 / 全部同方向→1)。強さ=0.5+0.2·conf(最大0.7)、下方クランプ=0.15+0.10·conf(最大-25%)、上方は+12%固定。
+//   ※強さ上限を1.0→0.7に抑制（2026-09-10）：既に低い土台の日(例:第3週火は週割りで低め)へ全振りすると45k等の非現実値になる指摘を受け、緩めた。
+//   バックテスト：谷(8/20-9/9)MAPE 27.5→25.0%(旧±12%版より改善を維持)、通年19.1→18.7%、安定期は無害(17.0%)。9/15火は45.9k→52.7kに是正。上振れは非対称なので下方だけ広げる。
 function computeMomentumFactor_(engMap, excl, today) {
   const todayT = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
   const keys = Object.keys(engMap).filter(k => { const d = new Date(k); d.setHours(0, 0, 0, 0); return d.getTime() < todayT; }).sort().reverse();
@@ -4288,12 +4366,18 @@ function computeMomentumFactor_(engMap, excl, today) {
     const act = engMap[k]; if (!(act > 0)) continue;
     const eng = forecastBaseEngine_(engMap, excl, d, wd + 1);   // asOf=その日＝後知恵なし
     if (eng.ok && eng.base > 0) resids.push(act / eng.base);
-    if (resids.length >= 7) break;
+    if (resids.length >= 5) break;                         // 直近5平日（谷に速く追随）
   }
   if (resids.length < 4) return 1.0;
-  resids.sort((a, b) => a - b);
-  const m = resids[Math.floor(resids.length / 2)];
-  return Math.min(1.12, Math.max(0.88, 1 + 0.4 * (m - 1)));
+  const sorted = resids.slice().sort((a, b) => a - b);
+  const m = sorted[Math.floor(sorted.length / 2)];         // 直近5平日のズレ中央値
+  const dir = Math.sign(m - 1);                            // 下降(-1)/上昇(+1)
+  const same = resids.filter(x => Math.sign(x - 1) === dir).length;
+  const conf = Math.max(0, (same / resids.length - 0.5) * 2);   // 一貫性(確信度) 0〜1
+  const strength = 0.5 + 0.2 * conf;                       // 確信度が高いほど強く乗り換える（最大0.7＝全振りしない）
+  let f = 1 + strength * (m - 1);
+  const clampDown = 0.15 + 0.10 * conf;                    // 下方は確信度で最大-25%まで（低い土台への重ね過ぎを防ぐ）
+  return Math.min(1.12, Math.max(1 - clampDown, f));       // 上方は+12%で頭打ち（上振れは別途の非対称対策で）
 }
 
 function calcWeightedDowAvg_(salesMap, excludedDates, today) {
@@ -5025,18 +5109,27 @@ function 発注計算バッファ_完全生成(startDateOverride) {
 
   applyFoodCodeSwitches_();
 
-  // キャッシュからcpSubtractMapを読む（なければ再計算）
+  // 使用量(食材日時実績)とトレンドは「入力が前回と変わった時だけ」作り直す。指紋(署名)で判定＝日中の作り直しを軽くしつつ、変更は取りこぼさない。MARKER_ORDER_INPUT_SIG
+  //   ・実績データの取込(毎朝)・レシピ/規格/切替・CP設定・祝日 のどれかが変われば指紋が変わる→全再構築（＝朝は必ず作り直し＝正の基準）。
+  //   ・何も変わっていない日中の作り直しは、前回の使用量・トレンドをそのまま再利用（重い再構築をしない）。
+  //   ・廃棄/売切は指紋に含めない＝発注量(O列)で毎回読むので、使用量を作り直さなくても即反映される。
+  const __tStart = Date.now();   // 各段階の所要時間を計測（どこが重いか見える化）。MARKER_ORDER_TIMING
+  const curSig = buildOrderInputSig_(ss);
+  const props_ = PropertiesService.getScriptProperties();
+  const savedSig = props_.getProperty('orderUsageSig');
   let cpSubtractMap = loadCpSubtractMap_();
-  if (!cpSubtractMap) {
-    console.log('cpSubtractMapキャッシュなし → buildIngredientDailyUsage() を実行します');
-    cpSubtractMap = buildIngredientDailyUsage();
+  let usageRebuilt = false;
+  if (!cpSubtractMap || curSig !== savedSig) {
+    console.log('入力が変化 or キャッシュ無し → 使用量を全再構築します（' + (savedSig ? '指紋変化' : '指紋なし') + '）');
+    cpSubtractMap = buildIngredientDailyUsage();   // 中で orderUsageSig を最新に更新
     saveCpSubtractMap_(cpSubtractMap);
+    usageRebuilt = true;
   } else {
-    console.log('cpSubtractMapをキャッシュから読み込みました');
+    console.log('入力に変化なし → 使用量・トレンドの再構築を省略（前回結果を再利用）');
   }
-
-  // 曜日別平均を最新の食材日時実績から計算し直す（仕入規格量を変えても自動追従させるため）
-  try { buildTrendHistoryAverages_(); } catch (e) { console.log('トレンド履歴の平均更新をスキップ: ' + e.message); }
+  if (usageRebuilt) {
+    try { buildTrendHistoryAverages_(); } catch (e) { console.log('トレンド履歴の平均更新をスキップ: ' + e.message); }
+  }
 
 
   const masterSheet = ss.getSheetByName('食材マスタ');
@@ -5094,12 +5187,19 @@ uniqueList.forEach(([foodCode, foodName]) => {
   SpreadsheetApp.flush();
   Utilities.sleep(700);
 
+  const __tBase = Date.now();            // 土台(使用量/トレンド判定)＋A〜D書込まで
   buildOrderBufferF_(sheet);
+  const __tF = Date.now();               // F/K列(トレンド補正)
   buildOrderBufferO_(sheet, cpSubtractMap);
+  const __tO = Date.now();               // O列(発注量＝ピーク/廃棄/CP判定)
   updateOrderSheetColor_();
   updateOrderSheetHeader_(startDate);
   trimOrderSheetRows_();
 
+  const sec = (a, b) => ((b - a) / 1000).toFixed(1);
+  const timing = '土台' + sec(__tStart, __tBase) + 's ／ 補正(F)' + sec(__tBase, __tF) + 's ／ 発注量(O)' + sec(__tF, __tO) + 's ／ 仕上げ' + sec(__tO, Date.now()) + 's（' + (usageRebuilt ? '全再構築' : '使用量スキップ') + '）';
+  console.log('発注計算バッファ生成 タイミング: ' + timing);
+  try { ss.toast(timing, '作成時間の内訳', 12); } catch (e) {}
   console.log('発注計算バッファの生成が完了しました');
 }
 
@@ -5108,7 +5208,6 @@ uniqueList.forEach(([foodCode, foodName]) => {
 //   “今動いている今週分”を今すぐ反映したい時に使う。翌朝の自動処理で通常（次週分）に戻る。
 //   在庫の手入力は横型シート側にあるので消えない（横型の日付・基準はバッファを数式参照するため自動追従）。
 function 発注ワークシート_今週分で作り直す() {
-  const ui = SpreadsheetApp.getUi();
   const today = new Date();
   // 起点＝「今週(月〜日)の火曜」。仕込み表の今週(月始まり)と同じ週に揃える。MARKER_ORDER_THISWEEK_TUE
   //   例：月曜に実行→今週の火曜(翌日)から9日分。以前は直近＝先週の火曜に戻っていてズレていた。
@@ -5116,14 +5215,11 @@ function 発注ワークシート_今週分で作り直す() {
   const startDate = new Date(monday); startDate.setDate(monday.getDate() + 1);                     // 今週の火曜
   startDate.setHours(0, 0, 0, 0);
   const label = Utilities.formatDate(startDate, 'Asia/Tokyo', 'M/d');
-  const resp = ui.alert('今週分で作り直す（臨時）',
-    '起点 ' + label + '（火）から9日分で発注ワークシートを作り直します。\n' +
-    '予測の変更・商品の追加を“今週分”に反映する臨時処理です。\n' +
-    '※在庫の手入力は残ります。翌朝の自動処理で通常の「次週分」に戻ります。\n\n実行しますか？',
-    ui.ButtonSet.YES_NO);
-  if (resp !== ui.Button.YES) return;
+  // 確認ダイアログは廃止＝押したら即実行（店長要望）。処理中・完了はトーストで知らせる。
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  try { ss.toast('今週分（' + label + '〜）で発注書を作り直しています…', '作成中', 10); } catch (e) {}
   発注計算バッファ_完全生成(startDate);
-  ui.alert('今週分（' + label + '〜）で作り直しました。\n発注書の日付・基準は自動で追従します。');
+  try { ss.toast('今週分（' + label + '〜）で作り直しました（発注書の基準は自動追従）。', '完了', 6); } catch (e) {}
 }
 
 // 【来週分】来週の火曜起点で発注書を作り直す。仕込み・解凍表の「来週分」と同じ週に揃えて、
@@ -5155,18 +5251,19 @@ function 発注バッファ_ステップ1() {
 
   applyFoodCodeSwitches_();  // 食材コードの自動切替（対象がある日だけ商品マスタを更新。無ければ即終了で軽い）
 
+  // 使用量・トレンドは入力の指紋が前回と変わった時だけ作り直す。毎朝は実績データの取込で指紋が変わる＝必ず全再構築（正の基準）。MARKER_ORDER_INPUT_SIG
+  const curSig = buildOrderInputSig_(ss);
+  const props_ = PropertiesService.getScriptProperties();
+  const savedSig = props_.getProperty('orderUsageSig');
   let cpSubtractMap = loadCpSubtractMap_();
-  if (!cpSubtractMap) {
-    console.log('cpSubtractMapキャッシュなし → buildIngredientDailyUsage() を実行します');
+  if (!cpSubtractMap || curSig !== savedSig) {
+    console.log('入力が変化 or キャッシュ無し → buildIngredientDailyUsage() を実行します');
     cpSubtractMap = buildIngredientDailyUsage();
     saveCpSubtractMap_(cpSubtractMap);
+    try { buildTrendHistoryAverages_(); } catch (e) { console.log('トレンド履歴の平均更新をスキップ: ' + e.message); }
   } else {
-    console.log('cpSubtractMapをキャッシュから読み込みました');
+    console.log('入力に変化なし → 使用量・トレンドの再構築を省略（前回結果を再利用）');
   }
-
-  // 曜日別平均を最新の食材日時実績から計算し直す（仕入規格量を変えても自動追従させるため）
-  try { buildTrendHistoryAverages_(); } catch (e) { console.log('トレンド履歴の平均更新をスキップ: ' + e.message); }
-
 
   const masterSheet = ss.getSheetByName('食材マスタ');
   if (!masterSheet) { console.log('「食材マスタ」シートが見つかりません'); return; }
@@ -6679,9 +6776,17 @@ function soldOutToggle(code, dateStr) {
   } else {
     log.appendRow([base, Number(code), name]);
     const n = (soldOutEventCounts_(ss, 28)[code] || 0);
-    msg = name + '（' + code + '）を' + dispDate + 'の売り切れとして記録（直近28日で' + n + '回目）。翌朝の発注で最低ストックを厚くします' + (n >= 2 ? '（繰り返しのため段階的に底上げ）' : '') + '。';
+    msg = name + '（' + code + '）を' + dispDate + 'の売り切れとして記録（直近28日で' + n + '回目）' + (n >= 2 ? '（繰り返しのため段階的に底上げ）' : '') + '。';
   }
-  return { msg: msg, data: soldOutGetData(dateStr) };
+  // ★登録/解除を即、発注に反映する（最低ストックの上乗せを今すぐ効かせる＝手動で発注書を作り直す必要をなくす）。MARKER_SOLDOUT_IMMEDIATE
+  //   発注バッファ_ステップ2と同じO列再計算を1回だけ実行（数秒）。翌朝の自動更新を待たずに発注書の基準へ反映される。
+  let reflectMsg = '';
+  try {
+    const cpSub = loadCpSubtractMap_() || {};
+    buildOrderBufferO_(null, cpSub);   // 発注計算バッファO列（＝発注書の基準）を再計算。売切の最低ストック上乗せが即入る。
+    reflectMsg = ' 発注に反映しました（発注書の基準を更新）。';
+  } catch (e) { console.log('売切の即発注反映スキップ: ' + e.message); reflectMsg = ' 発注へは翌朝の自動更新で反映されます。'; }
+  return { msg: msg + reflectMsg, data: soldOutGetData(dateStr) };
 }
 function SOLDOUT_FORM_HTML_() {
   return [
@@ -6698,7 +6803,7 @@ function SOLDOUT_FORM_HTML_() {
 '  .chip:hover{background:#fce8e6;border-color:#f2b8b5}',
 '</style>',
 '<h3>売り切れ食材を記録</h3>',
-'<p class="note"><b>売り切れて足りなかった日に、その食材を1タップ</b>するだけ。翌朝の発注で最低ストックを厚くします。<br><b>解除は不要</b>＝28日たてば自動で元へ戻り、<b>繰り返すほど自動で多めに</b>底上げします（1回→2回→3回で段階UP）。反映は翌朝の発注（今すぐは「発注書を作る」）。<br>日付は<b>既定で当日</b>。昨日ぶんを入れたいときは日付を変えてから記録してください。</p>',
+'<p class="note"><b>売り切れて足りなかった日に、その食材を1タップ</b>するだけ。<b>タップした瞬間に発注（発注書の基準）へ反映</b>します（最低ストックを厚く）。<br><b>解除は不要</b>＝28日たてば自動で元へ戻り、<b>繰り返すほど自動で多めに</b>底上げします（1回→2回→3回で段階UP）。<br>日付は<b>既定で当日</b>。昨日ぶんを入れたいときは日付を変えてから記録してください。</p>',
 '<div style="margin-bottom:8px"><label style="font-size:13px">対象の日付　<input type="date" id="date" onchange="load()" style="padding:6px;font-size:14px"></label></div>',
 '<input type="text" id="filter" placeholder="絞り込み（名前やコードの一部）" oninput="renderOptions()">',
 '<select id="sel" size="12"></select>',
@@ -7585,6 +7690,36 @@ function prepShelfDays_(txt) {
   m = s.match(/(\d+)\s*時間/); if (m) return Number(m[1]) / 24;
   return 0;
 }
+// 統計の土台から「お盆・連休・祝日／CP食材×CP日／外れ値・推定行」を一律に除外する共通判定。MARKER_STAT_ABNORMAL_EXCLUDE
+//   発注ピーク(buildPeakFloorLots_)と同じ方針を仕込みの統計(最低ライン・予測段階)にも効かせ、祝日/CPが平均・p85を歪めないようにする（仕組みの統一）。
+//   ・特別日＝祝日マスタでタグが通常営業/土曜/日曜以外(お盆・連休・祝日)。土日は通常営業なので除外しない。
+//   ・CP食材×CP日＝buildCpFoodDaySet_（そのCPが使う食材の、そのCP期間の日だけ）。CP需要はCP推定が別途担う。
+//   ・食材日時実績のフラグ列が空でない行（外れ値/推定）は実績でないので除外。
+function buildStatExcluder_(ss, fromDate, toDate) {
+  const special = new Set();
+  const NORMAL_TAGS = new Set(['', '通常営業', '土曜', '日曜']);
+  const hm = ss.getSheetByName('祝日マスタ');
+  if (hm && hm.getLastRow() > 1) hm.getRange(2, 1, hm.getLastRow() - 1, 7).getValues().forEach(row => {
+    if (!row[0]) return;
+    const tag = (row[6] || '').toString().trim();
+    if (NORMAL_TAGS.has(tag)) return;
+    const ds = row[0] instanceof Date ? Utilities.formatDate(row[0], 'Asia/Tokyo', 'yyyy-MM-dd') : String(row[0]);
+    special.add(ds);
+  });
+  let cpFoodDay = new Set();
+  try { cpFoodDay = buildCpFoodDaySet_(ss, fromDate, toDate, 'yyyy-MM-dd'); } catch (e) { console.log('CP食材日セット取得スキップ: ' + e.message); }
+  return {
+    special: special,
+    cpFoodDay: cpFoodDay,
+    excluded: function(code, ds, flagRaw) {
+      if (flagRaw !== undefined && String(flagRaw || '').trim() !== '') return true;   // 外れ値/推定＝実績でない
+      if (special.has(ds)) return true;                                                 // お盆・連休・祝日
+      if (cpFoodDay.has(String(Number(code)) + '_' + ds)) return true;                  // CP食材×CP日
+      return false;
+    }
+  };
+}
+
 function buildPrepPeakFloor_(ss) {
   const RECENT_DAYS = 56, MIN_SHELF_DAYS = 2, MIN_SAMPLES = 3;
   const floor = {};
@@ -7607,12 +7742,15 @@ function buildPrepPeakFloor_(ss) {
     });
   }
   const cutoff = new Date(); cutoff.setHours(0, 0, 0, 0); cutoff.setDate(cutoff.getDate() - RECENT_DAYS);
+  const ex = buildStatExcluder_(ss, cutoff, new Date());   // お盆・祝日・CP食材×CP日・推定行を統計から除外（発注ピークと統一）。MARKER_STAT_ABNORMAL_EXCLUDE
   const agg = {};
   je.getRange(2, 1, je.getLastRow() - 1, 6).getValues().forEach(r => {
     const d = r[0] instanceof Date ? new Date(r[0]) : new Date(r[0]); if (isNaN(d.getTime())) return;
     d.setHours(0, 0, 0, 0); if (d < cutoff) return;
     const dow = Number(r[1]), c = String(r[2]).trim(), use = Number(r[4]) || 0;
     if (!c || !dow) return;
+    const ds = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM-dd');
+    if (ex.excluded(c, ds, r[5])) return;                  // ★特別日・CP日・推定は最低ラインの根拠にしない
     if (prepShelf[c] === undefined || prepShelf[c] < MIN_SHELF_DAYS) return;   // 日持ちしない品は対象外
     const f = foodF[c]; if (!f) return;
     const pieces = use * f / (prepE[c] || 1);
@@ -7652,6 +7790,7 @@ function buildPrepTierStats_(ss, items) {
   const need = new Set();
   items.forEach(it => { if (it.partsCodes) it.partsCodes.forEach(p => need.add(String(Number(p)))); else need.add(String(Number(it.code))); });
   const cutoff = new Date(); cutoff.setHours(0, 0, 0, 0); cutoff.setDate(cutoff.getDate() - RECENT_DAYS);
+  const ex = buildStatExcluder_(ss, cutoff, new Date());   // お盆・祝日・CP食材×CP日・推定行を除外（予測段階のp85/p50を歪めない）。MARKER_STAT_ABNORMAL_EXCLUDE
   const dayUse = {}, dsDow = {};
   je.getRange(2, 1, je.getLastRow() - 1, 6).getValues().forEach(r => {
     if (!r[0] || !r[2]) return;
@@ -7659,6 +7798,7 @@ function buildPrepTierStats_(ss, items) {
     const d = r[0] instanceof Date ? new Date(r[0]) : new Date(r[0]); if (isNaN(d.getTime())) return;
     d.setHours(0, 0, 0, 0); if (d < cutoff) return;
     const ds = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM-dd');
+    if (ex.excluded(c, ds, r[5])) return;                  // ★特別日・CP日・推定は予測段階の統計に入れない
     dsDow[ds] = d.getDay() + 1;
     (dayUse[c] = dayUse[c] || {})[ds] = (dayUse[c][ds] || 0) + (Number(r[4]) || 0);
   });
@@ -7885,7 +8025,13 @@ function buildPrepThawSheet_(weekOffset) {
     const cpS = ss.getSheetByName('CP設定');
     if (cpS && cpS.getLastRow() > 1) cpS.getRange(2, 1, cpS.getLastRow() - 1, 9).getValues().forEach(row => {
       if (!String(row[0] || '').trim()) return;
-      if (String(row[8] || '').trim() === '休止') return;                 // 休止は別処理(pause)
+      const flagCp = String(row[8] || '').trim();
+      if (flagCp === '休止') return;                                      // 休止は別処理(pause)
+      if (String(row[7] || '').trim() === '除外') return;                 // 発注除外フラグ行はスキップ
+      // ★CP増量(ピーク倍率)は「置き換え/増量型＝種別『切替』」CPだけに効かせる。MARKER_PREP_CP_BOOST_SWITCHONLY
+      //   追加型CP(月見等・種別空欄)は出食率が小さく、その需要は既に直近56日トレンドに入っている＝全体をピークへ引き上げると
+      //   ハンバーグ等が過大になる(実績出食率0.03でも×1.42)。買替/置換で本当に使用が跳ねる切替型(特盛/肉の日WEEK等)だけ増量する。
+      if (flagCp !== '切替') return;
       const parseD = v => v instanceof Date ? new Date(v) : (v ? new Date(String(v).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1/$2/$3')) : null);
       const s = parseD(row[1]), e = parseD(row[2]);
       if (!s || !e || isNaN(s.getTime()) || isNaN(e.getTime())) return;
@@ -7904,9 +8050,11 @@ function buildPrepThawSheet_(weekOffset) {
     const parts = wins.map(w => 'AND(' + cellA1 + '>=DATE(' + w.start.getFullYear() + ',' + (w.start.getMonth() + 1) + ',' + w.start.getDate() + '),' + cellA1 + '<=DATE(' + w.end.getFullYear() + ',' + (w.end.getMonth() + 1) + ',' + w.end.getDate() + '))');
     return parts.length === 1 ? parts[0] : 'OR(' + parts.join(',') + ')';
   };
+  const CPBOOST_MAX_PREP_ = 1.10;   // ★仕込みのCP増量は最大+10%にキャップ。特盛の120→180g等の増量は商品マスタのレシピ×出食率で別途取込済＝上乗せは薄く。仕込みは後から修正でき、ロスを出さない方を優先。MARKER_PREP_CP_BOOST_CAP
   const cpBoostLit = function(code, tier, tstatUp, dcAbs) {
     if (tier === '上限') return '';                                       // 上限は毎日ピーク＝CP日も二重にしない
-    const up = (tstatUp && tstatUp > 1.001) ? tstatUp : 1;
+    let up = (tstatUp && tstatUp > 1.001) ? tstatUp : 1;
+    up = Math.min(CPBOOST_MAX_PREP_, up);                                 // 上限キャップ（ロス優先）
     if (up <= 1.001) return '';
     const cond = cpBoostCondExpr(dcAbs, code);
     if (!cond) return '';
@@ -8108,8 +8256,38 @@ function buildPrepThawSheet_(weekOffset) {
   sh.setFrozenRows(rFcst);   // 見出し（表題〜予測の5行）を固定
   const maxR = sh.getMaxRows(); if (maxR > rHelp) sh.deleteRows(rHelp + 1, maxR - rHelp);
   const maxC = sh.getMaxColumns(); if (maxC > totalCols) sh.deleteColumns(totalCols + 1, maxC - totalCols);
+  // フェイルラウド：稼働中の食材を黙って0で使わない。仕込みに使う合算コードの部品が発注終了/マスタ欠落/トレンド0なら、作った瞬間に大きく警告する。MARKER_PREP_FAILLOUD
+  try {
+    const issues = detectPrepPartIssues_(ss, items);
+    if (issues.length) {
+      const msg = '⚠️ 仕込みに使う食材が「使用量0」で計算され過少になっています：\n' + issues.slice(0, 8).join('\n') +
+        (issues.length > 8 ? '\n…他' + (issues.length - 8) + '件' : '') +
+        '\n\nメニュー「💰原価管理 → 食材コードの切替・整理 → 整合性チェック」で原因と対処を確認してください。';
+      ss.toast(msg, '⚠️ 仕込みデータの断線（過少の恐れ）', 60);
+      console.warn('仕込みフェイルラウド: ' + issues.join(' / '));
+    }
+  } catch(e) { console.log('仕込みフェイルラウドスキップ: ' + e.message); }
   try { ss.toast('仕込み・解凍表（' + weekLabel + '分）を作り直しました', '完成', 8); } catch(e){}
   console.log('buildPrepThawSheet_: 2段作成完了 weekOffset=' + weekOffset);
+}
+// 仕込みに使う合算コードの部品で「発注終了/マスタ欠落/トレンド0」を検出（フェイルラウド用・軽量・読み取りのみ）。MARKER_PREP_FAILLOUD
+function detectPrepPartIssues_(ss, items) {
+  const nc = v => (v === '' || v === null || v === undefined) ? '' : String(Number(v));
+  const im = ss.getSheetByName('食材マスタ'); const cat = {};
+  if (im && im.getLastRow() > 1) im.getRange(2, 1, im.getLastRow() - 1, 3).getValues().forEach(r => { const c = nc(r[0]); if (c) cat[c] = String(r[2] || '').trim(); });
+  const th = ss.getSheetByName('トレンド履歴'); const tr = {};
+  if (th && th.getLastRow() > 1) th.getRange(2, 1, th.getLastRow() - 1, 10).getValues().forEach(r => { const c = nc(r[0]); if (!c) return; let s = 0; for (let k = 2; k <= 8; k++) { const v = Number(r[k]); if (v > 0) s += v; } tr[c] = (tr[c] || 0) + s; });
+  const out = [];
+  (items || []).forEach(it => {
+    const parts = (it.partsCodes && it.partsCodes.length) ? it.partsCodes.map(nc) : [nc(it.code)];
+    parts.forEach(c => {
+      if (!c) return;
+      if (!(c in cat)) out.push(it.name + '（' + c + '）：食材マスタに無い');
+      else if (cat[c] === '発注終了') out.push(it.name + '（' + c + '）：発注終了コードを参照');
+      else if (!(tr[c] > 0)) out.push(it.name + '（' + c + '）：トレンド使用量が0');
+    });
+  });
+  return out;
 }
 function buildPrepThawSheet() { buildPrepThawSheet_(7); }            // メニュー：来週分（日曜夜に翌週分を先に仕込む時用）
 function buildPrepThawSheetThisWeek() { buildPrepThawSheet_(0); }    // メニュー：今週分を作り直す（＝自動と同じ）
@@ -8501,6 +8679,196 @@ function prepFmtDate_(v) {
   return String(v);
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// 整合性監査エンジン（読み取り専用）MARKER_INTEGRITY_AUDIT
+//   食材マスタ(真実) ↔ 商品マスタ・仕込みマスタ(参照) ↔ トレンド履歴(使用量) を突き合わせ、
+//   「情報が最後までつながっていない箇所（断線）」を全件検出して『整合性チェック』シートに出す。
+//   目的＝コード切替の未伝播・発注終了コードの参照残り・稼働中なのにトレンド0（黙って0で発注/仕込みが過少）を、
+//        数字が狂う前に自動で見つける（人が気づく前提をやめる）。書き込みは『整合性チェック』シートのみ＝安全。
+//   これがフェーズ1（見張り）。恒久修正（切替の完全伝播＝フェーズ2）はこの結果を土台に設計する。
+// ═══════════════════════════════════════════════════════════════════════
+var INTEGRITY_SHEET_ = '整合性チェック';
+
+function runIntegrityAudit_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const nc = v => (v === '' || v === null || v === undefined) ? '' : String(Number(v));
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+
+  // ---- 食材マスタ（コードの真実：区分・切替 L旧/M切替/N完了）----
+  const im = ss.getSheetByName('食材マスタ');
+  const ing = {};          // code -> {name,cat,oldCode,mDate,nDate,active}
+  const newForOld = {};    // 旧コード -> 新コード（L列から逆引き＝この旧コードは何に替わったか）
+  const pending = [];      // 切替進行中（L有・N空・today>=M）
+  if (im && im.getLastRow() > 1) {
+    im.getRange(2, 1, im.getLastRow() - 1, 14).getValues().forEach(r => {
+      const c = nc(r[0]); if (!c) return;
+      const cat = String(r[2] || '').trim();
+      const oldC = nc(r[11]);
+      const mDate = r[12] instanceof Date ? r[12] : null;
+      const nDate = r[13] instanceof Date ? r[13] : null;
+      ing[c] = { name: String(r[1] || ''), cat: cat, oldCode: oldC, mDate: mDate, nDate: nDate, active: (cat !== '発注終了') };
+      if (oldC) newForOld[oldC] = c;
+      if (oldC && !nDate && mDate && today >= mDate) pending.push({ oldCode: oldC, newCode: c, name: String(r[1] || ''), mDate: mDate });
+    });
+  }
+
+  // ---- トレンド履歴（曜日別使用量＝発注/仕込みの土台）----
+  const trendSum = {};     // code -> 曜日平均(C〜I)の合計
+  const th = ss.getSheetByName('トレンド履歴');
+  if (th && th.getLastRow() > 1) {
+    th.getRange(2, 1, th.getLastRow() - 1, 10).getValues().forEach(r => {
+      const c = nc(r[0]); if (!c) return;
+      let s = 0; for (let k = 2; k <= 8; k++) { const v = Number(r[k]); if (v > 0) s += v; }
+      trendSum[c] = (trendSum[c] || 0) + s;
+    });
+  }
+
+  // ---- 参照元を集める（誰がその食材コードを使っているか）----
+  const refBy = {};        // ingCode -> {prod:Set(商品コード), prep:Set(仕込み品名)}
+  const addRef = (code, kind, who) => { const c = nc(code); if (!c) return; (refBy[c] = refBy[c] || { prod: new Set(), prep: new Set() })[kind].add(who); };
+  // 商品マスタ（E列=食材コード・M列=提供量）
+  const pm = ss.getSheetByName('商品マスタ');
+  if (pm && pm.getLastRow() > 1) {
+    pm.getRange(2, 1, pm.getLastRow() - 1, 13).getValues().forEach(r => {
+      const prod = nc(r[0]); const ingc = nc(r[4]); const qty = Number(r[12]);
+      if (!prod || !ingc || !qty) return;
+      addRef(ingc, 'prod', prod);
+    });
+  }
+  // 仕込みマスタ（G列=合算コードを＋で分解／L列=有効）。無効品は別集計。
+  const prepInactiveRef = {};   // code -> Set(仕込み品名) 無効品からの参照
+  const pmp = ss.getSheetByName('仕込みマスタ');
+  if (pmp && pmp.getLastRow() > 1) {
+    pmp.getRange(2, 1, pmp.getLastRow() - 1, 16).getValues().forEach(r => {
+      const code = nc(r[0]); const name = String(r[1] || '');
+      const active = (r[11] === true || String(r[11]).toUpperCase() === 'TRUE');
+      const parts = r[6] ? String(r[6]).split('+').map(x => nc(x)).filter(x => x) : [];
+      const consumed = parts.length ? parts : (code ? [code] : []);
+      consumed.forEach(cc => {
+        if (active) addRef(cc, 'prep', name || code);
+        else (prepInactiveRef[cc] = prepInactiveRef[cc] || new Set()).add(name || code);
+      });
+    });
+  }
+
+  // ---- 断線判定 ----
+  const findings = []; // {sev(0重大/1要判断/2軽微/3情報), kind, code, name, source, detail}
+  const push = (sev, kind, code, name, source, detail) => findings.push({ sev, kind, code, name, source, detail });
+
+  Object.keys(refBy).forEach(c => {
+    const srcProd = [...refBy[c].prod], srcPrep = [...refBy[c].prep];
+    const src = (srcProd.length ? ('商品:' + srcProd.slice(0, 3).join(',') + (srcProd.length > 3 ? '他' : '')) : '') +
+                (srcProd.length && srcPrep.length ? ' / ' : '') +
+                (srcPrep.length ? ('仕込み:' + srcPrep.slice(0, 3).join(',') + (srcPrep.length > 3 ? '他' : '')) : '');
+    const info = ing[c];
+    if (!info) {
+      push(0, 'マスタ欠落', c, '(食材マスタに無い)', src, '参照されているが食材マスタに存在しない＝原価・使用量が抜ける。食材マスタに登録するか参照を修正する。');
+      return;
+    }
+    if (!info.active) { // 発注終了コードを参照したまま
+      const succ = newForOld[c];
+      if (succ) push(0, '切替未伝播', c, info.name, src, '発注終了。→' + succ + '（' + (ing[succ] ? ing[succ].name : '') + '）へ切替済だが参照が旧コードのまま＝トレンド0で過少。参照元を' + succ + 'へ更新する（特に仕込みマスタの合算コード）。');
+      else push(0, '発注終了を参照', c, info.name, src, '発注終了コードを参照したまま。後継コードへ更新するか参照を外す。');
+      return;
+    }
+    // 稼働中なのにトレンド0（黙って0で発注/仕込みが過少）
+    if (!(trendSum[c] > 0)) {
+      const inPrep = refBy[c].prep.size > 0;
+      push(inPrep ? 1 : 3, '稼働中トレンド0', c, info.name, src,
+        (inPrep ? '仕込みで使う食材なのに' : '') + '区分=' + info.cat + '（稼働中）だがトレンド履歴の使用量が0＝' +
+        (inPrep ? '仕込み量が0基準で過少になる。使用実績が拾えているか要確認。' : '発注が0基準になる。調味料等で元々追跡外なら無害。'));
+    }
+  });
+
+  // 切替進行中で旧コードの参照が既に無い＝正常（情報として記録）
+  pending.forEach(p => {
+    if (!refBy[p.oldCode]) push(3, '切替進行中', p.oldCode, p.name, '', '→' + p.newCode + 'へ切替中（' + Utilities.formatDate(p.mDate, 'Asia/Tokyo', 'M/d') + '〜）。旧コードの参照は無し＝正常。完了日(N列)の記録待ち。');
+  });
+
+  // 切替設定の不備（自己参照・切替未実行・記録の宙ぶらりん）。完了済み切替の再発火や実行漏れを未然に見つける。MARKER_INTEGRITY_SWITCH_CFG
+  Object.keys(ing).forEach(c => {
+    const info = ing[c];
+    const oldC = info.oldCode;
+    if (!oldC) return;
+    if (oldC === c) { push(2, '切替設定ミス', c, info.name, '', 'L列(旧コード)が自分自身のコードを指している＝設定ミス。旧コードを正すか消す。'); return; }
+    const oldInfo = ing[oldC];
+    if (oldInfo && oldInfo.active) {
+      // 旧コードがまだ稼働中(発注終了でない)＝切替が実行されていない
+      if (info.mDate && today >= info.mDate) {
+        const days = Math.round((today - info.mDate) / 86400000);
+        push(1, '切替未実行', oldC, oldInfo.name, '→' + c + '（' + info.name + '）', '切替日(' + Utilities.formatDate(info.mDate, 'Asia/Tokyo', 'M/d') + ')を' + days + '日過ぎても旧コードが稼働中＝切替が実行されていない（発注が旧規格のまま）。メニュー「食材コードの切替を今すぐ実行」で確認。');
+      }
+    } else if (!oldInfo && !info.nDate) {
+      // 旧コードは食材マスタから削除済みなのに、この行の完了日(N列)が空＝記録が宙ぶらりん（自動ガード済みで害はないが記録を整える）
+      push(2, '切替記録の未整理', oldC, info.name, '→' + c, '旧コードは食材マスタから削除済みだが完了日(N列)が空＝切替記録が未完了のまま。N列に完了日を入れて整理を推奨（放置しても自動ガードで再発火はしないが記録を正す）。');
+    }
+  });
+
+  // 無効な仕込み品目が死にコード/トレンド0を参照（軽微）
+  Object.keys(prepInactiveRef).forEach(c => {
+    const info = ing[c];
+    if (!info || !info.active || !(trendSum[c] > 0))
+      push(2, '無効品の断線参照', c, info ? info.name : '(無し)', '仕込み(無効):' + [...prepInactiveRef[c]].slice(0, 3).join(','), '無効な仕込み品目が死にコード/トレンド0を参照。有効化する予定なら要修正、使わないなら定義を掃除する。');
+  });
+
+  findings.sort((a, b) => a.sev - b.sev || (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+
+  // ---- 出力（整合性チェックシート・書き込みはここだけ）----
+  const sevName = ['重大', '要判断', '軽微', '情報'];
+  const cnt = [0, 0, 0, 0]; findings.forEach(f => cnt[f.sev]++);
+  let sh = ss.getSheetByName(INTEGRITY_SHEET_);
+  if (!sh) sh = ss.insertSheet(INTEGRITY_SHEET_);
+  sh.clear();
+  const stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
+  sh.getRange(1, 1).setValue('整合性チェック（自動監査）  最終チェック: ' + stamp).setFontWeight('bold').setFontSize(12);
+  sh.getRange(2, 1).setValue('重大 ' + cnt[0] + '件 ／ 要判断 ' + cnt[1] + '件 ／ 軽微 ' + cnt[2] + '件 ／ 情報 ' + cnt[3] + '件（重大＝発注/仕込みが必ず狂う断線。上から対応）');
+  const head = ['重大度', '種別', '対象コード', '名称', '参照元', '内容・推奨対応'];
+  sh.getRange(4, 1, 1, head.length).setValues([head]).setFontWeight('bold').setBackground('#eeeeee');
+  if (findings.length) {
+    const rows = findings.map(f => [sevName[f.sev], f.kind, f.code, f.name, f.source, f.detail]);
+    sh.getRange(5, 1, rows.length, head.length).setValues(rows);
+    for (let i = 0; i < findings.length; i++) {
+      const bg = findings[i].sev === 0 ? '#f4cccc' : findings[i].sev === 1 ? '#fff2cc' : findings[i].sev === 2 ? '#f3f3f3' : '#ffffff';
+      sh.getRange(5 + i, 1, 1, head.length).setBackground(bg);
+    }
+  } else {
+    sh.getRange(5, 1).setValue('断線は検出されませんでした（すべての参照が有効なコード・使用量につながっています）。');
+  }
+  sh.setColumnWidth(1, 60); sh.setColumnWidth(2, 120); sh.setColumnWidth(3, 90);
+  sh.setColumnWidth(4, 160); sh.setColumnWidth(5, 240); sh.setColumnWidth(6, 560);
+  sh.setFrozenRows(4);
+
+  try { PropertiesService.getScriptProperties().setProperty('INTEGRITY_LAST', JSON.stringify({ stamp: stamp, sev: cnt })); } catch (e) {}
+  return { counts: cnt, findings: findings, stamp: stamp };
+}
+
+// メニュー：手動で今すぐ監査（結果シートを開いて件数を知らせる）
+function buildIntegrityAudit() {
+  const r = runIntegrityAudit_();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(INTEGRITY_SHEET_);
+  if (sh) ss.setActiveSheet(sh);
+  SpreadsheetApp.getUi().alert('整合性チェック 完了',
+    '重大 ' + r.counts[0] + '件／要判断 ' + r.counts[1] + '件／軽微 ' + r.counts[2] + '件／情報 ' + r.counts[3] + '件\n\n' +
+    (r.counts[0] > 0 ? '⚠️ 重大な断線があります。『整合性チェック』シート上部（赤）から対応してください。' : '重大な断線はありません。'),
+    SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+// 日次自動監査（トリガー）：重大があれば店長にメール通知（人が気づく前に鳴らす）
+function dailyIntegrityAudit() {
+  try {
+    const r = runIntegrityAudit_();
+    if (r.counts[0] > 0) {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const top = r.findings.filter(f => f.sev === 0).slice(0, 20)
+        .map(f => '・[' + f.kind + '] ' + f.code + ' ' + f.name + '  ' + f.detail).join('\n');
+      MailApp.sendEmail(Session.getEffectiveUser().getEmail(),
+        '【整合性チェック】重大な断線 ' + r.counts[0] + '件（' + r.stamp + '）',
+        '発注・仕込みが必ず狂う断線を検出しました。\n\n' + top + '\n\n詳細は『整合性チェック』シートを確認してください。\n' + ss.getUrl());
+    }
+  } catch (e) { console.log('dailyIntegrityAudit失敗: ' + e.message); }
+}
+
 // ===== ロス入力（食材ロスを測る土台。まず測る→溜まってから発注ルールに反映）MARKER_LOSS_INPUT =====
 // 対象は仕込みマスタのflag=TRUE品（＝プレップする生鮮＝CP主要＋高価な生鮮）。手作業のリスト管理不要（仕込み品目に追随）。
 function ensureLossSheet_() {
@@ -8576,7 +8944,10 @@ function wasteReflectFactors_(ss) {
   const sd = ss.getSheetByName('実績データ');
   const servByProduct = {};
   if (sd && sd.getLastRow() > 1) {
-    sd.getRange(2, 1, sd.getLastRow() - 1, 7).getValues().forEach(r => {
+    // 直近28日ぶんだけ読む＝実績データ(数万行)を毎回全読みしない（発注生成の高速化）。実績データは日付昇順の追記なので直近は末尾側。MARKER_WASTE_RECENT_READ
+    const lastR = sd.getLastRow();
+    const startR = Math.max(2, lastR - 4000 + 1);   // 28日ぶん(1日数十品×28日)を十分覆う末尾4000行
+    sd.getRange(startR, 1, lastR - startR + 1, 7).getValues().forEach(r => {
       const d = r[0]; if (!(d instanceof Date) || d < from || d >= today) return;
       const p = r[4]; if (p === '' || p === null) return;
       servByProduct[String(Number(p))] = (servByProduct[String(Number(p))] || 0) + (Number(r[6]) || 0);
@@ -8590,6 +8961,14 @@ function wasteReflectFactors_(ss) {
   });
   // 廃棄量/日：廃棄実績（商品はレシピで食材へ換算）。反映する理由のみ集計（既定=期限切れのみ）。MARKER_WASTE_REASON
   const reflectReasons = lossReflectReasons_();
+  // 食材コード切替の読み替え（旧→新）。切替で退役した旧コードに記録された過去廃棄も、現行コードの廃棄反映に引き継ぐ（切替の完全伝播）。MARKER_WASTE_CODE_SWITCH
+  const wasteOldToNew = {};
+  const imSw = ss.getSheetByName('食材マスタ');
+  if (imSw && imSw.getLastRow() > 1) imSw.getRange(2, 1, imSw.getLastRow() - 1, 14).getValues().forEach(r => {
+    const oldC = r[11]; if (oldC === '' || oldC === null) return;   // L列＝旧食材コード
+    const oc = String(Number(oldC)), ncode = String(Number(r[0]));
+    if (oc !== 'NaN' && ncode !== 'NaN') wasteOldToNew[oc] = ncode;
+  });
   const ls = ss.getSheetByName('廃棄実績') || ss.getSheetByName('ロス実績');
   const wasteDay = result.wasteDay;
   if (ls && ls.getLastRow() > 1) {
@@ -8601,9 +8980,9 @@ function wasteReflectFactors_(ss) {
       if (code === '' || code === null || !(qty > 0)) return;
       if (type === '商品') {
         const rec = recipeByProduct[String(Number(code))];
-        if (rec) rec.forEach(x => { wasteDay[x.ing] = (wasteDay[x.ing] || 0) + qty * x.g / WINDOW; });
+        if (rec) rec.forEach(x => { const ing = wasteOldToNew[x.ing] || x.ing; wasteDay[ing] = (wasteDay[ing] || 0) + qty * x.g / WINDOW; });
       } else {
-        const ing = String(Number(code));
+        let ing = String(Number(code)); ing = wasteOldToNew[ing] || ing;   // 旧コードの廃棄は現行コードへ付け替え
         wasteDay[ing] = (wasteDay[ing] || 0) + qty / WINDOW;
       }
     });
@@ -8631,7 +9010,10 @@ function wasteReflectFactors_(ss) {
 }
 
 function showLossForm() {
-  const html = HtmlService.createHtmlOutput(LOSS_FORM_HTML_()).setWidth(480).setHeight(680);
+  // 起動を速く：データを先に計算してHTMLへ埋め込み、開いた瞬間に表示（2回目の通信＝「読み込み中…」待ちを省く）。MARKER_WASTE_FAST_BOOT
+  let boot = 'null';
+  try { boot = JSON.stringify(lossForm_getData()).replace(/</g, '\\u003c'); } catch (e) {}
+  const html = HtmlService.createHtmlOutput(LOSS_FORM_HTML_(boot)).setWidth(480).setHeight(680);
   SpreadsheetApp.getUi().showModalDialog(html, '🗑 廃棄登録（食材・商品を選ぶだけ）');
 }
 
@@ -8767,23 +9149,62 @@ function lossFreqMap_(sh) {
 }
 
 // フォーム初期データ：定番（食材・頻度順）＋検索インデックス（食材＋"売れている"商品）＋日付（今日/昨日/カレンダー）
+// 廃棄検索インデックスの永続キャッシュ（ScriptProperties・8000字ごとに分割保存）。マスタが変わった時だけ作り直す。MARKER_WASTE_INDEX_CACHE
+//   CacheServiceは最大6時間で消えるのに対し、ScriptPropertiesはスプレッドシートに永続保存される（消えない）。
+var LOSS_INDEX_VERSION_ = 1;   // 検索語の作り方を変えた時はここを+1（全店で自動作り直し）
+function lossIndexSig_(ss) {    // 署名＝食材/商品マスタの「コード+名前」の軽いハッシュ＋版。追加/削除/改名/コード切替のどれでも変われば自動で作り直す
+  function sigOf(name) {
+    const s = ss.getSheetByName(name); if (!s || s.getLastRow() < 2) return '0';
+    const v = s.getRange(2, 1, s.getLastRow() - 1, 2).getValues();   // A:B列（コード・名前）だけ読む＝軽い
+    let h = 0;
+    for (let i = 0; i < v.length; i++) { const t = String(v[i][0]) + '|' + String(v[i][1]); for (let j = 0; j < t.length; j++) h = (h * 31 + t.charCodeAt(j)) | 0; }
+    return v.length + ':' + h;
+  }
+  return LOSS_INDEX_VERSION_ + ';' + sigOf('食材マスタ') + ';' + sigOf('商品マスタ');
+}
+function lossIndexRead_(ss) {
+  try {
+    const p = PropertiesService.getScriptProperties().getProperties();
+    if (p['LOSS_IDX_SIG'] !== lossIndexSig_(ss)) return null;   // マスタが変わっていたら作り直し
+    const cnt = Number(p['LOSS_IDX_CNT'] || 0); if (!(cnt > 0)) return null;
+    let s = '';
+    for (let i = 0; i < cnt; i++) { const part = p['LOSS_IDX_' + i]; if (part == null) return null; s += part; }
+    return JSON.parse(s);
+  } catch (e) { return null; }
+}
+function lossIndexWrite_(ss, index) {
+  try {
+    clearLossIndexCache_();   // 古いチャンクを消してから書く
+    const s = JSON.stringify(index), CH = 8000, cnt = Math.ceil(s.length / CH);
+    const obj = { 'LOSS_IDX_SIG': lossIndexSig_(ss), 'LOSS_IDX_CNT': String(cnt) };
+    for (let i = 0; i < cnt; i++) obj['LOSS_IDX_' + i] = s.substr(i * CH, CH);
+    PropertiesService.getScriptProperties().setProperties(obj, false);   // 他の設定は消さない
+  } catch (e) {}
+}
+function clearLossIndexCache_() {   // マスタを書き換えた時に呼ぶ（コード切替など）→次回起動で作り直す
+  try {
+    const props = PropertiesService.getScriptProperties(), p = props.getProperties();
+    Object.keys(p).forEach(function(k) { if (k.indexOf('LOSS_IDX_') === 0) props.deleteProperty(k); });
+  } catch (e) {}
+}
+
 function lossForm_getData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const foodInfo = lossFoodInfo_();
-  const prodInfo = lossProductInfo_();
-  const sh = ensureLossSheet_();
+  const sh = ensureLossSheet_();   // foodInfo/prodInfoは検索インデックス作成時のみ必要→キャッシュ未ヒット時に読む。MARKER_WASTE_INDEX_CACHE
   // 初期表示＝固定の定番なし。最近ほど重く数える「時間減衰スコア」で上位20品(食材・商品とも)。MARKER_WASTE_PIN_TOP20
   //   スコア = Σ 0.5^(経過日 / 半減期30日)。終了CPで登録が止まった品は順位が徐々に下がり、
   //   しばらく登録がない物(単発なら45日超)は下限を割って圏外へ＝上位に居座り続けない。表示の「回数」は実回数のまま。
   const HALF_LIFE_D = 30, PIN_FLOOR = 0.35;
   const now0 = new Date(); now0.setHours(0, 0, 0, 0);
   const freqAgg = {};   // 種別+コード → {type, code, name, unit, f(実回数), score(減衰), last(最終日ms)}
+  const reasonScore = {};   // 理由 → 時間減衰スコア（選択が多い順にプルダウンを並べる）。MARKER_WASTE_REASON_ORDER
   if (sh.getLastRow() >= 2) {
-    sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues().forEach(function(r) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, 9).getValues().forEach(function(r) {   // 9列目=理由も読む
       if (!r[0]) return;
       const d = (r[0] instanceof Date) ? r[0] : new Date(r[0]); if (isNaN(d.getTime())) return;
       const days = Math.max(0, (now0 - d) / 86400000);
       const w = Math.pow(0.5, days / HALF_LIFE_D);
+      const rsn = String(r[8] || '').trim(); if (rsn) reasonScore[rsn] = (reasonScore[rsn] || 0) + w;   // 理由の頻度（直近重視）
       const type = String(r[1] || ''); const code = String(r[2] || ''); if (!code) return;
       const k = type + ':' + code;
       if (!freqAgg[k]) freqAgg[k] = { type: (type === '商品' ? '商品' : '食材'), code: code, name: String(r[3] || ''), unit: String(r[5] || (type === '商品' ? '個' : 'g')), f: 0, score: 0, last: 0 };
@@ -8796,28 +9217,41 @@ function lossForm_getData() {
     .sort(function(a, b) { return b.score - a.score; })
     .slice(0, 20)
     .map(function(x) { return { type: x.type, code: x.code, name: x.name || x.code, unit: x.unit, f: x.f }; });
-  // 検索インデックス：食材（消耗品除く）＋商品は全メニュー
-  const index = [];
-  Object.keys(foodInfo).forEach(function(c) {
-    const fi = foodInfo[c];
-    if (fi.cat === '消耗品' || fi.cat === '発注終了') return;
-    index.push({ type: '食材', code: c, name: fi.name, unit: fi.unit, search: buildSearchBlob_(fi.name) });
-  });
-  // 商品：レシピ原価があるメニューは全部検索できるようにする。MARKER_WASTE_SEARCH_ALL_PRODUCTS
-  //   旧仕様は「直近7日に売れた商品」だけ＝作り置きして売れずに廃棄する副菜(オニポテサラダ等)が検索に出なかった。
-  //   商品コードは重複なし368件・約6KBと軽量なので全部載せてOK。直近売れた物はPOS表記を優先(検索一致を良くする)。
-  const sold = lossSoldProducts_(ss, 7);
-  Object.keys(prodInfo).forEach(function(c) {
-    const cost = prodInfo[c];
-    if (!cost || !(cost.yen > 0)) return;     // レシピ原価があるものだけ（金額を出せる）
-    const nm = (sold[c] && sold[c].name) ? sold[c].name : cost.name;
-    index.push({ type: '商品', code: c, name: nm, unit: '個', search: buildSearchBlob_(nm + ' ' + cost.name) });
-  });
+  // 検索インデックス（約470品）は重いので永続キャッシュ。CacheServiceは最大6時間で消えるため、消えないScriptPropertiesに保存する。MARKER_WASTE_INDEX_CACHE
+  //   マスタ（食材・商品）が変わった時だけ作り直す（行数＋版番号の署名で判定）。日をまたいでもずっと再利用でき、起動が速いまま。
+  let index = lossIndexRead_(ss);
+  if (!index) {
+    const foodInfo = lossFoodInfo_();
+    const prodInfo = lossProductInfo_();
+    index = [];
+    Object.keys(foodInfo).forEach(function(c) {
+      const fi = foodInfo[c];
+      if (fi.cat === '消耗品' || fi.cat === '発注終了') return;
+      index.push({ type: '食材', code: c, name: fi.name, unit: fi.unit, search: buildSearchBlob_(fi.name) });
+    });
+    // 商品：レシピ原価があるメニューは全部検索できるようにする。MARKER_WASTE_SEARCH_ALL_PRODUCTS
+    //   旧仕様は「直近7日に売れた商品」だけ＝作り置きして売れずに廃棄する副菜(オニポテサラダ等)が検索に出なかった。
+    const sold = lossSoldProducts_(ss, 7);
+    Object.keys(prodInfo).forEach(function(c) {
+      const cost = prodInfo[c];
+      if (!cost || !(cost.yen > 0)) return;     // レシピ原価があるものだけ（金額を出せる）
+      const nm = (sold[c] && sold[c].name) ? sold[c].name : cost.name;
+      index.push({ type: '商品', code: c, name: nm, unit: '個', search: buildSearchBlob_(nm + ' ' + cost.name) });
+    });
+    lossIndexWrite_(ss, index);   // 永続保存（次回以降はマスタ変更まで作り直さない）
+  }
   const tz = Session.getScriptTimeZone();
   const base = new Date(); base.setHours(0, 0, 0, 0);
   const y = new Date(base); y.setDate(base.getDate() - 1);
   const fmt = function(d) { return Utilities.formatDate(d, tz, 'yyyy-MM-dd'); };
-  return { pinned: pinned, index: index, today: fmt(base), yesterday: fmt(y), reasons: lossReasons_(), defaultReason: '筋取り' };
+  // 理由プルダウン＝選択が多い順（直近重視）。マスタの全理由は残す（未使用は元の並びで下に）。先頭＝既定選択。MARKER_WASTE_REASON_ORDER
+  const reasonsMaster = lossReasons_();
+  const reasons = reasonsMaster.slice().sort(function(a, b) {
+    const sa = reasonScore[a] || 0, sb = reasonScore[b] || 0;
+    if (sb !== sa) return sb - sa;
+    return reasonsMaster.indexOf(a) - reasonsMaster.indexOf(b);   // 同点はマスタ順
+  });
+  return { pinned: pinned, index: index, today: fmt(base), yesterday: fmt(y), reasons: reasons, defaultReason: reasons[0] || '期限切れ' };
 }
 
 // 保存：食材（複合は比率で按分）／商品（作り間違え・盛り置き）を金額つきで記録。
@@ -8858,8 +9292,10 @@ function lossForm_commit(dateStr, entries, reason) {
   if (cnt > 0) {
     try {
       const res = buildWasteAnalysisCore_(SpreadsheetApp.getActiveSpreadsheet());
-      if (res && res.status === 'ok') msg += '\n直近28日の廃棄 約' + Math.round(res.totalYen) + '円（月換算 約' + Math.round(res.monthly) + '円）。「廃棄分析」シートを更新しました。';
+      if (res && res.status === 'ok') msg += '\n直近28日の廃棄 約' + Math.round(res.totalYen) + '円（月換算 約' + Math.round(res.monthly) + '円）。分析は裏で更新済みです。';
     } catch (e) {}
+    // 登録後に表示するシートは「廃棄実績」（生ログ）にする。分析(buildWasteAnalysisCore_)は裏で更新済み。追記行が見えるよう最終行へ。MARKER_WASTE_SHOW_LOG
+    try { const ass = SpreadsheetApp.getActiveSpreadsheet(); ass.setActiveSheet(sh); sh.getRange(sh.getLastRow(), 1).activate(); } catch (e) {}
   }
   return msg;
 }
@@ -8958,7 +9394,7 @@ function buildWasteAnalysisCore_(ss) {
 // 旧メニュー互換（「ロスの傾向を見る」→金額分析へ）
 function showLossSummary() { buildWasteAnalysis(); }
 
-function LOSS_FORM_HTML_() {
+function LOSS_FORM_HTML_(boot) {
   return '' +
 '<!DOCTYPE html><html><head><base target="_top"><meta name="viewport" content="width=device-width,initial-scale=1">' +
 '<style>' +
@@ -8977,6 +9413,7 @@ function LOSS_FORM_HTML_() {
 '#q{width:100%;font-size:15px;padding:8px;box-sizing:border-box;}' +
 '#results{max-height:180px;overflow:auto;border:1px solid #eee;} .ritem{padding:7px;border-bottom:1px solid #f0f0f0;cursor:pointer;} .ritem:hover{background:#eef4ff;}' +
 'button.save{background:#1a56db;color:#fff;border:none;border-radius:6px;padding:12px 16px;margin-top:14px;width:100%;font-size:16px;}' +
+'button.save:disabled{background:#9bb4de;cursor:default;}' +
 '#msg{margin-top:8px;color:#137333;min-height:18px;}' +
 '</style></head><body>' +
 '<h3>🗑 廃棄登録</h3>' +
@@ -8990,11 +9427,12 @@ function LOSS_FORM_HTML_() {
 '<div class="sec">その他を探す（作り間違え・盛り置き…商品名/食材名で検索）</div>' +
 '<input id="q" placeholder="例：ペッパーライス／ポテサラ／青葱" oninput="filter()" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">' +
 '<div id="results"></div><div id="added"></div>' +
-'<button class="save" onclick="save()">保存する</button><div id="msg"></div>' +
+'<button class="save" id="saveBtn" onclick="save()">保存する</button><div id="msg"></div>' +
 '<script>' +
 'var D={},PIN=[],IDX=[],ADD=[];' +
-'function load(){google.script.run.withSuccessHandler(function(d){D=d;PIN=d.pinned||[];IDX=d.index||[];' +
-'document.getElementById("date").value=d.today;setDay(d.today,document.getElementById("bt"));renderReasons();renderPin();}).lossForm_getData();}' +
+'var BOOT=' + (boot || 'null') + ';' +   /* サーバが先に埋め込んだ初期データ（あれば通信せず即表示）。MARKER_WASTE_FAST_BOOT */
+'function applyData(d){D=d;PIN=d.pinned||[];IDX=d.index||[];document.getElementById("date").value=d.today;setDay(d.today,document.getElementById("bt"));renderReasons();renderPin();}' +
+'function load(){if(BOOT){applyData(BOOT);return;}google.script.run.withSuccessHandler(applyData).lossForm_getData();}' +
 'function renderReasons(){var s=document.getElementById("reason");var rs=D.reasons||["期限切れ","筋取り","調理ミス","過剰仕込み","管理環境の不備"];var dv=D.defaultReason||"筋取り";s.innerHTML="";rs.forEach(function(r){var o=document.createElement("option");o.value=r;o.text=r+(r==="期限切れ"?"（発注・仕込みに反映）":"");if(r===dv)o.selected=true;s.appendChild(o);});}' +
 'function setDay(v,btn){document.getElementById("date").value=v;document.getElementById("bt").classList.remove("on");document.getElementById("by").classList.remove("on");if(btn)btn.classList.add("on");}' +
 'function clearDayBtn(){document.getElementById("bt").classList.remove("on");document.getElementById("by").classList.remove("on");}' +
@@ -9009,10 +9447,12 @@ function LOSS_FORM_HTML_() {
 'function save(){var ds=document.getElementById("date").value;if(!ds){document.getElementById("msg").innerText="日付を選んでください";return;}var entries=[];' +
 'PIN.forEach(function(p,i){var v=Number(document.getElementById("p_"+i).value);if(v>0)entries.push({type:(p.type||"食材"),key:p.key,code:p.code,qty:v});});' +
 'ADD.forEach(function(a,i){var v=Number(document.getElementById("a_"+i).value);if(v>0)entries.push({type:a.type,code:a.code,qty:v});});' +
-'if(!entries.length){document.getElementById("msg").innerText="数量が入っていません";return;}document.getElementById("msg").innerText="保存中…";' +
+'if(!entries.length){document.getElementById("msg").innerText="数量が入っていません";return;}' +
+'var _b=document.getElementById("saveBtn");if(_b&&_b.getAttribute("data-busy")==="1")return;if(_b){_b.setAttribute("data-busy","1");_b.disabled=true;}' +   /* 二重送信防止：保存中はボタンを止める。MARKER_WASTE_DOUBLE_SUBMIT */
+'document.getElementById("msg").innerText="保存中…";' +
 'var reason=document.getElementById("reason").value;' +
 'google.script.run.withSuccessHandler(function(m){document.getElementById("msg").innerText=m;ADD=[];renderAdd();PIN.forEach(function(p,i){document.getElementById("p_"+i).value="";});setTimeout(function(){google.script.host.close();},1000);})' +
-'.withFailureHandler(function(e){document.getElementById("msg").innerText="エラー："+e.message;}).lossForm_commit(ds,entries,reason);}' +
+'.withFailureHandler(function(e){document.getElementById("msg").innerText="エラー："+e.message;if(_b){_b.removeAttribute("data-busy");_b.disabled=false;}}).lossForm_commit(ds,entries,reason);}' +
 'load();' +
 '</script></body></html>';
 }
@@ -9816,7 +10256,9 @@ function applyFoodCodeSwitches_() {
     const oldCode = String(row[11]).trim();
     if (!oldCode || oldCode === 'undefined') return;
     const oldC = String(Number(oldCode));
-    if (catByCode[oldC] === '発注終了') return;    // 旧コードが発注終了＝切替済み → スキップ
+    // 旧コードが「発注終了」または「食材マスタから削除済み(削除待ちへ移動等)」＝切替完了 → スキップ。MARKER_FOODSWITCH_DONE_FIX
+    //   旧コードを削除すると発注終了と判定できず、完了済みの切替が毎回“再発火”→末尾で使用量/トレンドを毎回再計算し発注生成が重くなっていた（トースト連発の正体）。存在しない旧コードは切替済みとみなす。
+    if (catByCode[oldC] === '発注終了' || !(oldC in catByCode)) return;
     const mSw = parseFlexibleDate_(row[12]);       // M 切替日（移行開始日）
     const nDn = parseFlexibleDate_(row[13]);       // N 移行完了日（実行日）
     const execDate = nDn || mSw;
@@ -9844,6 +10286,7 @@ function applyFoodCodeSwitches_() {
   //      9=J仕入納品量 10=K歩留率 12=M単位使用量 13=N金額(原価)
 
   const reportLines = [];
+  let totalChanged = 0;   // 実際に書き換えた件数の合計。0なら何も変わっていない＝重い再計算を走らせない。MARKER_FOODSWITCH_NOOP_GUARD
   targets.forEach(t => {
     let count = 0, autoCount = 0;
     for (let r = 0; r < pVals.length; r++) {
@@ -9869,10 +10312,18 @@ function applyFoodCodeSwitches_() {
       masterSheet.getRange(t.newRow, 9).setValue(Number(t.oldSafety));   // I列＝9列目
     }
     // N列(移行完了日)は店長の予定日なので上書きしない（完了判定は旧コードの発注終了で行う）
+    // ★仕込みマスタの合算コード(G列)も旧→新へ書き換える＝切替を仕込みまで完全伝播（クロバラ断線の再発防止）。MARKER_FOODSWITCH_PREP
+    let prepCount = 0;
+    try { prepCount = propagatePrepComposite_(ss, t.oldCode, t.newCode); } catch(e) { console.log('仕込み合算コード伝播スキップ: ' + e.message); }
+    totalChanged += count + autoCount + prepCount;   // 実際の変更件数を積算
     let line = t.oldCode + ' → ' + t.newCode + '（' + t.name + '）：商品マスタ ' + count + '件を更新';
     if (autoCount > 0) line += '／数式の' + autoCount + '件は自動更新';
+    if (prepCount > 0) line += '／仕込みマスタ合算コード' + prepCount + '件を更新';
     reportLines.push(line);
   });
+
+  // ★何も実際に変わっていない(0件)なら、重い使用量・トレンド再計算もトーストもしない＝空振りの切替でビルドが重くならない。MARKER_FOODSWITCH_NOOP_GUARD
+  if (totalChanged === 0) { console.log('食材コード切替：実変更0件のため再計算・通知をスキップ'); return 0; }
 
   // 規格量が変わったので使用量・トレンドを自動再計算
   try { const cp = buildIngredientDailyUsage(); saveCpSubtractMap_(cp); } catch(e) { console.log('使用量再計算スキップ: ' + e.message); }
@@ -9883,6 +10334,75 @@ function applyFoodCodeSwitches_() {
   try { ss.toast(reportLines.join('\n'), '食材コード切替', 8); } catch(e){}
   try { MailApp.sendEmail(Session.getEffectiveUser().getEmail(), '【発注書】食材コードを自動切替しました', msg); } catch(e){}
   return targets.length;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 食材コード切替を「仕込みマスタの合算コード」まで完全伝播する。MARKER_FOODSWITCH_PREP
+//   従来は切替が商品マスタE列しか直さず、仕込みマスタG列の合算コード（例クロ・バラ=612087+612089+612047）が
+//   旧コードのまま取り残された＝トレンド0で仕込み過少。この関数で仕込みまでつなぐ（＝断線をなくす）。
+//   書き換えは仕込みマスタG列のみ。A列（品目コード＝在庫・調整のキー）は触らない（安全）。
+// ═══════════════════════════════════════════════════════════════════════
+function propagatePrepComposite_(ss, oldCode, newCode) {
+  const m = ss.getSheetByName('仕込みマスタ');
+  if (!m || m.getLastRow() < 2) return 0;
+  const oc = String(Number(oldCode)), ncode = String(Number(newCode));
+  if (oc === 'NaN' || ncode === 'NaN' || oc === '' || ncode === '') return 0;
+  const lr = m.getLastRow();
+  const gVals = m.getRange(2, 7, lr - 1, 1).getValues();  // G列 合算コード
+  let changed = 0;
+  for (let i = 0; i < gVals.length; i++) {
+    const raw = String(gVals[i][0] || '').trim();
+    if (!raw || raw.indexOf('+') < 0 && String(Number(raw)) !== oc) continue;  // 合算(＋)か、単体でも旧コードなら対象
+    const parts = raw.split('+').map(x => x.trim()).filter(x => x);
+    let hit = false;
+    const out = parts.map(p => { if (String(Number(p)) === oc) { hit = true; return ncode; } return p; });
+    if (!hit) continue;
+    // 新コードが既に含まれていた場合の二重を防ぐ（順序維持で一意化）
+    const seen = {}, uniq = [];
+    out.forEach(p => { const k = String(Number(p)); if (k === 'NaN' || seen[k]) return; seen[k] = true; uniq.push(p); });
+    m.getRange(i + 2, 7).setValue(uniq.join('+'));
+    changed++;
+  }
+  return changed;
+}
+
+// 過去に完了した切替で、仕込みマスタの合算コードが旧コードのまま残っているのを一括修復する（冪等）。MARKER_FOODSWITCH_PREP
+//   食材マスタのL列(旧コード)→A列(新コード)を対応させ、旧コードが発注終了(=切替完了)なら仕込み合算コードを新へ置換。
+//   クロ・バラ(612087+612089+612047→612102)のような取り残しをまとめて直し、トレンドを再計算する。
+function repairPrepCompositesFromSwitches_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const m = ss.getSheetByName('食材マスタ');
+  if (!m || m.getLastRow() < 2) return { pairs: 0, changed: 0, lines: [] };
+  const mVals = m.getRange(2, 1, m.getLastRow() - 1, 14).getValues();
+  const catByCode = {};
+  mVals.forEach(r => { if (r[0] === '' || r[0] === null) return; catByCode[String(Number(r[0]))] = String(r[2]).trim(); });
+  const lines = []; let changed = 0, pairs = 0;
+  mVals.forEach(r => {
+    const oldCode = String(r[11] || '').trim();
+    if (!oldCode) return;
+    const oc = String(Number(oldCode)), nc2 = String(Number(r[0]));
+    if (oc === 'NaN' || nc2 === 'NaN') return;
+    if (catByCode[oc] !== '発注終了') return;   // 旧コードがまだ生きている＝切替未完了→触らない
+    pairs++;
+    const n = propagatePrepComposite_(ss, Number(oldCode), Number(r[0]));
+    if (n > 0) { changed += n; lines.push(oc + '→' + nc2 + '（' + r[1] + '）：仕込み合算コード' + n + '件'); }
+  });
+  if (changed > 0) {
+    try { const cp = buildIngredientDailyUsage(); saveCpSubtractMap_(cp); } catch(e) { console.log('使用量再計算スキップ: ' + e.message); }
+    try { buildTrendHistoryAverages_(); } catch(e) { console.log('トレンド再計算スキップ: ' + e.message); }
+  }
+  return { pairs: pairs, changed: changed, lines: lines };
+}
+
+// メニュー：仕込みマスタの取り残し合算コードを一括修復→そのまま整合性チェックも走らせて結果を更新
+function repairPrepComposites() {
+  const r = repairPrepCompositesFromSwitches_();
+  const ui = SpreadsheetApp.getUi();
+  try { runIntegrityAudit_(); } catch(e) { console.log('整合性チェック再実行スキップ: ' + e.message); }
+  if (r.changed > 0) ui.alert('仕込みマスタの合算コードを修復しました',
+    r.lines.join('\n') + '\n\nトレンドを再計算し、整合性チェックも更新しました。仕込み量が正しく戻ります。', ui.ButtonSet.OK);
+  else ui.alert('修復対象なし',
+    '仕込みマスタの合算コードに、切替後の取り残し（旧コード参照）はありませんでした。', ui.ButtonSet.OK);
 }
 
 // 過去の切替で商品マスタの自動計算列(F〜K・N)にベタ値が入りスピルが#REF!になったのを直す。
