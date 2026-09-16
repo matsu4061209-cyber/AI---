@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<base target="_top">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap">
+<style>
+  :root{
+    --bg:#F4F5F3;
+    --surface:#FFFFFF;
+    --surface-2:#EFF0ED;
+    --text:#23211E;
+    --text-muted:#726E67;
+    --line:#DDD9D2;
+    --accent:#E8501C;
+    --accent-ink:#FFFFFF;
+    --accent-tint:#FBE4D8;
+    --ok:#2F7D5E;
+    --ok-bg:#E4F1EA;
+    --sun-holiday:#C8333F;
+    --sat:#2A6FB0;
+    --clear-bg:#F6E4E1;
+    --clear-border:#D89A91;
+    --clear-text:#A8452F;
+    --shadow: 0 1px 2px rgba(35,33,30,0.06), 0 4px 14px rgba(35,33,30,0.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#181715; --surface:#221F1C; --surface-2:#2A2723;
+      --text:#F3F1EC; --text-muted:#A8A39A; --line:#3A362F;
+      --accent:#FF7043; --accent-ink:#1A0E08; --accent-tint:#3A2418;
+      --ok:#57BB8E; --ok-bg:#1E3128;
+      --sun-holiday:#E5707A; --sat:#6FA3D8;
+      --clear-bg:#3A2420; --clear-border:#6B392E; --clear-text:#E5897A;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 6px 20px rgba(0,0,0,0.35);
+    }
+  }
+
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:"Noto Sans JP","Hiragino Sans","Hiragino Kaku Gothic ProN",Meiryo,sans-serif;
+    font-size:14px;
+    padding-inline:16px; padding-block:0 32px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .eyebrow{
+    font-family:"Barlow Condensed",sans-serif; font-weight:600;
+    letter-spacing:.14em; text-transform:uppercase; font-size:12px; color:var(--accent);
+  }
+  h1,h2,h3{ text-wrap:balance; margin:0; }
+  main{ max-width:480px; margin-inline:auto; }
+  [hidden]{ display:none !important; }
+
+
+  /* ================= SCREEN 1: name ================= */
+  .name-screen{
+    min-height:82vh; display:flex; flex-direction:column; justify-content:center;
+    gap:22px; padding-block:24px;
+  }
+  .name-screen .board-head{ text-align:center; align-items:center; }
+  .name-screen h1{ font-size:23px; font-weight:700; }
+  .name-screen .meta{ color:var(--text-muted); font-size:13.5px; line-height:1.7; }
+  select.name-select{
+    font-family:inherit; font-size:16px; font-weight:500; color:var(--text);
+    background:var(--surface); border:1px solid var(--line); border-radius:10px;
+    padding:13px 12px; width:100%;
+  }
+
+  /* ================= shared bits ================= */
+  .board-head{ padding-block:18px 12px; display:flex; flex-direction:column; gap:6px; }
+  .board-head h1{ font-size:21px; font-weight:700; }
+  .board-head .meta{ color:var(--text-muted); font-size:13px; line-height:1.6; }
+  .deadline{
+    display:inline-flex; align-items:baseline; gap:6px;
+    background:var(--surface-2); border-radius:8px; padding:6px 10px;
+    margin-top:4px; width:fit-content; font-size:13px; color:var(--text);
+  }
+  .deadline b{ font-family:"Barlow Condensed",sans-serif; font-weight:700; color:var(--accent); font-size:15px; }
+
+  .staff-bar{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    background:var(--surface); border:1px solid var(--line); border-radius:10px;
+    padding:10px 12px; margin-block-end:14px;
+  }
+  .staff-bar .s-name{ font-weight:700; font-size:15px; }
+  .staff-bar .s-name span{ color:var(--text-muted); font-weight:400; font-size:12px; display:block; }
+  .staff-bar button{
+    font-size:12.5px; color:var(--accent); background:none; border:none; text-decoration:underline;
+    cursor:pointer; font-family:inherit;
+  }
+
+  button.submit{
+    width:100%; padding:14px; border:none; border-radius:10px;
+    background:var(--accent); color:var(--accent-ink);
+    font-family:"Barlow Condensed","Noto Sans JP",sans-serif; font-weight:700; font-size:17px; letter-spacing:.03em;
+    cursor:pointer;
+  }
+  button.submit:active{ transform: translateY(1px); }
+  button.submit:disabled{ opacity:.4; cursor:not-allowed; }
+  button.ghost{
+    padding:12px; border-radius:10px; border:1px solid var(--line);
+    background:var(--surface); color:var(--text);
+    font-family:"Barlow Condensed","Noto Sans JP",sans-serif; font-weight:600; font-size:15px; cursor:pointer;
+  }
+  button.ghost:disabled{ opacity:.4; cursor:not-allowed; }
+
+  /* ================= grid ================= */
+  .grid-wrap{ overflow-x:auto; padding-block:4px; }
+  .grid-table{ width:100%; border-collapse:separate; border-spacing:2px; table-layout:fixed; }
+  .grid-table th{
+    font-family:"Barlow Condensed","Noto Sans JP",sans-serif; font-weight:700; font-size:12px;
+    color:var(--text-muted); padding-block:2px 5px;
+  }
+  .grid-table th.dow-sat{ color:var(--sat); }
+  .grid-table th.dow-sun{ color:var(--sun-holiday); }
+  .grid-cell{
+    width:100%; min-height:44px; border-radius:7px; border:1px solid var(--line);
+    background:var(--surface); cursor:pointer; padding:3px 1px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px;
+  }
+  .grid-cell .g-date{ font-family:"Barlow Condensed",sans-serif; font-weight:600; font-size:12px; color:var(--text); }
+  .grid-cell .g-date.dow-sat{ color:var(--sat); }
+  .grid-cell .g-date.dow-sun{ color:var(--sun-holiday); }
+  .grid-cell .g-time{ font-size:7.5px; color:var(--ok); font-weight:600; line-height:1.1; }
+  .grid-cell[data-assigned="true"]{ background:var(--ok-bg); border-color:var(--ok); }
+  .grid-cell[data-pending="true"]{ outline:2px solid var(--accent); outline-offset:-1px; background:var(--accent-tint); }
+  .grid-cell[data-pending="true"] .g-date{ color:var(--accent); }
+
+  .selection-note{ font-size:12.5px; color:var(--text-muted); padding-block:10px 4px; text-align:center; }
+  .selection-note b{ color:var(--accent); }
+  .selection-note .warn{ color:var(--clear-text); font-weight:600; }
+
+  .totals{
+    background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:12px 14px; margin-block-start:8px; display:flex; flex-direction:column; gap:8px;
+  }
+  .totals-main{ display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .totals-main .t-label{ font-size:12.5px; color:var(--text-muted); margin-right:auto; }
+  .totals-main b{
+    font-family:"Barlow Condensed","Noto Sans JP",sans-serif; font-weight:700; font-size:20px;
+    font-variant-numeric:tabular-nums; color:var(--text);
+  }
+  .totals-main b small{ font-family:"Noto Sans JP",sans-serif; font-size:12px; font-weight:500; margin-left:2px; color:var(--text-muted); }
+  .totals-periods{ display:flex; align-items:baseline; gap:6px 16px; flex-wrap:wrap; justify-content:flex-end; }
+  .totals-period{ font-size:13px; color:var(--text-muted); white-space:nowrap; }
+  .confirm-total .totals-periods{ justify-content:center; margin-top:4px; }
+  .confirm-total .totals-period b small{ display:inline; font-size:12px; margin:0 0 0 1px; }
+
+  .time-panel{
+    background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:14px; margin-block-start:6px; display:flex; flex-direction:column; gap:10px;
+  }
+  .time-panel .field-label{ font-size:13px; font-weight:500; color:var(--text-muted); }
+  .time-row{ display:flex; align-items:center; gap:8px; }
+  select.time-select{
+    font-family:inherit; font-size:15px; color:var(--text);
+    background:var(--surface-2); border:1px solid var(--line); border-radius:9px;
+    padding:11px 12px; flex:1;
+  }
+  .time-pair{ display:flex; gap:4px; flex:1; min-width:0; }
+  .time-pair select.time-select{ min-width:0; padding:11px 6px; }
+  .time-row .dash{ color:var(--text-muted); font-family:"Barlow Condensed",sans-serif; font-weight:600; }
+  .time-actions{ display:flex; gap:8px; }
+  .time-actions button.ghost{ flex:1; }
+  .time-actions button.submit{ flex:2; padding:12px; font-size:15px; }
+  button.ghost.danger{
+    background:var(--clear-bg); border-color:var(--clear-border); color:var(--clear-text);
+  }
+
+  .week-notes{ display:flex; flex-direction:column; gap:10px; margin-block-start:20px; }
+  .week-note-row{ display:flex; flex-direction:column; gap:4px; }
+  .week-note-row label{ font-size:12.5px; color:var(--text-muted); }
+  .week-note-row textarea{
+    font-family:inherit; font-size:14px; color:var(--text);
+    background:var(--surface); border:1px solid var(--line); border-radius:9px;
+    padding:9px 11px; min-height:44px; resize:vertical;
+  }
+  .notes-hint{
+    font-size:12px; color:var(--text-muted); background:var(--surface-2);
+    border-radius:8px; padding:7px 10px; line-height:1.55;
+  }
+  .note-chips{ display:flex; flex-wrap:wrap; gap:6px; }
+  .note-chip{
+    font-family:inherit; font-size:12.5px; color:var(--text);
+    background:var(--surface); border:1px solid var(--line); border-radius:999px;
+    padding:7px 11px; cursor:pointer;
+  }
+  .note-chip[aria-pressed="true"]{
+    background:var(--accent-tint); border-color:var(--accent); color:var(--accent); font-weight:600;
+  }
+
+  .submit-bar{ padding-block:16px 4px; margin-block-start:22px; display:flex; flex-direction:column; gap:10px; }
+  .is-loading{ opacity:.45; pointer-events:none; }
+  .deadline.past b{ color:var(--clear-text); }
+  .send-error{
+    background:var(--clear-bg); border:1px solid var(--clear-border); color:var(--clear-text);
+    border-radius:9px; padding:9px 11px; font-size:13px; line-height:1.55;
+  }
+
+  /* ================= confirm panel ================= */
+  .confirm-panel{ display:flex; flex-direction:column; gap:16px; padding-block:22px; }
+  .confirm-badge{
+    width:52px; height:52px; border-radius:50%; background:var(--ok-bg); color:var(--ok);
+    display:flex; align-items:center; justify-content:center; font-size:26px; margin-inline:auto;
+  }
+  .confirm-panel h2{ text-align:center; font-size:19px; }
+  .confirm-panel p.sub{ text-align:center; color:var(--text-muted); font-size:14px; margin:0; }
+  .confirm-total{
+    text-align:center; font-size:14px; background:var(--surface); border:1px solid var(--line);
+    border-radius:11px; padding:10px 12px; font-variant-numeric:tabular-nums;
+  }
+  .confirm-total b{ font-size:16px; }
+  .confirm-total small{ display:block; font-size:11px; color:var(--text-muted); margin-top:2px; }
+  .confirm-week{
+    background:var(--surface); border:1px solid var(--line); border-radius:11px; padding:12px 14px;
+    display:flex; flex-direction:column; gap:7px;
+  }
+  .confirm-week h3{ font-size:13px; font-family:"Barlow Condensed","Noto Sans JP",sans-serif; letter-spacing:.03em; }
+  .confirm-week h3 span{ color:var(--text-muted); font-weight:500; font-size:11px; margin-left:6px; }
+  .confirm-day-row{ display:flex; justify-content:space-between; font-size:13px; }
+  .confirm-day-row .cd-day{ color:var(--text-muted); }
+  .confirm-day-row .cd-val{ font-weight:600; }
+  .confirm-day-row .cd-val.off{ color:var(--text-muted); font-weight:400; }
+  .confirm-note{ font-size:12px; color:var(--text-muted); border-top:1px dashed var(--line); padding-top:7px; margin-top:2px; }
+  .edit-link{
+    text-align:center; font-size:13px; color:var(--accent); text-decoration:underline;
+    background:none; border:none; cursor:pointer; font-family:inherit; padding:8px;
+  }
+</style>
+</head>
+<body>
+<main data-build="SHIFT_REQ_LIVE_V9">
+
+  <!-- ============ 募集していない時 ============ -->
+  <section class="name-screen" id="screenClosed" hidden>
+    <div class="board-head">
+      <div class="eyebrow">Shift Request</div>
+      <h1 class="store-title">シフト希望</h1>
+      <div class="meta">現在、シフト希望の募集はありません。</div>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN 1: NAME ============ -->
+  <section class="name-screen" id="screenName">
+    <div class="board-head">
+      <div class="eyebrow">Shift Request</div>
+      <h1 class="store-title">シフト希望</h1>
+      <div class="meta">自分の名前以外は選択しないでください。</div>
+    </div>
+    <div class="field-group">
+      <select class="name-select" id="nameSelect">
+        <option value="" disabled selected>名前を選択</option>
+      </select>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN 2: GRID ============ -->
+  <section id="screenGrid" hidden>
+    <div class="board-head">
+      <div class="eyebrow">Shift Request</div>
+      <h1>シフト希望</h1>
+      <div class="deadline" id="deadlineBox">回答締切 <b id="deadlineText"></b></div>
+    </div>
+    <div class="staff-bar">
+      <div class="s-name"><span>回答者</span><span id="staffNameDisplay"></span></div>
+      <button type="button" id="changeNameBtn">名前を変更</button>
+    </div>
+
+    <div class="grid-wrap">
+      <table class="grid-table" id="gridTable"></table>
+    </div>
+
+    <div class="totals" id="totals">
+      <div class="totals-main">
+        <span class="t-label" id="totalsLabel">合計（参考）</span>
+        <b id="totalDays">0<small>日</small></b>
+        <span class="totals-periods" id="totalsPeriods" hidden></span>
+      </div>
+    </div>
+
+    <div class="selection-note" id="selectionNote"></div>
+
+    <div class="time-panel">
+      <label class="field-label">選択したマスの時間</label>
+      <div class="time-row">
+        <div class="time-pair">
+          <select class="time-select" id="gStartH" aria-label="出勤（時）"></select>
+          <select class="time-select" id="gStartM" aria-label="出勤（分）"></select>
+        </div>
+        <span class="dash">〜</span>
+        <div class="time-pair">
+          <select class="time-select" id="gEndH" aria-label="退勤（時）"></select>
+          <select class="time-select" id="gEndM" aria-label="退勤（分）"></select>
+        </div>
+      </div>
+      <div class="time-actions">
+        <button type="button" class="ghost danger" id="clearBtn" disabled>選択したマスを未回答に戻す</button>
+        <button type="button" class="submit" id="confirmBtn" disabled>この時間で確定</button>
+      </div>
+    </div>
+
+    <div class="week-notes" id="weekNotes"></div>
+
+    <div class="submit-bar">
+      <div class="send-error" id="sendError" role="alert" hidden></div>
+      <button class="submit" id="sendBtn">希望を送信</button>
+    </div>
+
+    <div class="confirm-panel" id="confirmPanel" hidden></div>
+  </section>
+
+</main>
+
+<script>
+  // 募集期間・締切・名簿・祝日は、Code.js がシフト表から読んで渡す
+  var CONFIG = <?!= configJson ?>;
+</script>
+<script>
+(function(){
+  // 見出しの店舗名は、シフト表の設定から受け取る
+  Array.prototype.forEach.call(document.querySelectorAll('.store-title'), function(h){
+    h.innerHTML = (CONFIG.storeName ? escapeHtml(CONFIG.storeName) + '<br>' : '') + 'シフト希望';
+  });
+
+  if (CONFIG.closed) {
+    document.getElementById('screenName').hidden = true;
+    document.getElementById('screenClosed').hidden = false;
+    return;
+  }
+
+  var STAFF = CONFIG.staff;
+  var DOW = ['月','火','水','木','金','土','日'];
+
+  var startParts = CONFIG.startDate.split('-').map(Number);
+  var weeks = buildWeeks(new Date(startParts[0], startParts[1] - 1, startParts[2]), CONFIG.weekCount);
+  if (CONFIG.deadline) {
+    document.getElementById('deadlineText').textContent = CONFIG.deadline + (CONFIG.pastDeadline ? '（締切を過ぎています）' : '');
+    if (CONFIG.pastDeadline) document.getElementById('deadlineBox').classList.add('past');
+  } else {
+    document.getElementById('deadlineBox').hidden = true;
+  }
+
+  var HOLIDAYS = CONFIG.holidays;
+  function isHoliday(m, d){ return HOLIDAYS.indexOf(m + '-' + d) !== -1; }
+
+  /* ---- 誰の端末から入力されたかの記録用 ---- */
+  function newDeviceId(){
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  }
+  // 同じスマホなら毎回同じ番号になるよう、スマホの中に保存しておく
+  var DEVICE_ID = (function(){
+    var KEY = 'shiftRequestDeviceId';
+    try {
+      var saved = localStorage.getItem(KEY);
+      if (saved) return saved;
+      var created = newDeviceId();
+      localStorage.setItem(KEY, created);
+      return created;
+    } catch (e) {
+      return newDeviceId();
+    }
+  })();
+
+  // IPアドレスはGASでは分からないため、外部の確認サービスに問い合わせる（取れなければ空欄）
+  var ipPromise = fetch('https://api.ipify.org?format=json', { cache: 'no-store' })
+    .then(function(r){ return r.json(); })
+    .then(function(j){ return j.ip || ''; })
+    .catch(function(){ return ''; });
+
+  // 例：「Android 16 SCG20・LINE」「iPhone iOS 18.1・Safari」。同じスマホでもアプリが違うと端末IDが別になるため、開いたアプリも付ける
+  function deviceModel(){
+    var ua = navigator.userAgent, m, model;
+    if (/iPhone/.test(ua)){ m = /OS (\d+)[_.](\d+)/.exec(ua); model = 'iPhone' + (m ? ' iOS ' + m[1] + '.' + m[2] : ''); }
+    else if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) model = 'iPad';
+    else if (/Android/.test(ua)){ m = /Android ([\d.]+);\s*([^;)]+?)(?:\s+Build\/[^;)]*)?[;)]/.exec(ua); model = 'Android' + (m ? ' ' + m[1] + ' ' + m[2].trim() : ''); }
+    else if (/Windows/.test(ua)) model = 'パソコン（Windows）';
+    else if (/Macintosh/.test(ua)) model = 'パソコン（Mac）';
+    else model = 'その他';
+
+    var app = /Line\//.test(ua) ? 'LINE'
+      : /Instagram/.test(ua) ? 'Instagram'
+      : /CriOS|Chrome\//.test(ua) ? 'Chrome'
+      : /FxiOS|Firefox\//.test(ua) ? 'Firefox'
+      : /Safari\//.test(ua) ? 'Safari' : '';
+    return model + (app ? '・' + app : '');
+  }
+
+  // IPの問い合わせは最大3秒だけ待つ
+  function deviceInfo(){
+    var timeout = new Promise(function(resolve){ setTimeout(function(){ resolve(''); }, 3000); });
+    return Promise.race([ipPromise, timeout]).then(function(ip){
+      return { deviceId: DEVICE_ID, ip: ip, model: deviceModel(), ua: navigator.userAgent };
+    });
+  }
+
+  // 操作を記録する（画面はすぐ進め、記録は裏で送る）
+  function logEvent(action, name){
+    deviceInfo().then(function(info){
+      info.action = action;
+      info.name = name || '';
+      google.script.run.logEvent(info);
+    });
+  }
+  logEvent('open');
+
+  var SELECTION_HINT = '出勤できる同じ時間のマスをタップして選択 →下の時間を選んで「この時間で確定」';
+
+  function buildWeeks(startMonday, count){
+    var out = [];
+    for (var w = 0; w < count; w++){
+      var days = [];
+      for (var d = 0; d < 7; d++){
+        var dt = new Date(startMonday.getTime());
+        dt.setDate(dt.getDate() + w * 7 + d);
+        days.push({ m: dt.getMonth() + 1, d: dt.getDate(), ymd: dt.getFullYear() + '-' + ('0' + (dt.getMonth() + 1)).slice(-2) + '-' + ('0' + dt.getDate()).slice(-2) });
+      }
+      out.push({
+        label: (w + 1) + '週',
+        range: days[0].m + '/' + days[0].d + '〜' + days[6].m + '/' + days[6].d,
+        days: days
+      });
+    }
+    return out;
+  }
+
+  // 時と分(00/30)を分けて選ぶ。出勤は9時〜19時台、退勤は12時〜21:30
+  var START_HOURS = CONFIG.startHours;
+  var END_HOURS = CONFIG.endHours;
+
+  function hourOptions(isEnd, selectedHour){
+    var range = isEnd ? END_HOURS : START_HOURS;
+    var out = '';
+    for (var h = range.first; h <= range.last; h++){
+      out += '<option value="' + h + '"' + (h === selectedHour ? ' selected' : '') + '>' + h + '時</option>';
+    }
+    return out;
+  }
+
+  // 退勤の21時は21:30だけ（21:00はなし）
+  function minuteOptions(isEnd, hour, selectedMinute){
+    var mins = (isEnd && hour === END_HOURS.last) ? ['30'] : ['00', '30'];
+    return mins.map(function(m){
+      return '<option value="' + m + '"' + (m === selectedMinute ? ' selected' : '') + '>' + m + '分</option>';
+    }).join('');
+  }
+
+  function setupTimePicker(prefix, isEnd, hour, minute){
+    var hSel = document.getElementById(prefix + 'H'), mSel = document.getElementById(prefix + 'M');
+    hSel.innerHTML = hourOptions(isEnd, hour);
+    mSel.innerHTML = minuteOptions(isEnd, hour, minute);
+    // 時を変えたら分は「00分」に戻す（21時台の退勤だけは30分）
+    hSel.addEventListener('change', function(){
+      mSel.innerHTML = minuteOptions(isEnd, Number(hSel.value), '00');
+    });
+  }
+
+  function pickedTime(prefix){
+    return String(document.getElementById(prefix + 'H').value).padStart(2, '0') + ':' + document.getElementById(prefix + 'M').value;
+  }
+
+  function toMinutes(t){
+    var p = t.split(':');
+    return Number(p[0]) * 60 + Number(p[1]);
+  }
+
+  function formatHours(minutes){
+    return String(Math.round(minutes / 60 * 100) / 100);
+  }
+
+  // 週ごと（w を指定）または全体（w を省略）の日数と時間(分)
+  function sumAssigned(w){
+    var days = 0, minutes = 0;
+    Object.keys(assigned).forEach(function(key){
+      if (w !== undefined && key.split('-')[0] !== String(w)) return;
+      days++;
+      minutes += toMinutes(assigned[key].e) - toMinutes(assigned[key].s);
+    });
+    return { days: days, minutes: minutes };
+  }
+
+  // 締め期間（店長・社員は16日〜翌15日、キャストは21日〜翌20日など）。名前を選ぶと Code.js から受け取る。
+  // fixedDays は表に無い日（募集より前の決まっているシフト）の出勤日数、days は締め期間ぜんぶの日数。
+  // SHOW_OFF が true（店長・社員）なら休日日数＝締め期間の日数−出勤日数を出す
+  var PERIODS = [], SHOW_OFF = false;
+  function workDays(p){
+    var days = p.fixedDays;
+    Object.keys(assigned).forEach(function(key){
+      var k = key.split('-').map(Number);
+      var ymd = weeks[k[0]].days[k[1]].ymd;
+      if (ymd >= p.start && ymd <= p.end) days++;
+    });
+    return days;
+  }
+  function totalsLabelText(){
+    return PERIODS.length ? (SHOW_OFF ? '休日合計（参考）' : '出勤合計（参考）') : '合計（参考）';
+  }
+  // 例：「10月〆 22日」「11月〆 5日」
+  function periodRowsHtml(){
+    return PERIODS.map(function(p){
+      var n = SHOW_OFF ? p.days - workDays(p) : workDays(p);
+      return '<span class="totals-period">' + escapeHtml(p.label) + ' <b>' + n + '<small>日</small></b></span>';
+    }).join('');
+  }
+
+  function escapeHtml(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  /* ---- screen 1 ---- */
+  var nameSelect = document.getElementById('nameSelect');
+  STAFF.forEach(function(n){ var o = document.createElement('option'); o.textContent = n; nameSelect.appendChild(o); });
+
+  nameSelect.addEventListener('change', function(){
+    if (!nameSelect.value) return;
+    var selectedName = nameSelect.value;
+    document.getElementById('staffNameDisplay').textContent = selectedName;
+    logEvent('select', selectedName);
+    document.getElementById('screenName').hidden = true;
+    document.getElementById('screenGrid').hidden = false;
+    window.scrollTo(0, 0);
+    loadRequests(selectedName);
+  });
+  document.getElementById('changeNameBtn').addEventListener('click', function(){
+    logEvent('change', document.getElementById('staffNameDisplay').textContent);
+    loadedName = '';
+    resetForm();
+    nameSelect.value = '';
+    document.getElementById('screenGrid').hidden = true;
+    document.getElementById('screenName').hidden = false;
+  });
+
+  /* ---- screen 2: grid ---- */
+  var assigned = {};          // "w-d" -> {s,e}
+  var pending = new Set();    // "w-d" 選択中（まだ時間を確定していない）
+  var dirtyWeeks = new Set(); // 内容を変えた週（送信の時、この週だけシフト表に書き込む）
+
+  var gridTable = document.getElementById('gridTable');
+  function buildGrid(){
+    var thead = '<tr>' + DOW.map(function(dow, i){
+      var cls = i === 5 ? 'dow-sat' : (i === 6 ? 'dow-sun' : '');
+      return '<th class="' + cls + '">' + dow + '</th>';
+    }).join('') + '</tr>';
+
+    var rows = weeks.map(function(week, w){
+      var cells = week.days.map(function(day, d){
+        var dateCls = d === 5 ? 'dow-sat' : ((d === 6 || isHoliday(day.m, day.d)) ? 'dow-sun' : '');
+        return '<td><button type="button" class="grid-cell" data-w="' + w + '" data-d="' + d + '">' +
+          '<span class="g-date ' + dateCls + '">' + day.m + '/' + day.d + '</span><span class="g-time"></span>' +
+          '</button></td>';
+      }).join('');
+      return '<tr>' + cells + '</tr>';
+    }).join('');
+
+    gridTable.innerHTML = thead + rows;
+  }
+  buildGrid();
+
+  function cellKey(w, d){ return w + '-' + d; }
+
+  function refreshCell(w, d){
+    var btn = gridTable.querySelector('.grid-cell[data-w="' + w + '"][data-d="' + d + '"]');
+    var key = cellKey(w, d);
+    var timeEl = btn.querySelector('.g-time');
+    if (assigned[key]){
+      btn.setAttribute('data-assigned', 'true');
+      timeEl.textContent = assigned[key].s + '-' + assigned[key].e;
+    } else {
+      btn.removeAttribute('data-assigned');
+      timeEl.textContent = '';
+    }
+    btn.setAttribute('data-pending', pending.has(key) ? 'true' : 'false');
+  }
+  weeks.forEach(function(week, w){ week.days.forEach(function(day, d){ refreshCell(w, d); }); });
+
+  function refreshSelectionUI(){
+    var n = pending.size;
+    document.getElementById('confirmBtn').disabled = n === 0;
+    document.getElementById('clearBtn').disabled = n === 0;
+    document.getElementById('selectionNote').innerHTML = n === 0
+      ? SELECTION_HINT
+      : '<b>' + n + 'マス</b>選択中。下の時間を選んで確定してください';
+  }
+  refreshSelectionUI();
+
+  function refreshTotals(){
+    var byPeriod = PERIODS.length > 0;   // 名前の読み込みが済んだら、締め期間ごとの日数にする
+    document.getElementById('totalsLabel').textContent = totalsLabelText();
+    var daysEl = document.getElementById('totalDays');
+    daysEl.hidden = byPeriod;
+    daysEl.innerHTML = sumAssigned().days + '<small>日</small>';
+    document.getElementById('totalsPeriods').hidden = !byPeriod;
+    document.getElementById('totalsPeriods').innerHTML = periodRowsHtml();
+  }
+  refreshTotals();
+
+  gridTable.addEventListener('click', function(e){
+    var btn = e.target.closest('.grid-cell');
+    if (!btn) return;
+    var w = Number(btn.getAttribute('data-w')), d = Number(btn.getAttribute('data-d'));
+    var key = cellKey(w, d);
+    if (pending.has(key)) pending.delete(key); else pending.add(key);
+    refreshCell(w, d);
+    refreshSelectionUI();
+  });
+
+  setupTimePicker('gStart', false, 9, '00');
+  setupTimePicker('gEnd', true, 21, '30');
+
+  // 確定・未回答に戻すの後は、選択を解除した状態に戻す
+  function applyToPending(action){
+    if (pending.size === 0) return;
+    var keys = Array.from(pending);
+    pending.clear();
+    keys.forEach(function(key){
+      action(key);
+      var parts = key.split('-');
+      dirtyWeeks.add(Number(parts[0]));
+      refreshCell(Number(parts[0]), Number(parts[1]));
+    });
+    refreshSelectionUI();
+    refreshTotals();
+  }
+
+  document.getElementById('confirmBtn').addEventListener('click', function(){
+    var s = pickedTime('gStart'), en = pickedTime('gEnd');
+    if (toMinutes(en) <= toMinutes(s)){
+      document.getElementById('selectionNote').innerHTML =
+        '<span class="warn">退勤は出勤より後の時間を選んでください</span>';
+      return;
+    }
+    applyToPending(function(key){ assigned[key] = { s: s, e: en }; });
+  });
+
+  document.getElementById('clearBtn').addEventListener('click', function(){
+    applyToPending(function(key){ delete assigned[key]; });
+  });
+
+  /* ---- 週ごとの備考 ---- */
+  // 備考で選べる項目（1週につき1つ）。選択に加えて、下の欄に手入力・音声入力もできる
+  var NOTE_CHOICES = CONFIG.noteChoices;
+
+  var weekNotesEl = document.getElementById('weekNotes');
+  weekNotesEl.innerHTML = '<div class="notes-hint">備考は当てはまる項目を1つタップ（もう一度押すと解除）。文字の欄は、キーボードのマイクボタンを押すと話して入力できます。</div>';
+  weeks.forEach(function(week, w){
+    var row = document.createElement('div');
+    row.className = 'week-note-row';
+    row.innerHTML = '<label for="note-' + w + '">' + week.label + '（' + week.range + '）の備考(任意)</label>' +
+      '<div class="note-chips" id="chips-' + w + '">' + NOTE_CHOICES.map(function(c){
+        return '<button type="button" class="note-chip" aria-pressed="false">' + c + '</button>';
+      }).join('') + '</div>' +
+      '<textarea id="note-' + w + '" placeholder="その他（手入力・音声入力）"></textarea>';
+    weekNotesEl.appendChild(row);
+  });
+  weekNotesEl.addEventListener('click', function(e){
+    var chip = e.target.closest('.note-chip');
+    if (!chip) return;
+    // 1週につき1つだけ選べる。選択中をもう一度押すと解除
+    var w = Number(chip.parentNode.id.replace('chips-', ''));
+    setChosenNote(w, chip.getAttribute('aria-pressed') === 'true' ? '' : chip.textContent);
+    dirtyWeeks.add(w);
+  });
+  weekNotesEl.addEventListener('input', function(e){
+    if (e.target.id && e.target.id.indexOf('note-') === 0) dirtyWeeks.add(Number(e.target.id.replace('note-', '')));
+  });
+
+  function chosenNote(w){
+    var chip = document.querySelector('#chips-' + w + ' .note-chip[aria-pressed="true"]');
+    return chip ? chip.textContent : '';
+  }
+
+  function setChosenNote(w, choice){
+    Array.from(document.getElementById('chips-' + w).children).forEach(function(c){
+      c.setAttribute('aria-pressed', c.textContent === choice ? 'true' : 'false');
+    });
+  }
+
+  // GASから届くエラー文は先頭に「Error:」が付くので外す
+  function gasMessage(err){
+    return (err && err.message) ? String(err.message).replace(/^(Exception|Error):\s*/, '') : '電波の良い所でもう一度試してください。';
+  }
+
+  /* ---- 今の内容の読み込み（シフト表に入っている時間、シートが無い週は前に送った希望） ---- */
+  var loadedName = '';
+
+  function setLoading(on){
+    [document.querySelector('.grid-wrap'), document.querySelector('.time-panel'), weekNotesEl, document.querySelector('#screenGrid .submit-bar')]
+      .forEach(function(el){ el.classList.toggle('is-loading', on); });
+  }
+
+  function resetForm(){
+    assigned = {};
+    PERIODS = [];
+    SHOW_OFF = false;
+    pending.clear();
+    dirtyWeeks.clear();
+    weeks.forEach(function(week, w){
+      setChosenNote(w, '');
+      document.getElementById('note-' + w).value = '';
+      week.days.forEach(function(day, d){ refreshCell(w, d); });
+    });
+    document.getElementById('confirmPanel').hidden = true;
+    gridParts().forEach(function(el){ el.hidden = false; });
+    document.getElementById('sendError').hidden = true;
+    refreshSelectionUI();
+    refreshTotals();
+  }
+
+  function loadRequests(name){
+    resetForm();
+    loadedName = name;
+    setLoading(true);
+    document.getElementById('selectionNote').textContent = '今の内容を読み込み中…';
+    deviceInfo().then(function(info){
+      google.script.run
+        .withSuccessHandler(function(res){
+          if (loadedName !== name) return; // 読み込み中に名前を変えた場合は使わない
+          PERIODS = (res.totals && res.totals.periods) || [];
+          SHOW_OFF = !!(res.totals && res.totals.showOff);
+          res.weeks.forEach(function(week, w){
+            Object.keys(week.shifts).forEach(function(d){
+              assigned[cellKey(w, d)] = week.shifts[d];
+              refreshCell(w, Number(d));
+            });
+            setChosenNote(w, week.note.choice);
+            document.getElementById('note-' + w).value = week.note.text;
+          });
+          setLoading(false);
+          refreshSelectionUI();
+          refreshTotals();
+        })
+        .withFailureHandler(function(err){
+          if (loadedName !== name) return;
+          document.getElementById('selectionNote').innerHTML =
+            '<span class="warn">' + escapeHtml('読み込めませんでした。' + gasMessage(err)) + '</span>';
+        })
+        .getMyRequests({ name: name, deviceId: info.deviceId, startDate: CONFIG.startDate });
+    });
+  }
+
+  /* ---- 送信 ---- */
+  var gridParts = function(){
+    return [document.querySelector('.grid-wrap'), document.getElementById('totals'), document.getElementById('selectionNote'),
+            document.querySelector('.time-panel'), weekNotesEl, document.querySelector('#screenGrid .submit-bar')];
+  };
+
+  var sendBtn = document.getElementById('sendBtn');
+  var sendError = document.getElementById('sendError');
+
+  sendBtn.addEventListener('click', function(){
+    var name = document.getElementById('staffNameDisplay').textContent;
+    var payload = {
+      name: name,
+      startDate: CONFIG.startDate,
+      dirtyWeeks: Array.from(dirtyWeeks),
+      days: assigned,
+      notes: weeks.map(function(week, w){
+        return { choice: chosenNote(w), text: document.getElementById('note-' + w).value.trim() };
+      })
+    };
+
+    sendBtn.disabled = true;
+    sendBtn.textContent = '送信中…';
+    sendError.hidden = true;
+
+    deviceInfo().then(function(info){
+      payload.deviceId = info.deviceId;
+      payload.ip = info.ip;
+      payload.model = info.model;
+      payload.ua = info.ua;
+      google.script.run
+        .withSuccessHandler(function(res){
+          sendBtn.disabled = false;
+          sendBtn.textContent = '希望を送信';
+          dirtyWeeks.clear(); // 送った内容がシフト表と同じになったため
+          showSentPanel(name, res);
+        })
+        .withFailureHandler(function(err){
+          sendBtn.disabled = false;
+          sendBtn.textContent = '希望を送信';
+          sendError.textContent = '送信できませんでした。' + gasMessage(err);
+          sendError.hidden = false;
+        })
+        .submitRequest(payload);
+    });
+  });
+
+  function showSentPanel(name, res){
+    var all = sumAssigned();
+    var lines = [];
+    if (res.saved.length) lines.push(res.saved.join('・') + '：シフト表に反映しました');
+    if (res.waiting.length) lines.push(res.waiting.join('・') + '：シフト表のその週ができた時に反映されます');
+    if (res.notReflected.length) lines.push(res.notReflected.join('・') + '：シフト表に反映できませんでした。店長に伝えてください');
+    if (!lines.length) lines.push('変更した週はありませんでした');
+    var html = '<div class="confirm-badge">✓</div>' +
+      '<h2>送信しました</h2>' +
+      '<p class="sub">' + escapeHtml(name) + 'さんの希望を受け付けました（受付 ' + escapeHtml(res.receivedAt) + '）<br>' +
+      lines.map(escapeHtml).join('<br>') + '<br>' +
+      '内容を変えたいときは、直してもう一度送信してください。</p>' +
+      '<div class="confirm-total">' + totalsLabelText() +
+      (PERIODS.length ? '<div class="totals-periods">' + periodRowsHtml() + '</div>' : ' <b>' + all.days + '日</b>') + '</div>';
+
+    weeks.forEach(function(week, w){
+      var t = sumAssigned(w);
+      html += '<div class="confirm-week"><h3>' + week.label + '<span>' + week.range + '　' +
+        t.days + '日・' + formatHours(t.minutes) + '時間</span></h3>';
+      week.days.forEach(function(day, d){
+        var a = assigned[cellKey(w, d)];
+        html += '<div class="confirm-day-row"><span class="cd-day">' + day.m + '/' + day.d + '(' + DOW[d] + ')</span>' +
+          (a ? '<span class="cd-val">' + a.s + '〜' + a.e + '</span>' : '<span class="cd-val off">休み希望</span>') + '</div>';
+      });
+      var chosen = chosenNote(w);
+      var noteVal = document.getElementById('note-' + w).value.trim();
+      if (chosen) html += '<div class="confirm-note">選択：' + escapeHtml(chosen) + '</div>';
+      if (noteVal) html += '<div class="confirm-note">備考：' + escapeHtml(noteVal) + '</div>';
+      html += '</div>';
+    });
+
+    html += '<button class="edit-link" type="button" id="editBackBtn">内容を直して送り直す</button>';
+
+    var panel = document.getElementById('confirmPanel');
+    panel.innerHTML = html;
+    panel.hidden = false;
+    gridParts().forEach(function(el){ el.hidden = true; });
+    window.scrollTo(0, 0);
+
+    document.getElementById('editBackBtn').addEventListener('click', function(){
+      panel.hidden = true;
+      gridParts().forEach(function(el){ el.hidden = false; });
+    });
+  }
+})();
+</script>
+</body>
+</html>

@@ -73,6 +73,13 @@ function copyAttendanceData() {
   pasteDayData("金", "DD24");
   pasteDayData("土", "DD43");
   pasteDayData("日", "DD62");
+
+  // 6. 転写した内容を「出勤履歴」にも取り込む（月次集計がすぐ最新になる）
+  try {
+    refreshWeekHistory_(sheet);
+  } catch (e) {
+    Logger.log('出勤履歴の更新に失敗: ' + e.message);
+  }
 }
 
 function doGet(e) {
