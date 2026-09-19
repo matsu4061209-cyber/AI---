@@ -20,9 +20,9 @@ var SETTING_WEEKS_CELL = 'B4';        // 今回だけの週数
 var SETTING_DEADLINE_CELL = 'B5';     // 今回だけの締切 yyyy-MM-dd HH:mm
 var SETTING_STORE_NAME_CELL = 'E6';   // 店舗名（シフト表のメニューで設定する）
 var BASE_CLOSING_DAY_CELL = 'E3';     // 基本設定：締め日（毎月この日。社員の締め日）
-var BASE_DEADLINE_DAYS_CELL = 'E4';   // 基本設定：締切＝期間の最終日の何日前
+var BASE_DEADLINE_WEEKS_CELL = 'E4';  // 基本設定：スタッフ入力締切＝募集が始まる何週間前の日曜日
 var BASE_DEADLINE_TIME_CELL = 'E5';   // 基本設定：締切の時刻
-var DEFAULT_BASE = { closingDay: 15, deadlineDays: 14, deadlineTime: '23:59' };
+var DEFAULT_BASE = { closingDay: 15, deadlineWeeks: 2, deadlineTime: '23:59' };
 var CAST_CLOSING_DAY_CELL = 'E7';     // キャストの締め日（店長・社員以外の人の出勤の区切り）
 var DEFAULT_CAST_CLOSING_DAY = 20;
 var ROLE_SHEET_NAME = 'スタッフ区分';  // A列＝名前、B列＝区分。店長・社員だけが載っていて、載っていない人はキャスト
@@ -31,6 +31,12 @@ var HISTORY_SHEET_NAME = '出勤履歴';  // A日付・C名前（シフト表GAS
 var PENDING_FIRST_ROW = 9;            // まだ週シートが無い週の希望
 var PENDING_COLS = 19;                // シート名・名前・時間14・備考・送信日時・端末ID
 var PENDING_DEVICE_INDEX = 18;
+
+// LINE公式アカウント（お知らせはシフト表GASが送る。ここは「送り先の登録」を受け取るだけ）
+var LINE_TOKEN_CELL = 'E9';         // チャネルアクセストークン
+var LINE_TARGET_CELL = 'E10';       // お知らせを送る先のID
+var LINE_REGISTER_CELL = 'E12';     // 登録を受け付ける期限（シフト表のメニューで開く）
+var LINE_REPLY_URL = 'https://api.line.me/v2/bot/message/reply';
 
 // 記録を書き込むスプレッドシート（14380@hotpalette.com の「ペッパーランチ飯塚店」フォルダ内）
 var STORE_SPREADSHEET_ID = '1tgFvH1k3WxsMb_fG2C_m6vMu_n9KTKGgdScSk7jNxGM'; // シフト希望_アクセス記録（飯塚店）
@@ -102,6 +108,43 @@ function linkTitle_(config) {
 function mdText_(ymd) {
   var p = ymd.split('-').map(Number);
   return p[1] + '/' + p[2];
+}
+
+// LINEからの連絡を受け取る入り口（このフォームと同じアドレス）。
+// シフト表の設定で「登録を受け付ける」を押してから10分の間だけ、送られてきたトークのIDを送り先として覚える。
+// （いつでも受け付けると、アドレスを知った人に送り先を書き換えられてしまうため）
+function doPost(e) {
+  try {
+    var events = JSON.parse(e.postData.contents).events || [];
+    // LINEの「検証」ボタンは中身が空のデータを送る。ここで返事が遅れるとタイムアウトになるので、すぐ返す
+    if (!events.length) return ContentService.createTextOutput('OK');
+    var settings = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID).getSheetByName(REQUEST_SETTINGS_SHEET);
+    if (!settings) return ContentService.createTextOutput('OK');
+    var until = String(settings.getRange(LINE_REGISTER_CELL).getDisplayValue()).trim();
+    var open = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(until) && jstTime_(until) > Date.now();
+    events.forEach(function(event) {
+      var source = event.source || {};
+      var id = source.groupId || source.roomId || source.userId;
+      if (!id || !open) return;
+      settings.getRange(LINE_TARGET_CELL).setValue(id);
+      settings.getRange(LINE_REGISTER_CELL).setValue('');   // 1回登録したら受付を閉じる
+      var token = String(settings.getRange(LINE_TOKEN_CELL).getDisplayValue()).trim();
+      if (token && event.replyToken) lineReply_(token, event.replyToken, 'シフト希望のお知らせ先として、このトークを登録しました。');
+    });
+  } catch (err) {
+    console.error('doPost: ' + err.message);
+  }
+  return ContentService.createTextOutput('OK');
+}
+
+function lineReply_(token, replyToken, text) {
+  UrlFetchApp.fetch(LINE_REPLY_URL, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + token },
+    payload: JSON.stringify({ replyToken: replyToken, messages: [{ type: 'text', text: text }] }),
+    muteHttpExceptions: true
+  });
 }
 
 // GASエディタから実行すると、記録先の準備（シート作成）とGoogleの許可を行う
@@ -369,24 +412,25 @@ function currentPeriod_(settings, tz, now) {
 
 function readBase_(settings) {
   var closing = Number(settings.getRange(BASE_CLOSING_DAY_CELL).getDisplayValue());
-  var daysText = String(settings.getRange(BASE_DEADLINE_DAYS_CELL).getDisplayValue()).trim();
+  var weeksText = String(settings.getRange(BASE_DEADLINE_WEEKS_CELL).getDisplayValue()).trim();
   var time = String(settings.getRange(BASE_DEADLINE_TIME_CELL).getDisplayValue()).trim();
   return {
     closingDay: closing >= 1 && closing <= 31 ? Math.floor(closing) : DEFAULT_BASE.closingDay,
-    deadlineDays: daysText !== '' && Number(daysText) >= 0 && Number(daysText) <= 28 ? Math.floor(Number(daysText)) : DEFAULT_BASE.deadlineDays,
+    deadlineWeeks: Number(weeksText) >= 1 && Number(weeksText) <= 4 ? Math.floor(Number(weeksText)) : DEFAULT_BASE.deadlineWeeks,
     deadlineTime: /^\d{2}:\d{2}$/.test(time) ? time : DEFAULT_BASE.deadlineTime
   };
 }
 
 // 自動の募集期間：前の期間の最終日の翌日（月曜）〜締め日が入っている週の日曜日。
-// 締切＝期間の最終日の◯日前。締切を過ぎた期間と、書き込まない週（FIRST_WRITABLE_SHEETより前）から始まる期間は飛ばす
+// スタッフ入力締切＝募集が始まる◯週間前の日曜日（初日の前日の日曜から◯−1週さかのぼる）。
+// 締切を過ぎた期間と、書き込まない週（FIRST_WRITABLE_SHEETより前）から始まる期間は飛ばす
 function autoPeriod_(base, now) {
   var ym = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM').split('-').map(Number);
   for (var i = -1; i <= 13; i++) {
     var end = periodEnd_(ym[0], ym[1] + i, base.closingDay);
     var start = addDays_(periodEnd_(ym[0], ym[1] + i - 1, base.closingDay), 1);
     if (sheetNameOf_(start) < FIRST_WRITABLE_SHEET) continue;
-    var deadline = addDays_(end, -base.deadlineDays) + ' ' + base.deadlineTime;
+    var deadline = addDays_(start, -(base.deadlineWeeks * 7 + 1)) + ' ' + base.deadlineTime;
     if (jstTime_(deadline) <= now.getTime()) continue;
     return { start: start, weeks: (daysBetween_(start, end) + 1) / 7, deadline: deadline, manual: false };
   }

@@ -80,6 +80,22 @@ function copyAttendanceData() {
   } catch (e) {
     Logger.log('出勤履歴の更新に失敗: ' + e.message);
   }
+
+  // 7. 転写した直後の時間を「調整前」として自動で記録する
+  //    （希望どおりの状態が調整前。あとはメニューの「削った時間を薄く表示する」を押すだけでよい）
+  try {
+    if (/^\d{6}$/.test(sheet.getName())) {
+      SpreadsheetApp.flush();                 // 升目の計算を確定させてから読む
+      clearAdjustMarks_(sheet);               // 前回の薄いグレーが残っていれば先に消す
+      clearOurGridColors_(sheet);             // 前のポジションの色も消す（希望からやり直すため）
+      saveAdjustSnapshots_(sheet);
+      repaintWeekColors_(sheet);              // いる時間を薄い水色に戻す
+      SpreadsheetApp.getActiveSpreadsheet().toast(
+        '転写しました。今の時間を「調整前」として記録しました。', 'シフト表', 6);
+    }
+  } catch (e) {
+    Logger.log('調整前の記録に失敗: ' + e.message);
+  }
 }
 
 function doGet(e) {
