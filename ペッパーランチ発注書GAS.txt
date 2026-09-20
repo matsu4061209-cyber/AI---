@@ -2414,9 +2414,10 @@ function buildSalesForecast() {
   const allActualDates = Object.keys(salesMap).map(s => new Date(s)).filter(d => !isNaN(d)).sort((a,b) => a-b);
   const startDate = allActualDates.length > 0 ? allActualDates[0] : new Date(today);
   startDate.setHours(0, 0, 0, 0);
-  // 予測の終端＝翌々月末（＝2か月先の月末まで作る）。MARKER_FORECAST_HORIZON_2M
+  // 予測の終端＝半年先の月末（＝6か月先の月末まで作る）。MARKER_FORECAST_HORIZON_6M
+  //   年次予算書に合わせ、予算を半年先まで日別配分できるよう予測範囲を延長。
   //   天候など先読み不能な遠い日は既存どおり「天候未定・影響度1(中立)」で予測値だけ出る（曜日平均×トレンド×季節で算出）。
-  const endDate = new Date(today.getFullYear(), today.getMonth() + 3, 0);
+  const endDate = new Date(today.getFullYear(), today.getMonth() + 7, 0);
 
   // 除外日・イベント・新商品
   const excludedDates = new Set(), eventList = [], newProductList = [], repeatEventList = [];
@@ -3815,16 +3816,14 @@ function buildDashboardData_(ss, sh) {
   let budgetTotal = 0; const budgetByDay = {}; let budgetSrc = '';
   try { const raw = PropertiesService.getDocumentProperties().getProperty('MONTH_BUDGET_' + ym); if (raw) { const o = JSON.parse(raw); budgetTotal = Number(o.total) || 0; Object.keys(o.days || {}).forEach(kk => { budgetByDay[kk] = Number(o.days[kk]) || 0; }); budgetSrc = '保存済'; } } catch (e) {}
   const mb = ss.getSheetByName('月予算配分');
-  if (budgetTotal === 0 && mb && mb.getLastRow() > 6) {
-    const b2 = mb.getRange('B2').getValue();
-    const bym = (b2 instanceof Date) ? Utilities.formatDate(b2, tz, 'yyyy/MM') : String(b2 == null ? '' : b2).trim().replace(/-/g, '/');
-    if (bym.indexOf(ym) >= 0) {
-      mb.getRange(7, 1, mb.getLastRow() - 6, 5).getValues().forEach(r => {
-        if (r[4] === '' || r[4] === null) return; const d = (r[0] instanceof Date) ? r[0] : new Date(r[0]); if (isNaN(d.getTime())) return;
-        const yen = Number(r[1]) || 0; budgetByDay[dstr(d)] = yen; budgetTotal += yen;
-      });
-      budgetSrc = '月予算配分';
-    }
+  if (budgetTotal === 0 && mb && mb.getLastRow() > 4) {
+    // 月予算配分シートの日別出力から当月分だけ拾う（複数月レイアウト対応・区分E列がある行＝日別行）。MARKER_MONTH_BUDGET_MULTI
+    mb.getRange(4, 1, mb.getLastRow() - 3, 5).getValues().forEach(r => {
+      if (r[4] === '' || r[4] === null) return; const d = (r[0] instanceof Date) ? r[0] : new Date(String(r[0]).replace(/-/g, '/')); if (isNaN(d.getTime())) return;
+      if (dstr(d).slice(0, 7) !== ym) return;
+      const yen = Number(r[1]) || 0; if (yen > 0) { budgetByDay[dstr(d)] = yen; budgetTotal += yen; }
+    });
+    if (budgetTotal > 0) budgetSrc = '月予算配分';
   }
 
   // 直近1週間（今日を含まない過去7日）：合計＋曜日区分別（平日/土曜/日・祝）の 昨年・予算・実績＝1日あたり平均で比較
@@ -3833,7 +3832,8 @@ function buildDashboardData_(ss, sh) {
   for (let i = 1; i <= 7; i++) {
     const d = new Date(today); d.setDate(today.getDate() - i); const ds = dstr(d);
     const u = Number(Utilities.formatDate(d, tz, 'u'));   // 1=月..7=日
-    const g = holiday[ds] ? '日・祝' : (u === 6 ? '土曜' : (u === 7 ? '日・祝' : '平日'));
+    // 曜日優先：土曜は祝日(連休)でも「土曜」に入れる／日曜は「日・祝」／平日のうち祝日だけ「日・祝」。MARKER_DASH_SAT_DOW_FIRST
+    const g = (u === 6) ? '土曜' : (u === 7) ? '日・祝' : (holiday[ds] ? '日・祝' : '平日');
     const act = salesByDate[ds] || 0, bud = budgetByDay[ds] || 0;
     const ly = new Date(d); ly.setDate(d.getDate() - 364); const lyv = histByDate[dstr(ly)] || 0;
     grp[g].act += act; grp[g].bud += bud; grp[g].ly += lyv; grp[g].n++; wkAct += act; wkBud += bud;
@@ -4008,10 +4008,11 @@ function buildDashboardData_(ss, sh) {
   const reasonOrder = ['期限切れ', '筋取り', '調理ミス'];
   const wrKeys = reasonOrder.filter(r => wasteReason[r] !== undefined)
     .concat(Object.keys(wasteReason).filter(r => reasonOrder.indexOf(r) < 0).sort((a, b) => wasteReason[b] - wasteReason[a]));
-  const topItems = Object.keys(itemTotal).sort((a, b) => itemTotal[b] - itemTotal[a]).slice(0, 6);
+  const topItems = Object.keys(itemTotal).sort((a, b) => itemTotal[b] - itemTotal[a]).slice(0, 5);   // 凡例を絞って読みやすく（上位5＋その他）
   const hasOther = Object.keys(itemTotal).length > topItems.length;
-  const itemCols = topItems.concat(hasOther ? ['その他'] : []);
-  const wasteHead = ['理由'].concat(itemCols);
+  // 凡例(色見本)には読みやすい食材名を出す：正式名(US産ﾗｳﾝﾄﾞｵｲｽﾀｰ_S)→短縮名(ﾗｳﾝﾄﾞｵｲｽﾀｰ)。MARKER_DASH_WASTE_SHORTNAME
+  const itemColsDisp = topItems.map(shortWasteName_).concat(hasOther ? ['その他'] : []);
+  const wasteHead = ['理由'].concat(itemColsDisp);
   const wasteBody = wrKeys.map(rs => {
     const row = [rs];
     let used = 0;
@@ -4026,6 +4027,20 @@ function buildDashboardData_(ss, sh) {
   sh.getRange(80, 11, 1, wasteCols).setFontWeight('bold');
 
   return { dayRows: dayTab.length, costRows: costTab.length, wasteRows: wasteTab.length, wasteCols: wasteCols };
+}
+
+// 廃棄品目の正式名を凡例向けに短縮（原産地の接頭・サイズ/荷姿の後ろ・_HP等を落とす）。【A】【B】等の区別タグは残す。MARKER_DASH_WASTE_SHORTNAME
+function shortWasteName_(name) {
+  var s = String(name == null ? '' : name).trim();
+  if (!s) return '(名称なし)';
+  var tag = '';
+  var mt = s.match(/^【[^】]*】/);
+  if (mt) { tag = mt[0]; s = s.slice(mt[0].length); }
+  s = s.replace(/^(?:US|AU|NZ|豪|米|中国|国|ｶﾅﾀﾞ|ﾆｭｰｼﾞｰﾗﾝﾄﾞ|ﾀｲ|ﾌﾞﾗｼﾞﾙ|ﾃﾞﾝﾏｰｸ)産/, '');   // 原産地の接頭を除去
+  s = s.replace(/[_（(].*$/, '');                                   // _ や （ 以降（荷姿・ロット表記）を除去
+  s = s.replace(/\d+\s*(?:kg|ｋｇ|g|ｇ|ml|ｍｌ|ｍｍ|mm|cm|×|x).*$/i, '');   // 数字＋単位以降（サイズ）を除去
+  s = s.trim();
+  return (tag + s) || tag || '(名称なし)';
 }
 
 // グラフを作り直す（メニューからの手動更新時のみ）。毎朝の自動更新では呼ばない＝範囲追従で足りる。
@@ -4059,48 +4074,107 @@ function buildDashboardCharts_(sh, meta) {
     .setOption('series', { 0: { color: '#34a853', dataLabel: 'value' }, 1: { color: '#ea4335', dataLabel: 'value' } })   // 明るい緑/赤
     .setOption('pointSize', 7)
     .setPosition(55, 1, 0, 0).setOption('width', 720).setOption('height', 320).build());
-  // ③ 廃棄の理由別内訳（直近28日・円）＝積み上げ横棒。棒=理由(期限切れ/筋取り/調理ミス)、棒の中の色分け=品目(ラウンドオイスター/クロバラ等・上位6＋その他)。
+  // ③ 廃棄の理由別内訳（直近28日・円）＝積み上げ横棒。棒=理由(期限切れ/筋取り/調理ミス)、棒の中の色分け=品目(ラウンドオイスター/クロバラ等・上位5＋その他)。
+  //   凡例(色見本)は下に大きく＝食材名を読みやすく。MARKER_DASH_WASTE_LEGEND_READABLE
   if (meta.wasteRows > 1) sh.insertChart(sh.newChart().asBarChart()
     .addRange(sh.getRange(80, 11, meta.wasteRows, meta.wasteCols))
     .setOption('title', '廃棄の理由別内訳（直近28日・円）※棒の中の色=品目')
     .setOption('isStacked', true)
     .setOption('backgroundColor', '#ffffff')
     .setOption('titleTextStyle', { fontSize: 14, bold: true })
-    .setOption('legend', { position: 'right' })
+    .setOption('legend', { position: 'bottom', textStyle: { fontSize: 12 } })   // 凡例を下に・文字大きく＝食材名が読める（chartArea指定は空描画の原因になるため使わない）
     .setOption('hAxis', { title: '円', format: '#,##0' })
-    .setOption('colors', ['#ea4335', '#4285f4', '#fbbc04', '#34a853', '#a142f4', '#ff6d01', '#bdbdbd'])   // 品目ごとの明るい配色(最後=その他=灰)
-    .setPosition(55, 12, 0, 0).setOption('width', 620).setOption('height', 320).build());
+    .setOption('colors', ['#ea4335', '#4285f4', '#fbbc04', '#34a853', '#a142f4', '#bdbdbd'])   // 品目ごとの明るい配色(最後=その他=灰)
+    .setPosition(55, 12, 0, 0).setOption('width', 760).setOption('height', 460).build());
 }
 
-// 月予算を日別に配分する。MARKER_MONTH_BUDGET_ALLOC
-// 対象月の予算額を、売上予測(ブレンド予測N列。無ければ予測売上I列)の比率で日別に振り分ける。
+// 月予算を日別に配分する（複数月まとめて）。MARKER_MONTH_BUDGET_ALLOC / MARKER_MONTH_BUDGET_MULTI
+// 入力欄(4行目〜)に「対象月・予算額」を並べて入れ、ボタン1回で各月を日別に配分。半年先まで年次予算をまとめて入れられる。
 //   平日＝各週の平日平均で一律（週ごとに水準が変わる＝トレンド反映）／土日祝＝各日の予測比率で個別。
 //   1万円単位に丸め、丸め差は月合計が予算ちょうどになるよう「丸め落ちが大きい日」から1万ずつ調整。週区切りは月曜始まり(内部計算のみ)。
+var MONTH_BUDGET_INPUT_TOP_ = 4;    // 入力欄の先頭行
+var MONTH_BUDGET_INPUT_MAX_ = 12;   // 入力できる月数（1年ぶん）
+var MONTH_BUDGET_OUT_TOP_ = 17;     // 配分結果の先頭行（入力欄12行＋注記の下）
 function buildMonthBudgetAllocation() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
   const sh = ensureMonthBudgetSheet_(ss);
-  const ymVal = sh.getRange('B2').getValue();
-  const budgetRaw = sh.getRange('B3').getValue();
-  // B2は「2026/09」と入れてもSheetsが日付に自動変換することがある→日付でも文字列でも読めるようにする。
-  let year, month;
-  if (ymVal instanceof Date && !isNaN(ymVal.getTime())) {
-    year = Number(Utilities.formatDate(ymVal, 'Asia/Tokyo', 'yyyy'));
-    month = Number(Utilities.formatDate(ymVal, 'Asia/Tokyo', 'MM'));
-  } else {
-    const mm = String(ymVal || '').trim().match(/(\d{4})\D{0,2}(\d{1,2})/);
-    if (!mm) { ui.alert('対象月(B2セル)を「2026/09」の形式で入れてください。'); return; }
-    year = Number(mm[1]); month = Number(mm[2]);
-  }
-  if (month < 1 || month > 12) { ui.alert('対象月(B2セル)の月が正しくありません（例 2026/09）。'); return; }
-  let budget = Number(String(budgetRaw).replace(/[,\s円]/g, ''));
-  if (!budget || budget <= 0) { ui.alert('予算額(B3セル)を数字で入れてください（例 4000000）。'); return; }
-  budget = Math.round(budget / 10000) * 10000;   // 1万円単位に丸める
+  const tz = 'Asia/Tokyo';
+
+  // 入力欄から「対象月・予算額」を複数月ぶん読む（空行・予算未入力の月はスキップ）。
+  const inVals = sh.getRange(MONTH_BUDGET_INPUT_TOP_, 1, MONTH_BUDGET_INPUT_MAX_, 2).getValues();
+  const targets = [];
+  inVals.forEach(r => {
+    const ymVal = r[0], budgetRaw = r[1];
+    if ((ymVal === '' || ymVal == null) && (budgetRaw === '' || budgetRaw == null)) return;
+    let year, month;
+    if (ymVal instanceof Date && !isNaN(ymVal.getTime())) {
+      year = Number(Utilities.formatDate(ymVal, tz, 'yyyy')); month = Number(Utilities.formatDate(ymVal, tz, 'MM'));
+    } else {
+      const mm = String(ymVal || '').trim().match(/(\d{4})\D{0,2}(\d{1,2})/);
+      if (!mm) return;
+      year = Number(mm[1]); month = Number(mm[2]);
+    }
+    if (month < 1 || month > 12) return;
+    let budget = Number(String(budgetRaw).replace(/[,\s円]/g, ''));
+    if (!budget || budget <= 0) return;
+    budget = Math.round(budget / 10000) * 10000;   // 1万円単位
+    targets.push({ year, month, budget });
+  });
+  if (targets.length === 0) { ui.alert('入力欄が空です', '入力欄（' + MONTH_BUDGET_INPUT_TOP_ + '行目〜）に「対象月（例 2026/10）」と「予算額（円）」を入れてから押してください。', ui.ButtonSet.OK); return; }
+  targets.sort((a, b) => (a.year * 100 + a.month) - (b.year * 100 + b.month));
 
   const fc = ss.getSheetByName('売上予測');
   if (!fc || fc.getLastRow() < 2) { ui.alert('売上予測シートが見つかりません。'); return; }
   const fv = fc.getRange(2, 1, fc.getLastRow() - 1, 14).getValues();
-  const tz = 'Asia/Tokyo';
+
+  // 出力領域をクリア（入力欄の下）
+  if (sh.getMaxRows() >= MONTH_BUDGET_OUT_TOP_) sh.getRange(MONTH_BUDGET_OUT_TOP_, 1, sh.getMaxRows() - MONTH_BUDGET_OUT_TOP_ + 1, 6).clearContent().setBackground(null).setFontWeight('normal');
+
+  const dowName = ['', '日', '月', '火', '水', '木', '金', '土'];
+  let row = MONTH_BUDGET_OUT_TOP_;
+  const doneMsgs = [], skipped = [];
+  targets.forEach(t => {
+    const res = allocateOneMonth_(fv, t.year, t.month, t.budget, tz);
+    if (!res.ok) { skipped.push(t.year + '/' + ('0' + t.month).slice(-2) + '（' + res.reason + '）'); return; }
+    const days = res.days;
+    sh.getRange(row, 1, 1, 6).setBackground('#d9ead3');
+    sh.getRange(row, 1).setValue('■ ' + t.year + '年' + t.month + '月　予算 ' + t.budget.toLocaleString() + '円').setFontWeight('bold').setFontSize(12);
+    row++;
+    sh.getRange(row, 1, 1, 6).setValues([['日付', '予算(円)', '予算(万円)', '曜日', '区分', 'ブレンド予測']]).setFontWeight('bold').setBackground('#e8eaed');
+    row++;
+    const outRows = days.map(o => [o.ds, o.yen, o.man, dowName[o.dow], o.kind, Math.round(o.val)]);
+    sh.getRange(row, 1, outRows.length, 6).setValues(outRows);
+    sh.getRange(row, 2, outRows.length, 1).setNumberFormat('#,##0');
+    sh.getRange(row, 6, outRows.length, 1).setNumberFormat('#,##0');
+    days.forEach((o, i) => {
+      const bg = (o.kind === '祝日') ? '#fce5cd' : (o.kind === '日') ? '#fde9e9' : (o.kind === '土') ? '#e9f0fb' : null;
+      if (bg) sh.getRange(row + i, 1, 1, 6).setBackground(bg);
+    });
+    row += outRows.length;
+    const tot = days.reduce((s, o) => s + o.yen, 0);
+    sh.getRange(row, 1).setValue('合計').setFontWeight('bold');
+    sh.getRange(row, 2).setValue(tot).setFontWeight('bold').setNumberFormat('#,##0');
+    sh.getRange(row, 3).setValue(days.reduce((s, o) => s + o.man, 0)).setFontWeight('bold');
+    row += 2;
+    // 月別に予算を保存（ダッシュボードが各月を引ける）。MARKER_MONTH_BUDGET_STORE
+    try {
+      const store = {}; days.forEach(o => { store[o.ds] = o.yen; });
+      PropertiesService.getDocumentProperties().setProperty('MONTH_BUDGET_' + t.year + '/' + ('0' + t.month).slice(-2), JSON.stringify({ total: tot, days: store }));
+    } catch (e) { console.log('月予算の保存をスキップ: ' + e); }
+    doneMsgs.push(t.year + '/' + ('0' + t.month).slice(-2) + '　' + tot.toLocaleString() + '円');
+  });
+
+  try { const dsh = ss.getSheetByName(DASHBOARD_SHEET_); if (dsh) buildDashboardData_(ss, dsh); } catch (e) {}
+
+  let msg = '配分した月（各月とも予算ちょうど・1万円単位）：\n' + (doneMsgs.length ? doneMsgs.join('\n') : '（なし）') +
+    '\n\n・平日＝各週の平日平均で一律\n・土日祝＝各日の予測比率で個別';
+  if (skipped.length) msg += '\n\n※予測データが足りずスキップした月：\n' + skipped.join('\n') + '\n（売上予測が半年先まで作られているか確認してください。売上予測は毎朝自動で伸びます）';
+  ui.alert('月予算配分を作成しました', msg, ui.ButtonSet.OK);
+}
+
+// 1か月ぶんの日別配分を計算して返す（fv＝売上予測の値配列）。{ok, days} または {ok:false, reason}。
+function allocateOneMonth_(fv, year, month, budget, tz) {
   const days = [];
   fv.forEach(r => {
     if (!r[0]) return;
@@ -4115,79 +4189,46 @@ function buildMonthBudgetAllocation() {
     if (!val || isNaN(val)) val = 0;
     days.push({ ds, dow, hol, val, dayNum: Number(ds.slice(8, 10)) });
   });
-  if (days.length === 0) { ui.alert(year + '年' + month + '月の予測データが売上予測シートにありません。'); return; }
+  if (days.length === 0) return { ok: false, reason: '予測データなし' };
   days.sort((a, b) => a.dayNum - b.dayNum);
-
   // 週(月曜始まり)ごとの平日平均。平日＝dow2..6 かつ 非祝日。
   const weekWeekday = {};
   days.forEach(o => {
-    const off = (o.dow === 1) ? 6 : (o.dow - 2);   // その日から直近の月曜までの日数
-    o.wk = o.dayNum - off;                          // 月内の週識別（負でも可＝月初の週）
-    if (o.dow >= 2 && o.dow <= 6 && !o.hol) {
-      const w = weekWeekday[o.wk] || (weekWeekday[o.wk] = { sum: 0, cnt: 0 });
-      w.sum += o.val; w.cnt++;
-    }
+    const off = (o.dow === 1) ? 6 : (o.dow - 2);
+    o.wk = o.dayNum - off;
+    if (o.dow >= 2 && o.dow <= 6 && !o.hol) { const w = weekWeekday[o.wk] || (weekWeekday[o.wk] = { sum: 0, cnt: 0 }); w.sum += o.val; w.cnt++; }
   });
   const weekAvg = {};
   Object.keys(weekWeekday).forEach(k => { weekAvg[k] = weekWeekday[k].sum / weekWeekday[k].cnt; });
-
-  days.forEach(o => {
-    o.kind = o.hol ? '祝日' : (o.dow === 7 ? '土' : (o.dow === 1 ? '日' : '平日'));
-    o.weight = (o.kind === '平日') ? (weekAvg[o.wk] || o.val) : o.val;   // 平日=週平均・土日祝=個別
-  });
+  days.forEach(o => { o.kind = o.hol ? '祝日' : (o.dow === 7 ? '土' : (o.dow === 1 ? '日' : '平日')); o.weight = (o.kind === '平日') ? (weekAvg[o.wk] || o.val) : o.val; });
   const totalW = days.reduce((s, o) => s + o.weight, 0);
-  if (totalW <= 0) { ui.alert('予測値の合計が0のため配分できません。'); return; }
-
+  if (totalW <= 0) return { ok: false, reason: '予測合計0' };
   days.forEach(o => { o.raw = o.weight / totalW * budget; o.man = Math.round(o.raw / 10000); o.yen = o.man * 10000; });
   let diffMan = Math.round((budget - days.reduce((s, o) => s + o.yen, 0)) / 10000);
-  if (diffMan > 0) {   // 不足＝丸め落ちが大きい日から+1万
-    const order = days.slice().sort((a, b) => (b.raw - b.yen) - (a.raw - a.yen));
-    for (let i = 0; i < order.length && diffMan > 0; i++) { order[i].man += 1; order[i].yen += 10000; diffMan--; }
-  } else if (diffMan < 0) {   // 過剰＝丸め上げが大きい日から-1万
-    const order = days.slice().sort((a, b) => (a.raw - a.yen) - (b.raw - b.yen));
-    for (let i = 0; i < order.length && diffMan < 0; i++) { if (order[i].man > 0) { order[i].man -= 1; order[i].yen -= 10000; diffMan++; } }
-  }
-
-  const dowName = ['', '日', '月', '火', '水', '木', '金', '土'];
-  const startRow = 6;
-  if (sh.getMaxRows() >= startRow) sh.getRange(startRow, 1, sh.getMaxRows() - startRow + 1, 6).clearContent().setBackground(null);
-  sh.getRange(startRow, 1, 1, 6).setValues([['日付', '予算(円)', '予算(万円)', '曜日', '区分', 'ブレンド予測']]).setFontWeight('bold').setBackground('#e8eaed');
-  const rows = days.map(o => [o.ds, o.yen, o.man, dowName[o.dow], o.kind, Math.round(o.val)]);
-  sh.getRange(startRow + 1, 1, rows.length, 6).setValues(rows);
-  const totRow = startRow + 1 + rows.length;
-  sh.getRange(totRow, 1).setValue('合計').setFontWeight('bold');
-  sh.getRange(totRow, 2).setValue(days.reduce((s, o) => s + o.yen, 0)).setFontWeight('bold').setNumberFormat('#,##0');
-  sh.getRange(totRow, 3).setValue(days.reduce((s, o) => s + o.man, 0)).setFontWeight('bold');
-  sh.getRange(startRow + 1, 2, rows.length, 1).setNumberFormat('#,##0');   // B列 予算(円)
-  sh.getRange(startRow + 1, 6, rows.length, 1).setNumberFormat('#,##0');   // F列 ブレンド予測
-  // 月別に予算を保存（ダッシュボードが当月分を引けるように・対象月を替えても過去月が残る）。MARKER_MONTH_BUDGET_STORE
-  try {
-    const store = {}; days.forEach(o => { store[o.ds] = o.yen; });
-    const key = 'MONTH_BUDGET_' + year + '/' + ('0' + month).slice(-2);
-    PropertiesService.getDocumentProperties().setProperty(key, JSON.stringify({ total: days.reduce((s, o) => s + o.yen, 0), days: store }));
-  } catch (e) { console.log('月予算の保存をスキップ: ' + e); }
-  days.forEach((o, i) => {
-    const bg = (o.kind === '祝日') ? '#fce5cd' : (o.kind === '日') ? '#fde9e9' : (o.kind === '土') ? '#e9f0fb' : null;
-    if (bg) sh.getRange(startRow + 1 + i, 1, 1, 6).setBackground(bg);
-  });
-  ui.alert('月予算配分を作成しました',
-    year + '年' + month + '月 予算 ' + budget.toLocaleString() + '円 を日別に配分しました。\n' +
-    '・平日＝各週の平日平均で一律（週ごとに水準が変わる）\n・土日祝＝各日の予測比率で個別\n・1万円単位（月合計が予算ちょうど）',
-    ui.ButtonSet.OK);
+  if (diffMan > 0) { const order = days.slice().sort((a, b) => (b.raw - b.yen) - (a.raw - a.yen)); for (let i = 0; i < order.length && diffMan > 0; i++) { order[i].man += 1; order[i].yen += 10000; diffMan--; } }
+  else if (diffMan < 0) { const order = days.slice().sort((a, b) => (a.raw - a.yen) - (b.raw - b.yen)); for (let i = 0; i < order.length && diffMan < 0; i++) { if (order[i].man > 0) { order[i].man -= 1; order[i].yen -= 10000; diffMan++; } } }
+  return { ok: true, days: days };
 }
 
+// 月予算配分シートを用意（無ければ作成／旧・単月レイアウトなら複数月入力レイアウトへ作り替え）。
 function ensureMonthBudgetSheet_(ss) {
   let sh = ss.getSheetByName('月予算配分');
-  if (sh) return sh;
-  sh = ss.insertSheet('月予算配分');
-  sh.getRange('A1').setValue('月予算配分').setFontWeight('bold').setFontSize(14);
-  sh.getRange('A2').setValue('対象月（例 2026/09）');
-  sh.getRange('A3').setValue('予算額（円）');
-  sh.getRange('B2').setValue(Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM'));
-  sh.getRange('B3').setValue(4000000).setNumberFormat('#,##0');
-  sh.getRange('A4').setValue('↑対象月と予算を入れて、メニュー「📅 イベント管理 → 月予算を日別に配分する」を押すと下に日別表が出ます');
-  sh.getRange('B2:B3').setBackground('#fff2cc');
-  sh.setColumnWidth(1, 150); sh.setColumnWidth(2, 130);
+  if (!sh) sh = ss.insertSheet('月予算配分');
+  // A3が入力ヘッダ「対象月…」なら新レイアウト。そうでなければ（旧単月＝A3は「予算額（円）」）作り替える。
+  const a3 = String(sh.getRange('A3').getValue() || '');
+  if (a3.indexOf('対象月') < 0) {
+    sh.clear();
+    const tz = 'Asia/Tokyo', now = new Date();
+    sh.getRange('A1').setValue('月予算配分').setFontWeight('bold').setFontSize(14);
+    sh.getRange('A2').setValue('↓対象月と予算額を入れて、メニュー「📅 イベント管理 → 月予算を日別に配分する」を押すと、下に月ごとの日別表が出ます（複数月まとめてOK・半年先まで）');
+    sh.getRange('A3:B3').setValues([['対象月（例 2026/10）', '予算額（円）']]).setFontWeight('bold').setBackground('#e8eaed');
+    const rows = [];
+    for (let i = 0; i < MONTH_BUDGET_INPUT_MAX_; i++) { const d = new Date(now.getFullYear(), now.getMonth() + i, 1); rows.push([Utilities.formatDate(d, tz, 'yyyy/MM'), '']); }
+    sh.getRange(MONTH_BUDGET_INPUT_TOP_, 1, MONTH_BUDGET_INPUT_MAX_, 2).setValues(rows).setBackground('#fff2cc');
+    sh.getRange(MONTH_BUDGET_INPUT_TOP_, 2, MONTH_BUDGET_INPUT_MAX_, 1).setNumberFormat('#,##0');
+    sh.getRange(MONTH_BUDGET_OUT_TOP_ - 1, 1).setValue('（↓ここから下に配分結果が月ごとに並びます）').setFontColor('#999999');
+    sh.setColumnWidth(1, 170); sh.setColumnWidth(2, 140);
+  }
   return sh;
 }
 

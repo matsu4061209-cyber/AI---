@@ -169,8 +169,26 @@
   }
 
   .week-notes{ display:flex; flex-direction:column; gap:10px; margin-block-start:20px; }
-  .week-note-row{ display:flex; flex-direction:column; gap:4px; }
+  .week-note-row{ display:flex; flex-direction:column; gap:6px; }
+  .week-note-row[hidden]{ display:none; }
   .week-note-row label{ font-size:12.5px; color:var(--text-muted); }
+  .notes-head{ font-size:12.5px; color:var(--text-muted); }
+  .note-tabs{ display:flex; flex-wrap:wrap; gap:6px; }
+  .note-tab{
+    position:relative; font-family:inherit; font-size:12.5px; color:var(--text);
+    background:var(--surface); border:1px solid var(--line); border-radius:9px;
+    padding:6px 12px 6px 10px; cursor:pointer;
+    display:flex; flex-direction:column; align-items:flex-start; gap:1px; line-height:1.3;
+  }
+  .note-tab small{ font-size:11px; color:var(--text-muted); }
+  .note-tab[aria-pressed="true"]{
+    background:var(--accent-tint); border-color:var(--accent); color:var(--accent); font-weight:600;
+  }
+  .note-tab[aria-pressed="true"] small{ color:var(--accent); }
+  .note-tab[data-has="true"]::after{
+    content:''; position:absolute; top:5px; right:5px;
+    width:6px; height:6px; border-radius:50%; background:var(--accent);
+  }
   .week-note-row textarea{
     font-family:inherit; font-size:14px; color:var(--text);
     background:var(--surface); border:1px solid var(--line); border-radius:9px;
@@ -405,7 +423,7 @@
   }
   logEvent('open');
 
-  var SELECTION_HINT = '出勤できる同じ時間のマスをタップして選択 →下の時間を選んで「この時間で確定」';
+  var SELECTION_HINT = '同じ時間のマスを選択 →下の時間を選んで<b>「この時間で確定」</b>';
 
   function buildWeeks(startMonday, count){
     var out = [];
@@ -641,28 +659,64 @@
   // 備考で選べる項目（1週につき1つ）。選択に加えて、下の欄に手入力・音声入力もできる
   var NOTE_CHOICES = CONFIG.noteChoices;
 
+  // 週をタブで選び、下の欄はひとつだけ出す（週ごとの欄は中に残してあるので、送る内容は今までどおり）
   var weekNotesEl = document.getElementById('weekNotes');
-  weekNotesEl.innerHTML = '<div class="notes-hint">備考は当てはまる項目を1つタップ（もう一度押すと解除）。文字の欄は、キーボードのマイクボタンを押すと話して入力できます。</div>';
+  weekNotesEl.innerHTML =
+    '<div class="notes-hint">備考(任意)　週を選んで、当てはまる項目を1つタップ（もう一度押すと解除）。文字の欄は、キーボードのマイクボタンを押すと話して入力できます。</div>' +
+    '<div class="note-tabs" id="noteTabs">' + weeks.map(function(week, w){
+      return '<button type="button" class="note-tab" data-w="' + w + '" aria-pressed="' + (w === 0 ? 'true' : 'false') + '">' +
+        week.label + '<small>' + week.range + '</small></button>';
+    }).join('') + '</div>';
   weeks.forEach(function(week, w){
     var row = document.createElement('div');
     row.className = 'week-note-row';
-    row.innerHTML = '<label for="note-' + w + '">' + week.label + '（' + week.range + '）の備考(任意)</label>' +
+    row.setAttribute('data-w', w);
+    if (w !== 0) row.hidden = true;
+    row.innerHTML =
       '<div class="note-chips" id="chips-' + w + '">' + NOTE_CHOICES.map(function(c){
         return '<button type="button" class="note-chip" aria-pressed="false">' + c + '</button>';
       }).join('') + '</div>' +
       '<textarea id="note-' + w + '" placeholder="その他（手入力・音声入力）"></textarea>';
     weekNotesEl.appendChild(row);
   });
+
+  // 選んだ週の欄だけ出す
+  function showNoteWeek(w){
+    Array.from(weekNotesEl.querySelectorAll('.note-tab')).forEach(function(tab){
+      tab.setAttribute('aria-pressed', Number(tab.getAttribute('data-w')) === w ? 'true' : 'false');
+    });
+    Array.from(weekNotesEl.querySelectorAll('.week-note-row')).forEach(function(row){
+      row.hidden = Number(row.getAttribute('data-w')) !== w;
+    });
+  }
+
+  // 何か入っている週のタブに、しるしを付ける（隠れていても忘れないように）
+  function refreshNoteTabs(){
+    Array.from(weekNotesEl.querySelectorAll('.note-tab')).forEach(function(tab){
+      var w = Number(tab.getAttribute('data-w'));
+      var box = document.getElementById('note-' + w);
+      var has = !!chosenNote(w) || !!(box && box.value.trim());
+      tab.setAttribute('data-has', has ? 'true' : 'false');
+    });
+  }
+
   weekNotesEl.addEventListener('click', function(e){
+    var tab = e.target.closest('.note-tab');
+    if (tab) { showNoteWeek(Number(tab.getAttribute('data-w'))); return; }
     var chip = e.target.closest('.note-chip');
     if (!chip) return;
     // 1週につき1つだけ選べる。選択中をもう一度押すと解除
     var w = Number(chip.parentNode.id.replace('chips-', ''));
     setChosenNote(w, chip.getAttribute('aria-pressed') === 'true' ? '' : chip.textContent);
     dirtyWeeks.add(w);
+    refreshNoteTabs();
   });
+  refreshNoteTabs();
   weekNotesEl.addEventListener('input', function(e){
-    if (e.target.id && e.target.id.indexOf('note-') === 0) dirtyWeeks.add(Number(e.target.id.replace('note-', '')));
+    if (e.target.id && e.target.id.indexOf('note-') === 0) {
+      dirtyWeeks.add(Number(e.target.id.replace('note-', '')));
+      refreshNoteTabs();
+    }
   });
 
   function chosenNote(w){
@@ -698,6 +752,7 @@
     weeks.forEach(function(week, w){
       setChosenNote(w, '');
       document.getElementById('note-' + w).value = '';
+      refreshNoteTabs();
       week.days.forEach(function(day, d){ refreshCell(w, d); });
     });
     document.getElementById('confirmPanel').hidden = true;
@@ -725,6 +780,7 @@
             });
             setChosenNote(w, week.note.choice);
             document.getElementById('note-' + w).value = week.note.text;
+            refreshNoteTabs();
           });
           setLoading(false);
           refreshSelectionUI();

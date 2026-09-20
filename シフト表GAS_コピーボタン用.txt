@@ -641,7 +641,7 @@ function getRequestSettingsSheet_() {
     ['基本設定：スタッフ入力締切の時刻'],
     ['基本設定：店舗名'],
     ['基本設定：キャストの締め日（毎月この日）'],
-    ['基本設定：書庫ファイルのURL（古い週の移動先）'],
+    ['基本設定：書庫ファイルのURL（古い週の移動先。年が変わると自動で新しい書庫に切り替わります）'],
     ['LINE：チャネルアクセストークン（メニュー「LINE通知の設定」で入れます）'],
     ['LINE：お知らせを送る先のID（グループに招待すると自動で入ります）'],
     ['お知らせを送った控え（自動。消しても害はありません）'],
@@ -868,7 +868,7 @@ function openShiftRequestSettings() {
     '<select id="castClosingDay" style="' + select + '">' + numberOptions_(1, 31, base.castClosingDay, '毎月#日') + '</select>' +
     '<label style="' + label + '">店舗名</label>' +
     '<input id="storeName" value="' + escapeHtml_(storeName) + '" placeholder="例：ペッパーランチ飯塚店" style="' + select + '">' +
-    '<label style="' + label + '">書庫ファイルのURL（' + ARCHIVE_KEEP_WEEKS + '週より前の週シートの移動先）</label>' +
+    '<label style="' + label + '">書庫ファイルのURL（' + ARCHIVE_KEEP_WEEKS + '週より前の週シートの移動先。年が変わると自動で新しい書庫を作って入れ替えます）</label>' +
     '<input id="archiveUrl" value="' + escapeHtml_(archiveUrl) + '" placeholder="空のスプレッドシートのURLを貼る" style="' + select + '">' +
     '<p style="margin:6px 0 0;font-size:12px;color:#555;">期間は「社員の締め日が入っている週の日曜日」で区切ります。スタッフ入力締切を過ぎると、フォームは次の期間に切り替わります。店舗名は月次集計の見出しとスマホのフォームに出ます。</p>' +
 
@@ -1181,6 +1181,100 @@ function ensureTargetSettings_(sheet) {
   return sheet;
 }
 
+// ----- 目安人数シートの見た目（線と色） -----
+// 中身（数字や数式）には触らない。色でひと目で分かるようにする。
+//   うすい黄色＝自分で入れるところ／うすい灰色＝自動で出るところ
+var TARGET_LAST_COL = TARGET_FIRST_COL + TARGET_CATEGORIES.length * TARGET_COLS_PER_CAT - 1;
+var TARGET_CAT_COLORS = ['#EFEFEF', '#CFE2F3', '#F4CCCC', '#FCE5CD'];  // 平日・土曜・日曜・祝日
+var TARGET_INPUT_COLOR = '#FFFDE7';   // 自分で入れるところ
+var TARGET_AUTO_COLOR = '#F3F3F3';    // 自動で出るところ
+var TARGET_LABEL_COLOR = '#EFEFEF';   // 左の見出し
+var TARGET_HEAD_COLOR = '#595959';    // 見出しの帯
+var TARGET_LINE_COLOR = '#B7B7B7';
+
+function styleTargetSheet_(sheet) {
+  var cols = TARGET_LAST_COL;
+  var lastRow = TARGET_RATIO_SUM_ROW;
+  var solid = SpreadsheetApp.BorderStyle.SOLID;
+  var medium = SpreadsheetApp.BorderStyle.SOLID_MEDIUM;
+
+  // 表題と注意書き
+  sheet.getRange(1, 1, 1, cols).breakApart().merge()
+    .setBackground('#1C4587').setFontColor('#FFFFFF').setFontWeight('bold').setFontSize(13)
+    .setVerticalAlignment('middle');
+  sheet.setRowHeight(1, 30);
+  sheet.getRange(2, 1, 1, cols).breakApart().merge()
+    .setFontColor('#666666').setFontSize(10).setWrap(true).setVerticalAlignment('middle');
+  sheet.setRowHeight(2, 32);
+
+  // 設定のところ（3〜6行目）
+  sheet.getRange(TARGET_SPH_ROW, 1, 4, 1).setBackground(TARGET_LABEL_COLOR).setFontWeight('bold');
+  sheet.getRange(TARGET_SPH_ROW, 2, 3, 1).setBackground(TARGET_INPUT_COLOR);
+  sheet.getRange(TARGET_OPEN_ROW, 2, 1, 2).setBackground(TARGET_INPUT_COLOR);
+  sheet.getRange(TARGET_SPH_ROW, 2, 2, 1).setNumberFormat('#,##0"円"');
+  sheet.getRange(TARGET_OPEN_ROW, 2, 1, 2).setNumberFormat('0"時"');
+  sheet.getRange(TARGET_SPH_ROW, 1, 4, 3)
+    .setBorder(true, true, true, true, true, true, TARGET_LINE_COLOR, solid);
+
+  // 表の全体に細い線を引いてから、区分ごとの区切りを太くする
+  sheet.getRange(TARGET_CAT_ROW, 1, lastRow - TARGET_CAT_ROW + 1, cols)
+    .setBorder(true, true, true, true, true, true, TARGET_LINE_COLOR, solid);
+
+  // 左の見出しの列
+  sheet.getRange(TARGET_CAT_ROW, 1, 4, 1).setBackground(TARGET_LABEL_COLOR).setFontWeight('bold');
+  sheet.getRange(TARGET_FIRST_ROW, 1, TARGET_HOURS, 1)
+    .setBackground(TARGET_LABEL_COLOR).setFontWeight('bold').setHorizontalAlignment('center');
+
+  // 自動で出る3行（平均売上・人時売上高・合計人時）
+  sheet.getRange(TARGET_AVG_ROW, 2, 3, cols - 1).setBackground(TARGET_AUTO_COLOR);
+
+  // 列の見出し（11行目）
+  sheet.getRange(TARGET_HEAD_ROW, 1, 1, cols)
+    .setBackground(TARGET_HEAD_COLOR).setFontColor('#FFFFFF').setFontWeight('bold')
+    .setHorizontalAlignment('center');
+
+  // 区分ごと（平日・土曜・日曜・祝日）
+  TARGET_CATEGORIES.forEach(function(name, i) {
+    var c = targetCatCol_(i);
+    sheet.getRange(TARGET_CAT_ROW, c, 1, TARGET_COLS_PER_CAT).breakApart().merge()
+      .setBackground(TARGET_CAT_COLORS[i]).setFontWeight('bold').setHorizontalAlignment('center');
+    sheet.getRange(TARGET_FIRST_ROW, c, TARGET_HOURS, 1).setBackground(TARGET_INPUT_COLOR);
+    sheet.getRange(TARGET_FIRST_ROW, c + 1, TARGET_HOURS, 1)
+      .setBackground(TARGET_AUTO_COLOR).setNumberFormat('0.0').setHorizontalAlignment('center');
+    sheet.getRange(TARGET_FIRST_ROW, c + 2, TARGET_HOURS, 1)
+      .setBackground(TARGET_INPUT_COLOR).setNumberFormat('0.0').setHorizontalAlignment('center');
+    sheet.getRange(TARGET_CAT_ROW, c, lastRow - TARGET_CAT_ROW + 1, TARGET_COLS_PER_CAT)
+      .setBorder(true, true, true, true, null, null, '#666666', medium);
+  });
+
+  // 構成比の合計の行
+  sheet.getRange(TARGET_RATIO_SUM_ROW, 1, 1, cols).setBackground('#D9D9D9').setFontWeight('bold');
+
+  // 合計が100（または100%）でなければ赤くする
+  var sumCells = TARGET_CATEGORIES.map(function(name, i) {
+    return colLetter_(targetCatCol_(i)) + TARGET_RATIO_SUM_ROW;
+  });
+  var keep = sheet.getConditionalFormatRules().filter(function(rule) {
+    var hit = false;
+    rule.getRanges().forEach(function(r) { if (sumCells.indexOf(r.getA1Notation()) >= 0) hit = true; });
+    return !hit;
+  });
+  var head = sumCells[0];
+  keep.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND(' + head + '<>"",' + head + '<>100,ROUND(' + head + ',4)<>1)')
+    .setBackground('#F4CCCC').setFontColor('#9C0006')
+    .setRanges(sumCells.map(function(a1) { return sheet.getRange(a1); }))
+    .build());
+  sheet.setConditionalFormatRules(keep);
+
+  // 幅と、見出しの固定
+  sheet.setColumnWidth(1, 210);
+  for (var c2 = TARGET_FIRST_COL; c2 <= cols; c2++) sheet.setColumnWidth(c2, 84);
+  sheet.setFrozenRows(TARGET_HEAD_ROW);
+  sheet.setFrozenColumns(1);
+  return sheet;
+}
+
 function getTargetSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(TARGET_SHEET_NAME);
@@ -1228,11 +1322,9 @@ function getTargetSheet_() {
   for (var h = 0; h < TARGET_HOURS; h++) hours.push([(TARGET_FIRST_HOUR + h) + ':00']);
   sheet.getRange(TARGET_FIRST_ROW, 1, TARGET_HOURS, 1).setValues(hours);
 
-  sheet.getRange(TARGET_CAT_ROW, 1, 1, 20).setFontWeight('bold');
-  sheet.getRange(TARGET_HEAD_ROW, 1, 1, 20).setFontWeight('bold');
   sheet.getRange(TARGET_AVG_ROW, 2, 1, 20).setNumberFormat('#,##0');
   sheet.getRange(TARGET_SPH_ACTUAL_ROW, 2, 1, 20).setNumberFormat('#,##0');
-  sheet.setColumnWidth(1, 200);
+  styleTargetSheet_(sheet);
   refreshTargetSheet_(sheet);
   ss.setActiveSheet(active);
   return sheet;
@@ -1397,6 +1489,7 @@ function openTargetSheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = getTargetSheet_();
   refreshTargetSheet_(sheet);
+  styleTargetSheet_(sheet);
   ss.setActiveSheet(sheet);
   SpreadsheetApp.getUi().alert(
     '「目安人数」シートを開きました。\n\n' +
@@ -3280,15 +3373,87 @@ function isWeekSheetName_(name) {
   return /^\d{4}$|^\d{6}$/.test(name);
 }
 
-function getArchiveSpreadsheet_() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var settings = ss.getSheetByName(REQUEST_SETTINGS_SHEET);
-  if (!settings) return null;
-  var url = String(settings.getRange(ARCHIVE_URL_CELL).getDisplayValue()).trim();
-  var id = /[-\w]{25,}/.exec(url);
+// ----- 書庫は暦年ごとに分ける -----
+// 週シートは「その週の年」の書庫へ入れる。年が変わって新しい書庫が要るときは、
+// 自動で作って、メールと画面でお知らせする（作った書庫のURLは設定シートにも入れ直す）。
+var ARCHIVE_YEAR_PROP = 'ARCHIVE_URL_';   // 文書プロパティ ARCHIVE_URL_2026
+
+// URLから書庫を開く（開けなければ null）
+function openArchiveByUrl_(ss, url) {
+  var id = /[-\w]{25,}/.exec(String(url || ''));
   if (!id) return null;
   if (id[0] === ss.getId()) throw new Error('書庫ファイルに、このシフト表と同じURLが設定されています。');
   return SpreadsheetApp.openById(id[0]);
+}
+
+// 設定シートに入っている書庫のURL
+function currentArchiveUrl_(ss) {
+  var settings = ss.getSheetByName(REQUEST_SETTINGS_SHEET);
+  return settings ? String(settings.getRange(ARCHIVE_URL_CELL).getDisplayValue()).trim() : '';
+}
+
+function archiveNameForYear_(ss, year) {
+  return String(ss.getName()).replace(/\s*書庫\s*\d*\s*$/, '') + '書庫' + year;
+}
+
+// そのシートは何年の週か（T1の日付→名前の頭2桁→今年 の順で見る）
+function archiveYearOf_(ss, sheet) {
+  try {
+    var t1 = sheet.getRange('T1').getValue();
+    if (t1 instanceof Date) return Number(Utilities.formatDate(t1, ss.getSpreadsheetTimeZone(), 'yyyy'));
+  } catch (e) {}
+  var m = /^(\d{2})\d{4}/.exec(sheet.getName());
+  if (m) return 2000 + Number(m[1]);
+  return Number(Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy'));
+}
+
+// 今まで使っていた書庫を、その年のものとして覚えておく（名前に年が無ければ fallbackYear）
+// ※これをしないと、年をまたいで移すときに、既にある書庫を見失って二重に作ってしまう
+function adoptCurrentArchive_(ss, fallbackYear) {
+  var url = currentArchiveUrl_(ss);
+  if (!url) return;
+  var book = openArchiveByUrl_(ss, url);
+  if (!book) return;
+  var m = /(20\d{2})/.exec(String(book.getName()));
+  var year = m ? Number(m[1]) : fallbackYear;
+  if (!(year > 2000)) return;
+  var props = PropertiesService.getDocumentProperties();
+  if (!props.getProperty(ARCHIVE_YEAR_PROP + year)) {
+    props.setProperty(ARCHIVE_YEAR_PROP + year, url);
+  }
+}
+
+// その年の書庫を返す。無ければ作る（作ったときは created:true）
+function archiveForYear_(ss, year) {
+  var props = PropertiesService.getDocumentProperties();
+  var saved = props.getProperty(ARCHIVE_YEAR_PROP + year);
+  if (saved) {
+    var book = openArchiveByUrl_(ss, saved);
+    if (book) return { book: book, created: false };
+  }
+  var made = SpreadsheetApp.create(archiveNameForYear_(ss, year));
+  props.setProperty(ARCHIVE_YEAR_PROP + year, made.getUrl());
+  var settings = ss.getSheetByName(REQUEST_SETTINGS_SHEET);
+  if (settings) settings.getRange(ARCHIVE_URL_CELL).setValue(made.getUrl());
+  noticeArchiveCreated_(year, made);
+  return { book: made, created: true };
+}
+
+// 新しい書庫を作ったことを知らせる
+function noticeArchiveCreated_(year, made) {
+  var body = year + '年の週シートを入れる書庫を、新しく作りました。\n\n' +
+    '名前：' + made.getName() + '\n' +
+    'URL：' + made.getUrl() + '\n\n' +
+    'マイドライブの中にできています。好きなフォルダへ移してかまいません' +
+    '（場所ではなくURLで覚えているので、移しても大丈夫です）。\n\n' +
+    'シフト希望設定シートの「書庫ファイルのURL」も、この新しい書庫に入れ替えました。\n' +
+    '前の年の書庫はそのまま残っています。いつでも開けます。';
+  try {
+    MailApp.sendEmail(Session.getEffectiveUser().getEmail(),
+      '【シフト表】' + year + '年の書庫を作りました', body);
+  } catch (e) {
+    Logger.log('書庫のお知らせメールに失敗: ' + e.message);
+  }
 }
 
 // 書庫へ移す対象：古い週シートと、「〜のコピー」という残り物のシート
@@ -3341,15 +3506,12 @@ function archiveSheet_(ss, archive, sheet) {
 // 古い週を書庫へ移す本体。silent=true なら画面に出さずに行う（次週シート作成から呼ぶ）
 function archiveOldWeeks_(silent) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var archive;
-  try {
-    archive = getArchiveSpreadsheet_();
-  } catch (e) {
-    return { moved: [], failed: [], message: e.message };
-  }
   var all = archiveTargets_(ss);
   if (!all.length) return { moved: [], failed: [], message: '移す週はありません' };
-  if (!archive) return { moved: [], failed: [], message: '書庫ファイルが設定されていないため、' + all.length + '枚をそのまま残しました' };
+
+  if (!currentArchiveUrl_(ss)) {
+    return { moved: [], failed: [], message: '書庫ファイルが設定されていないため、' + all.length + '枚をそのまま残しました' };
+  }
 
   var limit = silent ? ARCHIVE_MAX_AUTO : ARCHIVE_MAX_MANUAL;
   var targets = all.slice(0, limit);
@@ -3359,17 +3521,30 @@ function archiveOldWeeks_(silent) {
   var weekTargets = targets.filter(function(s) { return isWeekSheetName_(s.getName()); });
   if (weekTargets.length) refreshHistoryForSheets_(weekTargets);
 
-  var moved = [], failed = [];
+  // 今まで使っていた書庫を、その年のものとして先に覚えておく（二重に作らないため）
+  try {
+    adoptCurrentArchive_(ss, archiveYearOf_(ss, targets[targets.length - 1]));
+  } catch (e) {
+    return { moved: [], failed: [], message: e.message };
+  }
+
+  var moved = [], failed = [], madeYears = [];
   targets.forEach(function(sheet) {
     var name = sheet.getName();
     try {
-      moved.push(archiveSheet_(ss, archive, sheet));
+      var got = archiveForYear_(ss, archiveYearOf_(ss, sheet));
+      if (got.created) madeYears.push(got.book.getName());
+      moved.push(archiveSheet_(ss, got.book, sheet));
     } catch (e) {
       failed.push(name + '（' + e.message + '）');
     }
   });
 
   var message = moved.length ? moved.length + '枚を書庫へ移しました：' + moved.join('、') : '移した週はありません';
+  if (madeYears.length) {
+    message = '新しい書庫を作りました：' + madeYears.join('、') +
+      '\n（マイドライブにあります。くわしくはメールを見てください）\n' + message;
+  }
   if (rest > 0) message += '\n残り' + rest + '枚は次回に移します（1回で移す枚数を制限しています）。';
   if (failed.length) message += '\n移せなかったシート：' + failed.join('、');
   if (!silent) SpreadsheetApp.getUi().alert(message);
