@@ -148,6 +148,7 @@ function onOpen() {
     { name: 'CP商品の実績を見る（商品別の出数・売上比・出食比）', functionName: 'buildCpProductActuals' },
     { name: '過去CP実績を今のCPに引き継ぐ（部分一致だけ確認）', functionName: 'linkPastCpNow' },
     { name: '暫定日イベントの日付確認メールを今すぐ送る', functionName: 'remindProvisionalEventsNow_' },
+    { name: '花火大会を毎年くり返し登録に変換（暫定・倍率は昨年から自動）', functionName: 'setupFireworksRecurring' },
     null,
     { name: '売上予測を更新（buildSalesForecast）', functionName: 'buildSalesForecast' },
     { name: '実績データから日次売上・売上予測を直す（訂正の反映）', functionName: 'resyncActualsFromRaw' },
@@ -2424,6 +2425,17 @@ function buildSalesForecast() {
 
   try { getOutlierExcludedDates_().forEach(d => excludedDates.add(d)); } catch(e) {}
 
+  // 本当の祝日・連休の日付Set＝イベント倍率の昨年シードで「祝日の売上スパイクを花火と誤らない」ガード用（holidayInfoMapは後で作るので軽く先読み）。MARKER_EVENT_RATE_HISTORY_SEED
+  //   ただの土曜/日曜は含めない（同曜日基準で相殺されるため）。平日祝・連休・お盆だけを対象にする。
+  const holidaySpecialSet = new Set();
+  {
+    const _hmS = ss.getSheetByName('祝日マスタ');
+    if (_hmS && _hmS.getLastRow() > 1) _hmS.getRange(2, 1, _hmS.getLastRow() - 1, 7).getValues().forEach(row => {
+      const tag = (row[6] || '').toString().trim();
+      if (row[0] && row[2] && tag !== '土曜' && tag !== '日曜' && tag !== '通常営業') holidaySpecialSet.add(toDateStr_(row[0]));
+    });
+  }
+
   const cpSettingSheet = ss.getSheetByName('CP設定');
   if (cpSettingSheet && cpSettingSheet.getLastRow() > 1) {
     cpSettingSheet.getRange(2, 1, cpSettingSheet.getLastRow()-1, 9).getValues().forEach(row => {
@@ -2471,8 +2483,10 @@ function buildSalesForecast() {
     evSheet.getRange(2, 1, evSheet.getLastRow()-1, evCols).getValues().forEach(row => {
       if (!row[0]) return;
       const start = toDate_(row[1]), end = toDate_(row[2]);
+      const startStr = evDateStrTZ_(row[1]), endStr = evDateStrTZ_(row[2]);   // JST日付文字列(実行TZに依存せず厳密比較用)。MARKER_EVENT_DATE_TZFIX
       const type = (row[4] || '').toString().trim();
-      const rate = Number(row[6]) || 1.0, priority = Number(row[7]) || 0;
+      const rateManual = Number(row[6]) || 0;         // G列＝手動倍率（空=昨年実売から自動見積り）
+      const rate = rateManual || 1.0, priority = Number(row[7]) || 0;
       const flag = (row[8] || '').toString().trim();
       const repeatPat = (evCols >= 11 ? (row[10] || '') : '').toString().trim();
       const learnByName = (flag === '自動') || (repeatPat !== ''); // 繰り返し行は同名実績で倍率を自動学習する
@@ -2484,7 +2498,9 @@ function buildSalesForecast() {
             const cur = new Date(oc.start);
             while (cur <= oc.end) { excludedDates.add(toDateStr_(cur)); cur.setDate(cur.getDate() + 1); }
           } else {
-            eventList.push({ name: row[0], start: oc.start, end: oc.end, rate, priority, learnByName, provisional: oc.provisional, isCP: false });
+            // 手動倍率が空なら、その年のイベント日ごとに「去年の同じ日」の実売から倍率を自動シード。MARKER_EVENT_RATE_HISTORY_SEED
+            const effRate = rateManual > 0 ? rateManual : (estimateEventRateFromHistory_(engMap, oc.start, holidaySpecialSet) || 1.0);
+            eventList.push({ name: row[0], start: oc.start, end: oc.end, rate: effRate, priority, learnByName, provisional: oc.provisional, isCP: false });
           }
         });
         return;
@@ -2497,9 +2513,11 @@ function buildSalesForecast() {
       } else if (type === '新商品') {
         const productCode = row[5] ? Number(row[5]) : null;
         newProductList.push({ name: row[0], start, end, productCode, priority });
-        eventList.push({ name: row[0], start, end, rate: 1.0, priority, isCP: false });
+        eventList.push({ name: row[0], start, end, startStr, endStr, rate: 1.0, priority, isCP: false });
       } else {
-        eventList.push({ name: row[0], start, end, rate, priority, learnByName, isCP: false });
+        // 単発の日付イベントも、手動倍率が空なら去年の同じ日の実売から倍率を自動シード。MARKER_EVENT_RATE_HISTORY_SEED
+        const effRate = rateManual > 0 ? rateManual : (estimateEventRateFromHistory_(engMap, start, holidaySpecialSet) || 1.0);
+        eventList.push({ name: row[0], start, end, startStr, endStr, rate: effRate, priority, learnByName, isCP: false });
       }
     });
   }
@@ -3075,15 +3093,17 @@ function buildSalesForecast() {
   });
 
   // 【統合】学習結果を「イベント登録」「CP設定」の結果列へ書き戻す（イベント実績シートの後継）
-  try { writeEventResultsBack_(ss, eventActualRates, repeatEventCoeffMap, namedEventCoeffMap); }
+  try { writeEventResultsBack_(ss, eventActualRates, repeatEventCoeffMap, namedEventCoeffMap, engMap, holidaySpecialSet); }
   catch (e) { console.log('結果の書き戻しでエラー: ' + e.message); }
 
   // イベント倍率取得
   const getEventRate = (d, engineDay) => {
     const dt = new Date(d); dt.setHours(0,0,0,0);
-    const dayOfMonth = dt.getDate();
-    const monthOfYear = dt.getMonth();
-    const hits = eventList.filter(ev => dt >= ev.start && dt <= ev.end);
+    const curStr = toDateStr_(d);                          // JST日付文字列(実行TZ非依存)。MARKER_EVENT_DATE_TZFIX
+    const dayOfMonth = Number(curStr.slice(8, 10));        // JST基準(dt.getDate()は実行TZでズレることがある)
+    const monthOfYear = Number(curStr.slice(5, 7)) - 1;    // JST基準
+    // 日付指定イベントは「JST日付文字列」で厳密一致（T15:00Z保存のズレ対策）。startStrが無い行(CP/繰り返し)は従来のDate比較。
+    const hits = eventList.filter(ev => (ev.startStr && ev.endStr) ? (curStr >= ev.startStr && curStr <= ev.endStr) : (dt >= ev.start && dt <= ev.end));
     const repeatHits = repeatEventList.filter(ev => {
       const mAnn = ev.repeat.match(/毎年(\d+)月(\d+)/);
       if (mAnn) return monthOfYear === Number(mAnn[1]) - 1 && dayOfMonth === Number(mAnn[2]);
@@ -3092,52 +3112,86 @@ function buildSalesForecast() {
     });
     const allHits = [...hits, ...repeatHits];
     if (allHits.length === 0) return { rate: 1.0, name: '' };
-    allHits.sort((a, b) => b.priority - a.priority);
-    const top = allHits[0];
-    // 長期CPかつ経過週別倍率が10サンプル以上蓄積されていれば予測に反映
-    // ただし適用は平日のみ。土日・祝日には掛けない。
-    //   理由：経過週別倍率は「過去のCP日の実績 ÷ 現在の指数平滑同曜日平均」で算出しており、
-    //   売上が伸びている曜日ほど倍率が1未満に偏る（CPの効果でなく成長トレンドを拾ってしまう）。
-    //   この偏りは伸び幅の大きい土日で特に強く出る。
-    //   実績22日の検証：log(実績/基準)=λ*log(倍率) の最小二乗推定で
-    //     平日 λ=0.81 (t=2.36 有意) → 倍率はほぼそのまま使うのが正しい
-    //     週末 λ=-0.71 (t=-2.31)   → 倍率は逆向き。掛けると必ず外れる
-    //   比重wのグリッドサーチ＋1件抜き交差検証でも、平日は w=1（現行維持）が最良、
-    //   週末は w=0（不適用）で MAPE 17.95%→10.52% と大幅改善した。
-    //   ※週末は w を負にすると更に下がるが、それはCPでなく成長トレンドの当てはめ（外挿で破綻）なので採らない。
-    //   祝日は実績が無く検証不能だが、基準値が既に祝日水準の見積りであり、
-    //   平日から学習した係数を重ねない既存方針（月内パターン・トレンド・biasも同様に不適用）に合わせる。
-    const cpDays = top.end && top.start ? (top.end - top.start) / (1000 * 60 * 60 * 24) : 0;
-    if (cpDays >= LONG_CP_DAYS) {
-      const wd = dt.getDay();                       // 0=日, 6=土
-      const hi = holidayInfoMap[toDateStr_(dt)];
-      const hTagE = hi ? (hi.tag || '') : '';
-      const isRealHolidayE = !!(hi && hi.isOff && hTagE && hTagE !== '土曜' && hTagE !== '日曜' && hTagE !== '通常営業');
-      // ★エンジン日は長期CP進行倍率を掛けない。MARKER_FORECAST_ENGINE
-      //   この倍率は旧・曜日平均ベースに対し複数の長期CPを混ぜて学習した値（季節/トレンド込み）。
-      //   エンジンのベースは実売水準を既に反映しているため、掛けると二重計上・過大になる（9月の月見CPで+20%再膨張）。
-      if (wd !== 0 && wd !== 6 && !isRealHolidayE && !engineDay) {
-        const elapsedWeek = Math.floor((dt - top.start) / (1000 * 60 * 60 * 24 * 7)) + 1;
-        const progressRate = cpProgressRateMap['w' + elapsedWeek];
-        if (progressRate !== undefined) return { rate: progressRate, name: top.name };
+
+    // 単一イベントの「適用倍率」を解決する（従来の解決順を関数化）。
+    const resolveOne = (top) => {
+      // 長期CPかつ経過週別倍率が10サンプル以上蓄積されていれば予測に反映
+      // ただし適用は平日のみ。土日・祝日には掛けない。
+      //   理由：経過週別倍率は「過去のCP日の実績 ÷ 現在の指数平滑同曜日平均」で算出しており、
+      //   売上が伸びている曜日ほど倍率が1未満に偏る（CPの効果でなく成長トレンドを拾ってしまう）。
+      //   この偏りは伸び幅の大きい土日で特に強く出る。
+      //   実績22日の検証：log(実績/基準)=λ*log(倍率) の最小二乗推定で
+      //     平日 λ=0.81 (t=2.36 有意) → 倍率はほぼそのまま使うのが正しい
+      //     週末 λ=-0.71 (t=-2.31)   → 倍率は逆向き。掛けると必ず外れる
+      //   比重wのグリッドサーチ＋1件抜き交差検証でも、平日は w=1（現行維持）が最良、
+      //   週末は w=0（不適用）で MAPE 17.95%→10.52% と大幅改善した。
+      //   ※週末は w を負にすると更に下がるが、それはCPでなく成長トレンドの当てはめ（外挿で破綻）なので採らない。
+      //   祝日は実績が無く検証不能だが、基準値が既に祝日水準の見積りであり、
+      //   平日から学習した係数を重ねない既存方針（月内パターン・トレンド・biasも同様に不適用）に合わせる。
+      const cpDays = top.end && top.start ? (top.end - top.start) / (1000 * 60 * 60 * 24) : 0;
+      if (cpDays >= LONG_CP_DAYS) {
+        const wd = dt.getDay();                       // 0=日, 6=土
+        const hi = holidayInfoMap[toDateStr_(dt)];
+        const hTagE = hi ? (hi.tag || '') : '';
+        const isRealHolidayE = !!(hi && hi.isOff && hTagE && hTagE !== '土曜' && hTagE !== '日曜' && hTagE !== '通常営業');
+        // ★エンジン日は長期CP進行倍率を掛けない。MARKER_FORECAST_ENGINE
+        //   この倍率は旧・曜日平均ベースに対し複数の長期CPを混ぜて学習した値（季節/トレンド込み）。
+        //   エンジンのベースは実売水準を既に反映しているため、掛けると二重計上・過大になる（9月の月見CPで+20%再膨張）。
+        if (wd !== 0 && wd !== 6 && !isRealHolidayE && !engineDay) {
+          const elapsedWeek = Math.floor((dt - top.start) / (1000 * 60 * 60 * 24 * 7)) + 1;
+          const progressRate = cpProgressRateMap['w' + elapsedWeek];
+          if (progressRate !== undefined) return progressRate;
+        }
       }
+      // 繰り返しイベントは実績ベースを継続（毎年・毎月で十分なサンプルが蓄積される）
+      const repeatInfo = repeatEventCoeffMap[top.name];
+      if (repeatInfo) return repeatInfo.rate;
+      // 繰り返しルール由来イベント（固定日・暫定日）は名前別の実績学習倍率を使用（実績が少なければ設定倍率）
+      const namedInfo = namedEventCoeffMap[top.name];
+      if (namedInfo && top.learnByName) return namedInfo.rate;
+      // 【自動収束】実績が貯まるほど設定倍率を実績へ寄せる（信頼度加重）。
+      //   ・短期(<21日)イベント/CP：曜日平均基準で収束。
+      //   ・長期の期間イベント(夏休み等・!isCP)：開始前基準で循環を除いた実績に収束（eventActualRatesで算出済み）。
+      //   ・長期CP(isCP)だけは循環が残るため対象外＝設定倍率/進行倍率のまま。
+      const setRate = top.rate || 1.0;
+      const actInfo = eventActualRates[top.name];
+      if ((cpDays < LONG_CP_DAYS || !top.isCP) && actInfo && actInfo.count > 0) {
+        return blendEventRate_(setRate, actInfo.actualRate, actInfo.count);
+      }
+      return setRate;
+    };
+
+    // 【複数ヒットの合成】MARKER_EVENT_SPIKE_COMBINE
+    //   同じ日に「長期CP／期間イベント」と「単発の日付指定スパイク（花火大会等）」が重なることがある。
+    //   両者は独立した需要要因なので、優先度で片方を捨てると単発の山（例:飯塚納涼花火 1.7倍）が
+    //   長期CP（実質1.0倍）に埋もれて消えてしまう＝これが「花火が予測に乗らない」真因だった。
+    //   → ベース（長期CP/期間イベント＝優先度最上位を1つ）× スパイク（単発の最大効果を1つ）で掛け合わせる。
+    //   単発が複数重なった日は「最も1から乖離する1つ」だけ採用し、単発同士の過大な二重計上を避ける。
+    //   長期CPの適用倍率はエンジン基準では実質1.0付近（既にベースに織り込み済み）なので過大計上にならない。
+    const isSpike = (ev) => !ev.isCP && ev.start && ev.end && ((ev.end - ev.start) / (1000 * 60 * 60 * 24) < LONG_CP_DAYS);
+    const spikeHits = hits.filter(isSpike);                       // 単発は日付指定hitsのみ（繰り返しはベース側で扱う）
+    const baseHits  = allHits.filter(ev => !isSpike(ev));         // 長期CP・期間イベント・繰り返しイベント
+
+    let baseRate = 1.0, baseName = '';
+    if (baseHits.length) {
+      baseHits.sort((a, b) => b.priority - a.priority);
+      baseRate = resolveOne(baseHits[0]); baseName = baseHits[0].name;
     }
-    // 繰り返しイベントは実績ベースを継続（毎年・毎月で十分なサンプルが蓄積される）
-    const repeatInfo = repeatEventCoeffMap[top.name];
-    if (repeatInfo) return { rate: repeatInfo.rate, name: top.name };
-    // 繰り返しルール由来イベント（固定日・暫定日）は名前別の実績学習倍率を使用（実績が少なければ設定倍率）
-    const namedInfo = namedEventCoeffMap[top.name];
-    if (namedInfo && top.learnByName) return { rate: namedInfo.rate, name: top.name };
-    // 【自動収束】実績が貯まるほど設定倍率を実績へ寄せる（信頼度加重）。
-    //   ・短期(<21日)イベント/CP：曜日平均基準で収束。
-    //   ・長期の期間イベント(夏休み等・!isCP)：開始前基準で循環を除いた実績に収束（eventActualRatesで算出済み）。
-    //   ・長期CP(isCP)だけは循環が残るため対象外＝設定倍率/進行倍率のまま。
-    const setRate = top.rate || 1.0;
-    const actInfo = eventActualRates[top.name];
-    if ((cpDays < LONG_CP_DAYS || !top.isCP) && actInfo && actInfo.count > 0) {
-      return { rate: blendEventRate_(setRate, actInfo.actualRate, actInfo.count), name: top.name };
+    let spikeRate = 1.0, spikeName = '';
+    if (spikeHits.length) {
+      let bestDev = -1;
+      spikeHits.forEach(ev => {
+        const r = resolveOne(ev);
+        const dev = Math.abs(r - 1);
+        if (dev > bestDev) { bestDev = dev; spikeRate = r; spikeName = ev.name; }
+      });
     }
-    return { rate: setRate, name: top.name };
+
+    if (baseHits.length && spikeHits.length) {
+      return { rate: Math.round(baseRate * spikeRate * 1000) / 1000, name: spikeName + '×' + baseName };
+    }
+    if (spikeHits.length) return { rate: spikeRate, name: spikeName };
+    return { rate: baseRate, name: baseName };
   };
 
   // 既存の「実績確定」行を読み込む。あわせて未来だったときに「届けた予測(biasAdj込み)」も記録する。
@@ -3295,6 +3349,8 @@ function buildSalesForecast() {
   const statusColorMap = { '実績確定':'#f0f0f0','除外':'#ffe0e0','予報反映中':'#e8f4fd','天候未定':'#fff9e6','予測':'#ffffff' };
   forecastRows.forEach((row, i) => { fSheet.getRange(i+2,1,1,12).setBackground(statusColorMap[row[9]] || '#ffffff'); });
 
+  try { fSheet.getRange('T1:T2').clearContent(); } catch (e) {}   // 旧・一時診断(MARKER_EVENT_DBG)の残骸を掃除
+
   try { applyCalendarToForecast_(ss); } catch (e) { console.log('カレンダー反映をスキップ: ' + e); }   // 承認済みカレンダー倍率を未来予測(I)に。MARKER_CALENDAR_EFFECT
   try { computeForecastBlend_(ss); } catch (e) { console.log('ブレンド列の計算をスキップ: ' + e); }   // 本番×回帰ブレンドをM/N列に。MARKER_FORECAST_BLEND
   try { if (ss.getSheetByName(SEASONAL_HIST_SHEET_)) seasonalRebuildIndex_(ss); } catch (e) { console.log('季節指数の自動更新をスキップ: ' + e); }   // 取込済みの店だけ・実績が増えたら季節指数(見える化)を自動更新。MARKER_SEASONAL_INDEX
@@ -3415,7 +3471,17 @@ function computeForecastBlend_(ss) {
     let lyPred = null;
     if (hasHist) {
       let base = 0;
-      if (hol === 1) { base = lyHolPeakOf_(new Date(r[0])); if (!(base > 0)) base = lySmoothOf_(new Date(r[0])); }
+      // 強いイベントスパイク(花火等 event≧1.3)は「昨年の同暦日±1日のピーク」＝去年の同じ祭り当日を使う。MARKER_LY_EVENT_PEAK
+      //   通常の同曜(±10日)中央値だと、去年の花火(同暦日だが曜日は年でズレる)を取り逃がし、
+      //   さらに外れ値トリム(中央値1.5倍超を除外)で弾くため、昨年水準が普通の日に沈む。
+      //   → 本番(I)に1.7が乗っても、昨年比重60%が普通日水準に引き下げる＝「イベント日の予測が上がらない」主因だった。
+      //   ★±3日ピーク(祝日用)だと隣接の週末(元々高い日曜)を拾って過大化する(検証:2025/09/25花火176,803でなく9/28日曜214,525を拾った)。
+      //     固定日イベントは年でほぼ同暦日なので±1日に絞り、去年の花火当日そのものを捕まえる。本番・昨年が同じ山を指しブレンドが正しく上がる(二重計上ではない)。
+      if (event >= 1.3) {
+        const c = dShift_(new Date(r[0]), 365);
+        let pk = 0; for (let o = -1; o <= 1; o++) { const d = new Date(c.getFullYear(), c.getMonth(), c.getDate()); d.setDate(d.getDate() + o); const v = hMap[toDateStr_(d)]; if (v > pk) pk = v; }
+        base = pk > 0 ? pk : (lyHolPeakOf_(new Date(r[0])) || lySmoothOf_(new Date(r[0])));
+      } else if (hol === 1) { base = lyHolPeakOf_(new Date(r[0])); if (!(base > 0)) base = lySmoothOf_(new Date(r[0])); }
       else base = lySmoothOf_(new Date(r[0]));
       if (base > 0) lyPred = base;
     }
@@ -3752,6 +3818,7 @@ function seasonalBacktest() {
 //   ・元データ：日次売上実績(売上/客数)・売上予測(予測/誤差)・月予算配分(予算)・原価月次履歴(原価率)・廃棄実績(廃棄)・CP商品実績(CP)。
 //   ・どのシートが欠けても該当欄が空になるだけで他は出る（各読み取りを独立・安全側に）。
 var DASHBOARD_SHEET_ = 'ダッシュボード';
+var DASH_DATA_TOP_ = 100;   // グラフ元データ(日別/原価率/廃棄)の先頭行。全グラフ(34〜91行)より下に置き、グラフが数字表に重ならないようにする。MARKER_DASH_DATA_BELOW_CHARTS
 
 function ensureDashboardSheet_(ss) {
   return ss.getSheetByName(DASHBOARD_SHEET_) || ss.insertSheet(DASHBOARD_SHEET_, 0);
@@ -3917,7 +3984,7 @@ function buildDashboardData_(ss, sh) {
   // MARKER_DASH_HELPER_BELOW: 生の数字表(日別/原価率/廃棄)は上部から撤去し、グラフの下(80行目〜)へ集約＝上は「KPIの数字＋グラフ」だけ。原価率・廃棄の“2か所表示”を解消し、J〜N列を空にする。
   sh.getRange(1, 1, 60, 9).clearContent().setBackground(null);
   sh.getRange(1, 10, 60, 13).clearContent().setBackground(null);   // 旧・上部の補助表(J〜V)を消す
-  sh.getRange(78, 1, 70, 22).clearContent().setBackground(null).setFontColor(null);   // 下部のグラフ元データ領域
+  sh.getRange(78, 1, 160, 22).clearContent().setBackground(null).setFontColor(null);   // 下部のグラフ元データ領域(旧位置80〜も含めて広めにクリア)
   const noBudget = budgetTotal === 0;
   sh.getRange('A1').setValue('📊 ダッシュボード（' + ym + '）').setFontWeight('bold').setFontSize(14);
   sh.getRange('A2').setValue('更新: ' + Utilities.formatDate(new Date(), tz, 'yyyy/MM/dd HH:mm') + '　金額は千円単位' + (noBudget ? '　※当月の予算が未登録（月予算配分で対象月を' + ym + 'にして実行すると予算比が出ます）' : '（予算：' + budgetSrc + '）'));
@@ -3982,49 +4049,59 @@ function buildDashboardData_(ss, sh) {
   else sh.getRange(25, 6).setValue('（今月のイベントはありません）');
 
   // ▼ グラフの元データ（通常は見なくてOK）＝80行目以降にまとめる。上部には出さない＝“2か所表示”を解消。
-  sh.getRange(79, 1).setValue('▼ 以下はグラフの元データです（通常は見なくてOK）').setFontColor('#999999').setFontStyle('italic');
-  // 補助表①：当月 日別（予算/実績/実績累計/予算累計）＝A〜E(80行目〜)。単位は千円(÷1000)＝「85」の形。実績=青ヘッダ。
-  const dayTab = [['日', '予算(千円)', '実績(千円)', '実績累計(千円)', '予算累計(千円)']];
-  let cumA = 0, cumB = 0;
+  const D0 = DASH_DATA_TOP_;   // 元データ先頭行（全グラフより下）
+  sh.getRange(D0 - 1, 1).setValue('▼ 以下はグラフの元データです（通常は見なくてOK）').setFontColor('#999999').setFontStyle('italic');
+  // 補助表①：当月 日別（予算/実績/実績累計/予算累計）＝A〜E(D0行目〜)。単位は千円(÷1000)＝「85」の形。実績=青ヘッダ。
+  const dayTab = [['日', '予算(千円)', '実績(千円)', '予測(千円)', '実績累計(千円)', '予算累計(千円)', '予測累計(千円)']];   // 予測＋予測累計を追加。MARKER_DASH_DAILY_FORECAST
+  let cumA = 0, cumB = 0, cumF = 0;
   for (let dn = 1; dn <= daysInMonth; dn++) {
     const ds = dstr(new Date(y, moIdx, dn));
     const a = (actualByDay[dn] !== undefined) ? actualByDay[dn] : '';
     const bud = (budgetByDay[ds] !== undefined) ? budgetByDay[ds] : '';
+    const fcv = (fcByDay[dn] !== undefined && fcByDay[dn] > 0) ? fcByDay[dn] : '';   // I予測売上(0/空は非表示)
     if (a !== '') cumA += a;
     if (bud !== '') cumB += bud;
-    dayTab.push([dn, kt(bud), kt(a), (a !== '' ? kt(cumA) : ''), (bud !== '' ? kt(cumB) : '')]);   // kt()=千円単位(÷1000)
+    if (fcv !== '') cumF += fcv;
+    dayTab.push([String(dn), kt(bud), kt(a), kt(fcv), (a !== '' ? kt(cumA) : ''), (bud !== '' ? kt(cumB) : ''), (fcv !== '' ? kt(cumF) : '')]);   // 日は文字＝横軸を分類扱いにして毎日ラベルを出す(数値だと連続軸で間引かれる)。MARKER_DASH_XAXIS_EVERYDAY。kt()=千円単位(÷1000)
   }
-  sh.getRange(80, 1, dayTab.length, 5).setValues(dayTab);
-  sh.getRange(81, 2, daysInMonth, 4).setNumberFormat('#,##0');
-  sh.getRange(80, 1, 1, 5).setFontWeight('bold');
-  sh.getRange(80, 3).setBackground('#cfe2f3');   // 実績＝青
-  // 補助表②：原価率の推移（2026/05以降）＝G〜I(80行目〜)
+  sh.getRange(D0, 1, dayTab.length, 1).setNumberFormat('@');   // 先に日列を文字書式(@)に固定＝「1」が数値に戻らず分類軸になる（毎日ラベルが出る）。MARKER_DASH_XAXIS_EVERYDAY
+  sh.getRange(D0, 1, dayTab.length, 7).setValues(dayTab);
+  sh.getRange(D0 + 1, 2, daysInMonth, 6).setNumberFormat('#,##0');
+  sh.getRange(D0, 1, 1, 7).setFontWeight('bold');
+  sh.getRange(D0, 3).setBackground('#cfe2f3');   // 実績＝青
+  // 補助表②：原価率の推移（2026/05以降）＝I〜K(D0行目〜)。日別表がA〜Gに拡張したため右へずらす。
   const ymNum = s => { const m = String(s).replace(/-/g, '/').match(/(\d{4})\/(\d{1,2})/); return m ? Number(m[1]) * 100 + Number(m[2]) : 0; };
   const costTab = [['月', '理論原価率', '実際原価率']].concat(costTrend.filter(r => ymNum(r[0]) >= 202605));
-  sh.getRange(80, 7, costTab.length, 3).setValues(costTab);
-  if (costTab.length > 1) sh.getRange(81, 8, costTab.length - 1, 2).setNumberFormat('0.0%');
-  sh.getRange(80, 7, 1, 3).setFontWeight('bold');
-  // 補助表③：廃棄の理由別内訳（直近28日・円）＝K列〜(80行目〜)。理由(行)×品目(列)の積み上げ用。品目は金額上位6＋その他。
+  sh.getRange(D0, 9, costTab.length, 3).setValues(costTab);
+  if (costTab.length > 1) sh.getRange(D0 + 1, 10, costTab.length - 1, 2).setNumberFormat('0.0%');
+  sh.getRange(D0, 9, 1, 3).setFontWeight('bold');
+  // 補助表③：廃棄の品目別内訳（直近28日・円）＝M列〜(D0行目〜)。品目(行)×理由(列)の積み上げ用。（日別表拡張で右へずらす）
+  //   品目を「行(＝グラフの縦軸ラベル)」にする＝食材名が軸ラベルとして必ず表示される（右凡例だと文字が切れて出ないSheetsの癖を回避）。棒の色=理由。MARKER_DASH_WASTE_ITEM_ROWS
+  //   先頭セルは空＝グラフが「1行目＝系列名(理由)」「1列目＝分類(品目)」と正しく認識する。MARKER_DASH_WASTE_HEADER_CORNER
   const reasonOrder = ['期限切れ', '筋取り', '調理ミス'];
-  const wrKeys = reasonOrder.filter(r => wasteReason[r] !== undefined)
+  const reasonsPresent = reasonOrder.filter(r => wasteReason[r] !== undefined)
     .concat(Object.keys(wasteReason).filter(r => reasonOrder.indexOf(r) < 0).sort((a, b) => wasteReason[b] - wasteReason[a]));
-  const topItems = Object.keys(itemTotal).sort((a, b) => itemTotal[b] - itemTotal[a]).slice(0, 5);   // 凡例を絞って読みやすく（上位5＋その他）
+  const topItems = Object.keys(itemTotal).sort((a, b) => itemTotal[b] - itemTotal[a]).slice(0, 6);   // 棒=品目。上位6＋その他
   const hasOther = Object.keys(itemTotal).length > topItems.length;
-  // 凡例(色見本)には読みやすい食材名を出す：正式名(US産ﾗｳﾝﾄﾞｵｲｽﾀｰ_S)→短縮名(ﾗｳﾝﾄﾞｵｲｽﾀｰ)。MARKER_DASH_WASTE_SHORTNAME
-  const itemColsDisp = topItems.map(shortWasteName_).concat(hasOther ? ['その他'] : []);
-  const wasteHead = ['理由'].concat(itemColsDisp);
-  const wasteBody = wrKeys.map(rs => {
-    const row = [rs];
-    let used = 0;
-    topItems.forEach(it => { const v = (wasteRI[rs] && wasteRI[rs][it]) ? Math.round(wasteRI[rs][it]) : 0; used += v; row.push(v); });
-    if (hasOther) { const tot = Math.round(wasteReason[rs] || 0); row.push(Math.max(0, tot - used)); }
+  const wasteHead = [''].concat(reasonsPresent);   // 先頭空＋理由(系列名)
+  const wasteBody = topItems.map(it => {
+    const row = [shortWasteName_(it)];   // 縦軸に出る品目名（短縮）
+    reasonsPresent.forEach(rs => { row.push((wasteRI[rs] && wasteRI[rs][it]) ? Math.round(wasteRI[rs][it]) : 0); });
     return row;
   });
+  if (hasOther) {
+    const orow = ['その他'];
+    reasonsPresent.forEach(rs => {
+      let used = 0; topItems.forEach(it => { used += (wasteRI[rs] && wasteRI[rs][it]) ? Math.round(wasteRI[rs][it]) : 0; });
+      orow.push(Math.max(0, Math.round(wasteReason[rs] || 0) - used));
+    });
+    wasteBody.push(orow);
+  }
   const wasteTab = [wasteHead].concat(wasteBody);
   const wasteCols = wasteHead.length;
-  sh.getRange(80, 11, wasteTab.length, wasteCols).setValues(wasteTab);
-  if (wasteTab.length > 1) sh.getRange(81, 12, wasteTab.length - 1, wasteCols - 1).setNumberFormat('#,##0');
-  sh.getRange(80, 11, 1, wasteCols).setFontWeight('bold');
+  sh.getRange(D0, 13, wasteTab.length, wasteCols).setValues(wasteTab);
+  if (wasteTab.length > 1) sh.getRange(D0 + 1, 14, wasteTab.length - 1, wasteCols - 1).setNumberFormat('#,##0');
+  sh.getRange(D0, 13, 1, wasteCols).setFontWeight('bold');
 
   return { dayRows: dayTab.length, costRows: costTab.length, wasteRows: wasteTab.length, wasteCols: wasteCols };
 }
@@ -4046,26 +4123,28 @@ function shortWasteName_(name) {
 // グラフを作り直す（メニューからの手動更新時のみ）。毎朝の自動更新では呼ばない＝範囲追従で足りる。
 function buildDashboardCharts_(sh, meta) {
   sh.getCharts().forEach(c => sh.removeChart(c));
-  // ① 当月 日別売上（灰=予算／青=実績＝左軸・日別、累計＝右軸の点線）。横長で1か月を日単位で。数値を各点に表示。
+  // ① 当月 日別売上（赤=予算／青=実績／緑点線=予測＝左軸・日別、累計＝右軸の点線）。横長で1か月を日単位で。数値は予算・実績のみ表示。
   sh.insertChart(sh.newChart().asLineChart()
-    .addRange(sh.getRange(80, 1, meta.dayRows, 5))   // A日 B予算 C実績 D実績累計 E予算累計(80行目〜の元データ・千円単位)
-    .setOption('title', '当月 日別売上（赤=予算／青=実績・点線=累計は右軸・累計は数値なし）※単位：千円')
+    .addRange(sh.getRange(DASH_DATA_TOP_, 1, meta.dayRows, 7))   // A日 B予算 C実績 D予測 E実績累計 F予算累計 G予測累計(元データ・千円単位)
+    .setOption('title', '当月 日別売上（赤=予算／青=実績／緑点線=予測・右軸点線=累計 実績水色/予算桃/予測薄緑）※単位：千円')
     .setOption('backgroundColor', '#ffffff')
     .setOption('titleTextStyle', { fontSize: 14, bold: true })
     .setOption('legend', { position: 'bottom' })
     .setOption('series', {
       0: { color: '#ea4335', dataLabel: 'value' },                                                     // 予算＝赤
       1: { color: '#1a73e8', dataLabel: 'value' },                                                     // 実績＝青
-      2: { color: '#8ab4f8', targetAxisIndex: 1, lineDashStyle: [4, 4], pointSize: 0 },                // 実績累計＝水色(数値なし)
-      3: { color: '#f7a5b4', targetAxisIndex: 1, lineDashStyle: [4, 4], pointSize: 0 }                 // 予算累計＝ピンク(数値なし)
+      2: { color: '#34a853', lineDashStyle: [2, 2], pointSize: 0 },                                    // 予測＝緑(点線・数値なし)
+      3: { color: '#8ab4f8', targetAxisIndex: 1, lineDashStyle: [4, 4], pointSize: 0 },                // 実績累計＝水色
+      4: { color: '#f7a5b4', targetAxisIndex: 1, lineDashStyle: [4, 4], pointSize: 0 },                // 予算累計＝ピンク
+      5: { color: '#81c995', targetAxisIndex: 1, lineDashStyle: [4, 4], pointSize: 0 }                 // 予測累計＝薄緑
     })
     .setOption('vAxes', { 0: { format: '#,##0', title: '日別(千円)' }, 1: { format: '#,##0', title: '累計(千円)' } })
-    .setOption('hAxis', { title: '日', slantedText: false })
+    .setOption('hAxis', { title: '日', slantedText: false, showTextEvery: 1 })   // 横軸は毎日表示（間引かない）
     .setOption('pointSize', 5)
     .setPosition(34, 1, 0, 0).setOption('width', 1180).setOption('height', 380).build());
   // ② 原価率の推移（緑=理論／赤=実際・35〜45%固定・各月に数値ラベル）折れ線
   if (meta.costRows > 1) sh.insertChart(sh.newChart().asLineChart()
-    .addRange(sh.getRange(80, 7, meta.costRows, 3))
+    .addRange(sh.getRange(DASH_DATA_TOP_, 9, meta.costRows, 3))
     .setOption('title', '原価率の推移（緑=理論／赤=実際・35〜45%）')
     .setOption('backgroundColor', '#ffffff')
     .setOption('titleTextStyle', { fontSize: 14, bold: true })
@@ -4074,18 +4153,19 @@ function buildDashboardCharts_(sh, meta) {
     .setOption('series', { 0: { color: '#34a853', dataLabel: 'value' }, 1: { color: '#ea4335', dataLabel: 'value' } })   // 明るい緑/赤
     .setOption('pointSize', 7)
     .setPosition(55, 1, 0, 0).setOption('width', 720).setOption('height', 320).build());
-  // ③ 廃棄の理由別内訳（直近28日・円）＝積み上げ横棒。棒=理由(期限切れ/筋取り/調理ミス)、棒の中の色分け=品目(ラウンドオイスター/クロバラ等・上位5＋その他)。
-  //   凡例(色見本)は下に大きく＝食材名を読みやすく。MARKER_DASH_WASTE_LEGEND_READABLE
+  // ③ 廃棄の品目別内訳（直近28日・円）＝積み上げ横棒。棒=品目(食材名は縦軸ラベルで必ず表示)、棒の色分け=理由(赤=期限切れ/橙=筋取り/青=調理ミス)。
+  //   食材名を凡例でなく縦軸に出す＝右凡例だと文字が切れて出ないSheetsの癖を回避。色の意味はタイトルにも明記。MARKER_DASH_WASTE_ITEM_ROWS
   if (meta.wasteRows > 1) sh.insertChart(sh.newChart().asBarChart()
-    .addRange(sh.getRange(80, 11, meta.wasteRows, meta.wasteCols))
-    .setOption('title', '廃棄の理由別内訳（直近28日・円）※棒の中の色=品目')
+    .addRange(sh.getRange(DASH_DATA_TOP_, 13, meta.wasteRows, meta.wasteCols))
+    .setOption('title', '廃棄の品目別内訳（直近28日・円）※棒の色=理由（赤=期限切れ／橙=筋取り／青=調理ミス）')
     .setOption('isStacked', true)
     .setOption('backgroundColor', '#ffffff')
-    .setOption('titleTextStyle', { fontSize: 14, bold: true })
-    .setOption('legend', { position: 'bottom', textStyle: { fontSize: 12 } })   // 凡例を下に・文字大きく＝食材名が読める（chartArea指定は空描画の原因になるため使わない）
+    .setOption('titleTextStyle', { fontSize: 13, bold: true })
+    .setOption('legend', { position: 'right', textStyle: { fontSize: 12 } })   // 凡例=理由(3つ・短いので出る)。食材名は縦軸ラベル側で表示。
     .setOption('hAxis', { title: '円', format: '#,##0' })
-    .setOption('colors', ['#ea4335', '#4285f4', '#fbbc04', '#34a853', '#a142f4', '#bdbdbd'])   // 品目ごとの明るい配色(最後=その他=灰)
-    .setPosition(55, 12, 0, 0).setOption('width', 760).setOption('height', 460).build());
+    .setOption('vAxis', { textStyle: { fontSize: 11 } })   // 縦軸=食材名（読みやすく）
+    .setOption('colors', ['#ea4335', '#fbbc04', '#4285f4', '#34a853', '#a142f4', '#bdbdbd'])   // 理由の色：期限切れ=赤/筋取り=橙/調理ミス=青
+    .setPosition(73, 1, 0, 0).setOption('width', 760).setOption('height', 380).build());   // 原価率グラフの下に左寄せで配置
 }
 
 // 月予算を日別に配分する（複数月まとめて）。MARKER_MONTH_BUDGET_ALLOC / MARKER_MONTH_BUDGET_MULTI
@@ -4974,6 +5054,85 @@ function expandEventRepeat_(pattern, today, endDate) {
     result.push({ start: sd, end: ed, provisional });
   });
   return result;
+}
+
+// 【イベント倍率の昨年シード】手動倍率(G列)が空のイベントを「去年の同じ日の実売 ÷ その頃の普通日水準」で自動見積り。MARKER_EVENT_RATE_HISTORY_SEED
+//   狙い：花火・祭りなど毎年くり返す行事を、店長が倍率を手打ちしなくても“去年の実力”から自動で反映する（今回限りでなく汎用）。
+//   ・分子＝去年の同暦日±1日のピーク（祭りは年で曜日/日がずれるので当日近傍の最大＝去年の行事当日を捕まえる）。
+//   ・分母＝去年の同曜日(±21日)の中央値をスパイク除外(中央値1.5倍超)した平均＝普通の同曜日水準。
+//   ・比＝倍率。0.7〜2.5にクランプ。効果が薄い(|比-1|<0.15)日はnull＝1.0扱い＝ノイズで予測を動かさない。
+//   ・去年データが無い(新店・新規の祭り)ならnull＝従来どおり設定倍率で動く。
+//   ・翌年以降は実績が貯まり eventActualRates / namedEventCoeffMap の学習が引き継ぐ（このシードは初年度のコールドスタート用）。
+//   engMap＝{'yyyy/MM/dd':売上}（過去売上履歴∪日次売上実績＝昨年含む）。dt＝今年のイベント日。specialSet＝祝日(isOff)の日付Set。
+//   ★お盆(8/11〜16)・祝日にはシードしない：これらの日はエンジンが既にお盆/祝日水準で高く見込むため、
+//     倍率を上乗せすると二重計上になり、しかも去年の実売スパイクが「花火の効果」でなくお盆/祝日の効果を誤って拾う
+//     （実証：関門海峡8/13=お盆で2.43倍・宮若7/20=海の日で2.32倍の誤検出）。祝日日の需要は既存の祝日基準値/連休ロジックに任せる。
+function estimateEventRateFromHistory_(engMap, dt, specialSet) {
+  if (!engMap || !dt || isNaN(dt.getTime())) return null;
+  const isSpecialDs_ = ds => { const d = new Date(ds); const ob = d.getMonth() === 7 && d.getDate() >= 11 && d.getDate() <= 16; return ob || (specialSet && specialSet.has(ds)); }; // お盆・平日祝・連休(土日は除く)
+  if (isSpecialDs_(toDateStr_(dt))) return null;   // 適用先が祝日/お盆＝エンジンが既に高く見込む（上乗せは二重計上）
+  const c = new Date(dt.getFullYear() - 1, dt.getMonth(), dt.getDate()); // 1年前の同暦日
+  let peak = 0, peakDs = '';
+  for (let o = -1; o <= 1; o++) { const d = new Date(c.getFullYear(), c.getMonth(), c.getDate() + o); const ds = toDateStr_(d); const v = engMap[ds]; if (v > peak) { peak = v; peakDs = ds; } }
+  if (!(peak > 0)) return null;
+  if (isSpecialDs_(peakDs)) return null;           // スパイクの出所が祝日/お盆＝花火でなく祝日の効果 → シードしない（宮若7/20=海の日の誤検出対策）
+  const dw = c.getDay(), arr = [];
+  for (let o = -21; o <= 21; o++) { const d = new Date(c.getFullYear(), c.getMonth(), c.getDate() + o); if (d.getDay() === dw) { const v = engMap[toDateStr_(d)]; if (v > 0) arr.push(v); } }
+  if (arr.length < 3) return null;
+  arr.sort((a, b) => a - b);
+  const med = arr[(arr.length - 1) >> 1];
+  const kept = arr.filter(x => x <= 1.5 * med);
+  const base = kept.length ? kept.reduce((a, b) => a + b, 0) / kept.length : med;
+  if (!(base > 0)) return null;
+  let ratio = Math.max(0.7, Math.min(2.5, peak / base));
+  if (Math.abs(ratio - 1) < 0.15) return null;   // 明確な効果がない日はシードしない（普通日のまま）
+  return Math.round(ratio * 100) / 100;
+}
+
+// 繰り返しパターン(K列)から「今年の代表日」を1つ返す（書き戻しの倍率シード表示を、予測の適用と一致させるため）。
+function firstOccurrenceOfPattern_(pattern) {
+  try {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const horizon = new Date(today.getFullYear() + 1, 11, 31);
+    const occ = expandEventRepeat_(pattern, today, horizon);
+    return occ.length ? occ[0].start : null;
+  } catch (e) { return null; }
+}
+
+// 【セットアップ・1回】既存の花火大会イベントを「毎年くり返し・暫定」登録に変換する。MARKER_EVENT_RATE_HISTORY_SEED
+//   花火は毎年くり返すが日が年でずれる → K列に「毎年M月D日 暫定」を入れ、B/C日付を空にして繰り返し扱いへ。
+//   倍率(G)は手動があればそのまま、空なら予測時に去年の実売から自動シード（estimateEventRateFromHistory_）。
+//   暫定フラグにより毎年「日付確認メール」が届く（正確な日が分かったらK列の日付を直す）。他店にも同じ考え方で通用。
+function setupFireworksRecurring() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const sh = ss.getSheetByName('イベント登録');
+  if (!sh || sh.getLastRow() < 2) { ui.alert('イベント登録シートが見つかりません。'); return; }
+  ensureEventRepeatColumn_(sh);
+  const n = sh.getLastRow() - 1;
+  const vals = sh.getRange(2, 1, n, 11).getValues();
+  const tz = 'Asia/Tokyo';
+  const changed = [], skipped = [];
+  for (let i = 0; i < n; i++) {
+    const name = (vals[i][0] || '').toString().trim();
+    if (!/花火/.test(name)) continue;
+    if (/毎年/.test((vals[i][10] || '').toString())) { skipped.push(name + '（登録済み）'); continue; }
+    const sD = toDate_(vals[i][1]);
+    if (!sD) { skipped.push(name + '（日付が空）'); continue; }
+    const md = Utilities.formatDate(sD, tz, 'M/d').split('/');
+    const pat = '毎年' + md[0] + '月' + md[1] + '日 暫定';
+    const r = i + 2;
+    sh.getRange(r, 11).setValue(pat);   // K列＝繰り返しパターン
+    sh.getRange(r, 2).clearContent();   // B列＝開始日を空に
+    sh.getRange(r, 3).clearContent();   // C列＝終了日を空に
+    changed.push('・' + name + ' → ' + pat + (Number(vals[i][6]) > 0 ? '（倍率' + vals[i][6] + '＝手動）' : '（倍率は昨年実売から自動）'));
+  }
+  let msg = '';
+  if (changed.length) msg += '毎年くり返し登録に変換しました（' + changed.length + '件）：\n' + changed.join('\n') + '\n\n';
+  else msg += '変換した花火大会はありませんでした。\n\n';
+  if (skipped.length) msg += 'スキップ：\n' + skipped.map(s => '・' + s).join('\n') + '\n\n';
+  msg += '※日が年でずれるため「暫定」付き＝毎年「日付確認メール」が届きます。正確な日が分かったらイベント登録シートのK列の日付を直してください。\n続けて「売上予測を更新」を押すと、昨年実売から倍率が自動見積りされて反映されます。';
+  ui.alert(msg);
 }
 
 // 天候係数を「実績から学習しつつ、統計的に確かな分だけ効かせる」共通処理。
@@ -6560,7 +6719,7 @@ function blendEventRate_(setRate, actualRate, count) {
 //   ・入力列（左側）は一切触らない（clearContentsは使わない）。役目を終えた「イベント実績」は _削除待ち_ へ退避。
 //   ・「次回予測倍率」は getEventRate と同じ解決順（繰り返し学習→名前別学習→設定倍率）に合わせる。
 //     日付指定イベント/CPは方針どおり設定倍率を適用するため、実績倍率(参考)とは別に表示する。
-function writeEventResultsBack_(ss, eventActualRates, repeatEventCoeffMap, namedEventCoeffMap) {
+function writeEventResultsBack_(ss, eventActualRates, repeatEventCoeffMap, namedEventCoeffMap, engMap, specialSet) {
   const stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd');
 
   // 名前 → 実績倍率(参考)とサンプル数（優先順：日付実績→繰り返し→名前別）
@@ -6571,12 +6730,13 @@ function writeEventResultsBack_(ss, eventActualRates, repeatEventCoeffMap, named
     return null;
   };
   // 名前 → 実際に適用する倍率（getEventRateと同じ。短期＋長期の期間イベントは実績へ自動収束、長期CPのみ対象外）
-  const pickApplied = (name, settingRate, learnByName, durationDays, isCPSheet) => {
+  const pickApplied = (name, settingRate, learnByName, durationDays, isCPSheet, seedRate) => {
     if (repeatEventCoeffMap[name]) return repeatEventCoeffMap[name].rate;
     if (learnByName && namedEventCoeffMap[name]) return namedEventCoeffMap[name].rate;
     const info = eventActualRates[name];
     if ((durationDays < 21 || !isCPSheet) && info && info.count > 0) return blendEventRate_(settingRate, info.actualRate, info.count);
-    return settingRate > 0 ? settingRate : 1.0;
+    // 手動倍率も学習実績も無いイベントは、昨年実売シード（あれば）を適用＝予測(getEventRate)と一致。MARKER_EVENT_RATE_HISTORY_SEED
+    return settingRate > 0 ? settingRate : (seedRate > 0 ? seedRate : 1.0);
   };
 
   // 1シートに結果4列を書く。startCol=結果開始列(1始まり)、setRateIdx/flagIdx/repeatIdx=入力列のindex(0始まり、無ければ-1)
@@ -6595,8 +6755,14 @@ function writeEventResultsBack_(ss, eventActualRates, repeatEventCoeffMap, named
         : false;
       const sD = toDate_(row[1]), eD = toDate_(row[2]);
       const durationDays = (sD && eD) ? (eD - sD) / 86400000 : 0;  // 期間(日)。長期(≥21)は自動収束の対象外
+      // 昨年シード（イベント登録のみ・手動倍率が空のとき）。日付が空の繰り返し行はパターンから今年の代表日を割り出す。
+      let seedRate = 0;
+      if (!isCPSheet && !(settingRate > 0) && engMap) {
+        const seedDate = sD || (repeatIdx >= 0 ? firstOccurrenceOfPattern_(row[repeatIdx]) : null);
+        if (seedDate) seedRate = estimateEventRateFromHistory_(engMap, seedDate, specialSet) || 0;
+      }
       const a = pickActual(name);
-      const applied = pickApplied(name, settingRate, learnByName, durationDays, isCPSheet);
+      const applied = pickApplied(name, settingRate, learnByName, durationDays, isCPSheet, seedRate);
       return [a ? a.rate : '', a ? a.count : 0, applied, stamp];
     });
     sh.getRange(2, startCol, out.length, 4).setValues(out);
@@ -6975,7 +7141,33 @@ function buildHolidayMultByDate_(ss) {
     fcByDate[ds] = Number(r[8]) || 0;      // I列＝予測売上
     dowOfDate[ds] = d.getDay();            // 0=日..6=土（JST）
   });
-  const isRealHol = ds => holidayOffSet[ds] === true;   // 実際の休みの祝日のみ。飛び石平日は対象外
+  // ★イベント登録の「単発イベント」(除外以外・繰り返し以外・7日以内・倍率≠1)を発注・仕込みへ反映。MARKER_ORDER_EVENT_MULT
+  //   狙い：花火大会など年1回で最近の使用トレンドに無いイベントを、発注・仕込みへ確実に反映（過去に「常に1」で切られていた穴を塞ぐ）。
+  //   倍率は「予測比」でなく登録の倍率(次回予測倍率(適用)N列＝実績学習込み・無ければ補正倍率G列)を直接使う。
+  //     ＝予測ロジックの日付マッチ不具合に左右されず確実。基準(下のdowSum)からは特別日として除外＝通常日ordering不変・二重計上なし。
+  //   日付は生の値からJST文字列で厳密一致させる（T15:00Zズレ対策）。長期(>7日)・繰り返しは対象外。
+  const eventSpecialSet = {}, eventRateByDate = {};
+  const evSheetH = ss.getSheetByName('イベント登録');
+  if (evSheetH && evSheetH.getLastRow() > 1) {
+    const ecH = Math.max(14, evSheetH.getLastColumn());
+    evSheetH.getRange(2, 1, evSheetH.getLastRow() - 1, ecH).getValues().forEach(row => {
+      if (!row[0]) return;
+      if ((row[4] || '').toString().trim() === '除外') return;              // 除外区分は対象外
+      if ((ecH >= 11 ? (row[10] || '') : '').toString().trim()) return;      // 繰り返しは対象外
+      const rs = row[1], re = row[2]; if (!rs || !re) return;
+      const s0 = (rs instanceof Date) ? rs : new Date(rs);
+      const e0 = (re instanceof Date) ? re : new Date(re);
+      if (isNaN(s0.getTime()) || isNaN(e0.getTime())) return;
+      if (Math.round((e0.getTime() - s0.getTime()) / 86400000) + 1 > 7) return;   // 短期(7日以内)のみ
+      let rate = Number(row[13]) || Number(row[6]) || 1.0;                   // N列(次回予測倍率適用)優先→無ければG列(補正倍率)
+      if (rate === 1.0) return;                                              // 効果なし(1.0)は特別日にしない＝基準を減らさない
+      for (let t = s0.getTime(); t <= e0.getTime() + 1000; t += 86400000) {
+        const ds = Utilities.formatDate(new Date(t), 'Asia/Tokyo', 'yyyy/MM/dd');
+        eventSpecialSet[ds] = true; eventRateByDate[ds] = rate;
+      }
+    });
+  }
+  const isRealHol = ds => (holidayOffSet[ds] === true) || (eventSpecialSet[ds] === true);   // 実際の休みの祝日＋単発イベント。飛び石平日は対象外
   const winFrom = new Date(todayO); winFrom.setDate(todayO.getDate() - 28);
   const winTo   = new Date(todayO); winTo.setDate(todayO.getDate() + 28);
   const dowSum = {}, dowCnt = {};
@@ -6996,8 +7188,15 @@ function buildHolidayMultByDate_(ss) {
     if (m > 3.0) m = 3.0;
     map[ds] = m;
   });
+  // ★イベント日は登録倍率で確定的に上書き（予測比でなく登録倍率＝花火1.7を確実に発注・仕込みへ反映）。予測シートに無い日でも効く。MARKER_ORDER_EVENT_MULT
+  Object.keys(eventSpecialSet).forEach(ds => {
+    let m = eventRateByDate[ds] || 1.0;
+    if (m < 0.5) m = 0.5;
+    if (m > 3.0) m = 3.0;
+    map[ds] = m;
+  });
   const shown = Object.keys(map).filter(k => map[k] !== 1.0).sort().map(k => k + '=' + map[k].toFixed(2)).slice(0, 14);
-  console.log('祝日予測倍率(' + shown.length + '件): ' + shown.join(', '));
+  console.log('祝日・イベント倍率(' + shown.length + '件): ' + shown.join(', '));
   return map;
 }
 
@@ -11714,6 +11913,16 @@ function toDateStr_(val) {
   if (!val) return '';
   const d = (val instanceof Date) ? val : new Date(val);
   return Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy/MM/dd');
+}
+
+// イベント/CPの日付を「JST日付文字列(yyyy/MM/dd)」で返す。T15:00Z保存でも実行TZに依存せず正しい日になる。MARKER_EVENT_DATE_TZFIX
+function evDateStrTZ_(v) {
+  if (v === '' || v === null || v === undefined) return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : Utilities.formatDate(v, 'Asia/Tokyo', 'yyyy/MM/dd');
+  const s = String(v).trim().replace(/\.0+$/, '');
+  if (/^\d{8}$/.test(s)) return s.slice(0, 4) + '/' + s.slice(4, 6) + '/' + s.slice(6, 8);
+  const d = new Date(s.replace(/-/g, '/'));
+  return isNaN(d.getTime()) ? null : Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy/MM/dd');
 }
 
 function toDate_(val) {

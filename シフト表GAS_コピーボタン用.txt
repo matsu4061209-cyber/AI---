@@ -210,9 +210,15 @@ function onOpen() {
     .addItem('売上予算を入れ直す', 'refreshWeekBudgets')
     .addItem('目安人数を開く', 'openTargetSheet')
     .addItem('目安人数を週シートに入れ直す', 'refreshWeekTargets')
+    .addItem('目安を人数で表示する（終わった週も）', 'switchTargetsToHeadcount')
     .addSeparator()
     .addItem('調整前として記録する（いまを基準にする）', 'recordBeforeAdjust')
-    .addItem('確定する（薄い表示を消す）', 'confirmAdjust')
+    .addItem('確定する（スタッフに公開・お知らせ）', 'confirmAdjust')
+    .addItem('もう一度知らせる（PDFを作り直す）', 'publishWeekAgain')
+    .addSeparator()
+    .addItem('決まりを点検する（未成年・休憩）', 'checkWeekLawNow')
+    .addItem('スタッフの生年月日', 'openMinorSettings')
+    .addItem('お試し公開（LINEは送らない）', 'publishWeekTest')
     .addItem('色を塗り直す（掃除）', 'refreshWeekColors')
     .addSubMenu(ui.createMenu('ポジション色分け')
       .addItem('色分けを始める（このシート）', 'unlockPositionColors')
@@ -226,6 +232,7 @@ function onOpen() {
       .addItem('名前と色を変える', 'openPositionSettings')
       .addSeparator()
       .addItem('ボタンを画面に置く', 'placePositionButtons')
+      .addItem('すべての週シートにボタンを置く', 'placePositionButtonsAllWeeks')
       .addItem('ボタンを消す', 'clearPositionButtons')
       .addItem('色分けをやめる（元に戻す）', 'relockPositionColors'))
     .addSeparator()
@@ -618,7 +625,7 @@ function getRequestSettingsSheet_() {
     sheet.hideSheet();
   }
   // 基本設定の欄。空の項目だけ初期値を入れる（前の版で作ったシートにも足す）
-  sheet.getRange('E3:E25').setNumberFormat('@');
+  sheet.getRange('E3:E28').setNumberFormat('@');
   sheet.getRange('F22:F25').setNumberFormat('@');
   [[REQUEST_BASE_CLOSING_CELL, String(REQUEST_DEFAULT_BASE.closingDay)],
    [REQUEST_BASE_WEEKS_CELL, String(REQUEST_DEFAULT_BASE.deadlineWeeks)],
@@ -635,7 +642,7 @@ function getRequestSettingsSheet_() {
   // 前の版で入っていた1〜4以外の数字（14など）は初期値に直す
   var weeksNow = Number(sheet.getRange(REQUEST_BASE_WEEKS_CELL).getDisplayValue());
   if (!(weeksNow >= 1 && weeksNow <= 4)) sheet.getRange(REQUEST_BASE_WEEKS_CELL).setValue(String(REQUEST_DEFAULT_BASE.deadlineWeeks));
-  sheet.getRange('D3:D25').setValues([
+  sheet.getRange('D3:D31').setValues([
     ['基本設定：社員の締め日（毎月この日）'],
     ['基本設定：スタッフ入力締切は募集が始まる何週間前の日曜日'],
     ['基本設定：スタッフ入力締切の時刻'],
@@ -658,8 +665,21 @@ function getRequestSettingsSheet_() {
     ['ポジション1：名前（E列）と色（F列）'],
     ['ポジション2：名前（E列）と色（F列）'],
     ['ポジション3：名前（E列）と色（F列）'],
-    ['ポジション4：名前（E列）と色（F列）']
+    ['ポジション4：名前（E列）と色（F列）'],
+    ['確定してスタッフに公開した週（自動。この週だけがスタッフのページとカレンダーに出ます）'],
+    ['シフトPDFの入れ物フォルダ（自動）'],
+    ['アルバイト名簿ファイルのURL（生年月日を読みます。空ならスタッフ区分シートの入力を使います）'],
+    ['1日に欲しい人数の目安（平日）。お知らせの{人手不足}で使います'],
+    ['1日に欲しい人数の目安（土曜・日曜・祝日）。お知らせの{人手不足}で使います'],
+    ['お知らせ：締切当日の文（送る日に0を入れると送ります）']
   ]);
+  // 欲しい人数の目安。空のときだけ初期値を入れる
+  if (String(sheet.getRange(NEED_WEEKDAY_CELL).getDisplayValue()).trim() === '') {
+    sheet.getRange(NEED_WEEKDAY_CELL).setValue(NEED_DEFAULT.weekday);
+  }
+  if (String(sheet.getRange(NEED_WEEKEND_CELL).getDisplayValue()).trim() === '') {
+    sheet.getRange(NEED_WEEKEND_CELL).setValue(NEED_DEFAULT.weekend);
+  }
   // ポジションの名前と色。空のところだけ初期値を入れる
   POSITION_DEFAULTS.forEach(function(pos, i) {
     var nameCell = sheet.getRange(POSITION_NAME_ROW + i, 5);
@@ -1091,7 +1111,8 @@ function refreshWeekBudgets() {
 // ===================== 目安人数 =====================
 // 週シートの各曜日にある「目安」の行（9:00から30分ごとに30マス）を、
 // 「目安人数」シートに登録した1時間ごとの人数から自動で入れる。
-// 週シートの目安は30分ぶんの人時なので、人数の半分を入れる（3人 → 1.5）。
+// 目安も、すぐ下の「実時間」も、画面には人数で出す（4人なら4）。
+// 右はしの1日の合計だけは人時のまま（人件費の目安に使うため）。
 //   自動人数 ＝ その時間の売上（1日の平均売上×構成比）÷ 目標人時売上高。最低人数を下回らせない。
 //   手打ち人数 ＝ 店長が入れる数字。週シートにはこちらを入れる（空なら自動人数）。
 var TARGET_SHEET_NAME = '目安人数';
@@ -1457,6 +1478,7 @@ function readTargets_() {
 function applyWeekTargets_(sheet, targets, keys, tz) {
   var top = sheet.getRange('T1').getValue();
   if (!(top instanceof Date)) return 0;
+  useHeadcountDisplay_(sheet);                         // 古い「人時」表示の週は、先に人数表示へ直す
   var start = Utilities.formatDate(top, tz, 'yyyy-MM-dd');
   var changed = 0;
   TARGET_BLOCKS.forEach(function(block, i) {
@@ -1465,13 +1487,63 @@ function applyWeekTargets_(sheet, targets, keys, tz) {
     var now = sheet.getRange(block.row, block.col, 1, TARGET_SLOTS * 2 - 1).getValues()[0];
     for (var s = 0; s < TARGET_SLOTS; s++) {
       var people = Number(hours[Math.floor(s / 2)]);
-      var want = people > 0 ? people / 2 : '';          // 30分ぶんの人時
+      var want = people > 0 ? people : '';             // 画面には人数のまま出す
       if (String(now[s * 2]) === String(want)) continue;
       sheet.getRange(block.row, block.col + s * 2).setValue(want);
       changed++;
     }
   });
   return changed;
+}
+
+// 「目安」と「実時間」を人数で表示するように直す（前は30分ぶんの人時＝人数の半分だった）。
+// 直したかどうかは、実時間の式に「*2」が付いているかで見分けるので、何回実行しても二重にはならない。
+// 右はしの1日の合計は人時のままにしたいので、そこだけ「/2」を付ける。
+function useHeadcountDisplay_(sheet) {
+  var width = TARGET_SLOTS * 2 + 3;      // 実時間の先頭のマスから、右はしの合計まで
+  var last = width - 3;                  // いちばん右のマス（0から数えた位置）
+  var sumAt = width - 1;                 // 1日の合計（0から数えた位置）
+  var fixed = 0;
+  TARGET_BLOCKS.forEach(function(block) {
+    var firstCol = block.col - 2;        // 実時間は目安より1マス（2列）左から始まる
+    var actual = sheet.getRange(block.row + 1, firstCol, 1, width);
+    var formulas = actual.getFormulas()[0];
+    var joined = formulas.join('');
+    if (!joined) return;                 // 実時間の式が無いシートは触らない
+    if (joined.indexOf('*2') !== -1) return;          // もう人数表示になっている
+
+    for (var c = 0; c <= last; c += 2) {
+      if (formulas[c]) actual.getCell(1, c + 1).setFormula(formulas[c] + '*2');
+    }
+    if (formulas[sumAt]) actual.getCell(1, sumAt + 1).setFormula(formulas[sumAt] + '/2');
+
+    // 目安のマスは結合されていることがあるので、1つずつ書く
+    var guide = sheet.getRange(block.row, firstCol, 1, width);
+    var values = guide.getValues()[0];
+    var guideFormulas = guide.getFormulas()[0];
+    for (var g = 0; g <= last; g += 2) {
+      if (typeof values[g] === 'number' && values[g] > 0) guide.getCell(1, g + 1).setValue(values[g] * 2);
+    }
+    if (guideFormulas[sumAt]) guide.getCell(1, sumAt + 1).setFormula(guideFormulas[sumAt] + '/2');
+    fixed++;
+  });
+  return fixed;
+}
+
+// メニュー「目安を人数で表示する（終わった週も）」
+function switchTargetsToHeadcount() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var weeks = ss.getSheets().filter(function(s) { return /^\d{6}$/.test(s.getName()); });
+  if (!weeks.length) { ui.alert('週シートがありません。'); return; }
+  if (ui.alert('すべての週シート（' + weeks.length + '枚）の「目安」と「実時間」を、人数で出すように直します。\n\n' +
+      '今までは「4人 → 2」のように半分の数字で出ていました。これを「4人 → 4」にします。\n' +
+      '右はしの1日の合計は、今までと同じ数字のままです。\n\nよろしいですか。',
+      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+  var done = 0;
+  weeks.forEach(function(s) { if (useHeadcountDisplay_(s)) done++; });
+  ui.alert(done ? done + '枚のシートを人数の表示に直しました。'
+                : 'すべて人数の表示になっていました（直すところはありませんでした）。');
 }
 
 // 手打ちの人数だと人時売上高が上限を超えてしまう区分（人が少なすぎる区分）を挙げる
@@ -1497,7 +1569,8 @@ function openTargetSheet() {
     '　　「10」でも「10%」でも、どちらの書き方でも読み取ります。\n' +
     '・人を置く時間（B6〜C6）：この外の時間は0人になります（例 9〜22なら21時台まで）\n' +
     '・自動人数：1日の平均売上×構成比÷目標人時売上高（人を置く時間は最低人数を下回りません）\n' +
-    '・手打ち人数：実際に置く人数。週シートにはこちらが入ります（空なら自動人数）\n\n' +
+    '・手打ち人数：実際に置く人数。週シートにはこちらが入ります（空なら自動人数）\n' +
+    '　　週シートの「目安」には、この人数がそのまま出ます（4人なら4）。\n\n' +
     '直したら、メニューの「目安人数を週シートに入れ直す」を押してください。\n' +
     '自動人数は、このメニューを開いたときと入れ直したときに計算し直します。');
 }
@@ -1663,17 +1736,571 @@ function confirmAdjust() {
   var week = activeWeekSheet_();
   if (!week) return;
   var ui = SpreadsheetApp.getUi();
-  if (ui.alert('「' + week.getName() + '」を確定します。\n\n' +
-      '薄いグレーの表示を消して、今の時間を新しい「調整前」として記録し直します。\nよろしいですか。',
+  if (ui.alert('「' + week.getName() + '」（' + weekRangeLabel_(week.getName()) + '）を確定します。\n\n' +
+      '・薄いグレーの表示を消して、今の時間を新しい「調整前」にします\n' +
+      '・スタッフのページとカレンダーに、この週を公開します\n' +
+      '・全員の表をPDFにして、LINEのグループにお知らせを送ります\n\nよろしいですか。',
       ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+  var found = checkWeekLaw_(week, true);
+  if (found.length && ui.alert('決まりの確認（' + week.getName() + '）',
+      lawReportText_(found) + '\n\nこのまま確定して公開しますか。\n「いいえ」を押すと、直してから確定できます。',
+      ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
   setPen_(week, null);                 // 確定したらペンは置く
   var cleared = clearAdjustMarks_(week, ourColors_());
   saveAdjustSnapshots_(week);
   repaintWeekColors_(week);
   SpreadsheetApp.getActiveSpreadsheet().toast(
-    '確定しました。薄い表示を' + cleared + 'マス消して、今の時間を新しい「調整前」にしました。', 'シフト表', 6);
+    '確定しました。薄い表示を' + cleared + 'マス消しました。続けて公開します。', 'シフト表', 6);
+  SpreadsheetApp.flush();
+  publishWeek_(week, false, false);
 }
 
+// メニュー用：もう一度お知らせを送る（PDFも作り直す）
+function publishWeekAgain() {
+  var week = activeWeekSheet_();
+  if (!week) return;
+  var ui = SpreadsheetApp.getUi();
+  if (ui.alert('「' + week.getName() + '」（' + weekRangeLabel_(week.getName()) + '）のPDFを作り直して、\n' +
+      'LINEのグループへもう一度お知らせを送ります。よろしいですか。',
+      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+  publishWeek_(week, true, false);
+}
+
+
+// ===================== 確定した週をスタッフに公開する =====================
+// 「確定する」を押すと、次の3つを行う。
+//  ①その週を「公開した週」として覚える（スタッフのページとカレンダーは、この週だけを出す）
+//  ②全員の表（R1:FU79）をPDFにして、ドライブの「シフトPDF」フォルダに置く（同じ週は同じファイルを作り直す＝リンクは変わらない）
+//  ③LINEのグループへ、ページとPDFのリンクを送る（同じ週に二重で送らない。送り直しはメニューから）
+var PUBLISHED_WEEKS_CELL = 'E26';     // 公開した週（新しい順ではなく、押した順に足す）
+var PDF_FOLDER_CELL = 'E27';          // PDFの入れ物フォルダのID
+var PUBLISHED_KEEP = 30;              // 覚えておく週の数
+var PDF_RANGE = 'R1:GJ79';            // 印刷する範囲（全員の表。右のはみ出した文字が切れないよう、空の列を少し足している）
+var PDF_FOLDER_NAME = 'シフトPDF';
+// スタッフが見るページ（シフト希望フォームと同じアドレス。作り直さない決まり）
+var STAFF_PAGE_URL = 'https://script.google.com/macros/s/AKfycbwFtgsWnq75UnttAODig9q3c89E1Iek0Oow-lV8tHzF_Zp5qBQe2DXPahAeksqkd4i2/exec';
+
+// 週シート名 261019 → '10/19(月)〜10/25(日)'
+function weekRangeLabel_(sheetName) {
+  var start = '20' + sheetName.slice(0, 2) + '-' + sheetName.slice(2, 4) + '-' + sheetName.slice(4, 6);
+  var end = addDaysYmd_(start, 6);
+  return ymdLabel_(start) + '〜' + ymdLabel_(end);
+}
+
+// 週シート名 261019 → '2026-10-19〜10-25'（名前順＝日付順になり、年が入るので来年と重ならない）
+function weekFileLabel_(sheetName) {
+  var start = '20' + sheetName.slice(0, 2) + '-' + sheetName.slice(2, 4) + '-' + sheetName.slice(4, 6);
+  var end = addDaysYmd_(start, 6);
+  return start + '〜' + end.slice(5);
+}
+
+function publishedWeekList_(settings) {
+  return String(settings.getRange(PUBLISHED_WEEKS_CELL).getDisplayValue())
+    .split('|').map(function(x) { return x.trim(); }).filter(function(x) { return /^\d{6}$/.test(x); });
+}
+
+function markPublished_(settings, sheetName) {
+  var list = publishedWeekList_(settings).filter(function(x) { return x !== sheetName; });
+  list.push(sheetName);
+  settings.getRange(PUBLISHED_WEEKS_CELL).setValue(list.slice(-PUBLISHED_KEEP).join('|'));
+}
+
+// PDFの入れ物フォルダ。シフト表と同じ場所の「シフトPDF」の中に、年ごとのフォルダを作る
+// （1年で52枚たまるため。「シフトPDF」のIDだけ覚えておく）
+function pdfFolder_(settings, year) {
+  var top = null;
+  var id = String(settings.getRange(PDF_FOLDER_CELL).getDisplayValue()).trim();
+  if (id) {
+    try { top = DriveApp.getFolderById(id); } catch (e) {}
+  }
+  if (!top) {
+    var parents = DriveApp.getFileById(SpreadsheetApp.getActiveSpreadsheet().getId()).getParents();
+    var parent = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+    var found = parent.getFoldersByName(PDF_FOLDER_NAME);
+    top = found.hasNext() ? found.next() : parent.createFolder(PDF_FOLDER_NAME);
+    settings.getRange(PDF_FOLDER_CELL).setValue(top.getId());
+  }
+  var yearName = String(year) + '年';
+  var sub = top.getFoldersByName(yearName);
+  return sub.hasNext() ? sub.next() : top.createFolder(yearName);
+}
+
+// 週シートの決まった範囲をPDFにする
+function weekPdfBlob_(week, fileName) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var url = 'https://docs.google.com/spreadsheets/d/' + ss.getId() + '/export' +
+    '?format=pdf&gid=' + week.getSheetId() +
+    '&range=' + encodeURIComponent(PDF_RANGE) +
+    '&portrait=false&scale=4&gridlines=false&printtitle=false&sheetnames=false' +
+    '&pagenum=UNDEFINED&fzr=false&top_margin=0.85&bottom_margin=0.2&left_margin=0.2&right_margin=0.2';
+  var res = UrlFetchApp.fetch(url, {
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true
+  });
+  if (res.getResponseCode() !== 200) {
+    throw new Error('PDFを作れませんでした（' + res.getResponseCode() + '）');
+  }
+  return res.getBlob().setName(fileName);
+}
+
+// 同じ名前のPDFがあれば中身を入れ替える（リンクが変わらないようにするため）
+function savePdf_(folder, blob) {
+  var files = folder.getFilesByName(blob.getName());
+  if (files.hasNext()) {
+    var file = files.next();
+    var res = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files/' + file.getId() + '?uploadType=media', {
+      method: 'patch',
+      contentType: 'application/pdf',
+      payload: blob.getBytes(),
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) throw new Error('PDFを入れ替えられませんでした（' + res.getResponseCode() + '）');
+    return file;
+  }
+  var made = folder.createFile(blob);
+  made.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return made;
+}
+
+// お知らせの文
+function publishNoticeText_(week, pdfUrl) {
+  return weekRangeLabel_(week.getName()) + 'のシフトができました。\n' +
+    '・自分の分だけ見る → ' + STAFF_PAGE_URL + '?shift=' + week.getName() + '\n' +
+    '・全員の表（PDF） → ' + pdfUrl;
+}
+
+// メニュー用：お試し（PDFを作るだけ。LINEは送らない）
+function publishWeekTest() {
+  var week = activeWeekSheet_();
+  if (!week) return;
+  var ui = SpreadsheetApp.getUi();
+  if (ui.alert('「' + week.getName() + '」のPDFを作って、スタッフのページに公開します。\n' +
+      'LINEへのお知らせは送りません。よろしいですか。',
+      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+  publishWeek_(week, false, true);
+}
+
+// 公開する本体。resend＝true なら、もう一度LINEを送る。skipLine＝true ならLINEを送らない
+function publishWeek_(week, resend, skipLine) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var settings = getRequestSettingsSheet_();
+  var name = week.getName();
+  var storeName = String(settings.getRange(REQUEST_STORE_NAME_CELL).getDisplayValue()).trim() || 'シフト';
+  var fileName = storeName + ' シフト ' + weekFileLabel_(name) + '.pdf';
+
+  var file;
+  try {
+    file = savePdf_(pdfFolder_(settings, '20' + name.slice(0, 2)), weekPdfBlob_(week, fileName));
+  } catch (e) {
+    ss.toast('PDFを作れませんでした：' + e.message, 'シフト表', 8);
+    markPublished_(settings, name);   // ページとカレンダーには出す
+    return;
+  }
+  markPublished_(settings, name);
+
+  var pdfUrl = file.getUrl();
+  var pageUrl = STAFF_PAGE_URL + '?shift=' + name;
+  var sent = '';
+  var key = 'shift/' + name;
+  if (skipLine) {
+    sent = 'お試しのため、LINEへのお知らせは送っていません。';
+  } else if (resend || !noticeAlreadySent_(settings, key)) {
+    var line = lineConfig_(settings);
+    if (!line.token || !line.target) {
+      sent = 'LINEの設定がないため、お知らせは送っていません。';
+    } else {
+      try {
+        linePush_(line, publishNoticeText_(week, pdfUrl));
+        if (!resend) writeNoticeLog_(settings, key);
+        sent = 'LINEのグループにお知らせを送りました。';
+      } catch (e) {
+        sent = 'LINEへ送れませんでした：' + e.message;
+        noticeSendFailure_(settings, name + 'のシフト公開のお知らせ', e.message);
+      }
+    }
+  } else {
+    sent = 'この週のお知らせは送信済みです（送り直すときはメニューの「もう一度知らせる」）。';
+  }
+  showPublishResult_(week, pageUrl, pdfUrl, sent);
+}
+
+// 結果を出して、印刷用にPDFを開けるようにする
+function showPublishResult_(week, pageUrl, pdfUrl, sent) {
+  var html = '<div style="font-family:sans-serif;padding:6px 10px;font-size:14px;line-height:1.8;">' +
+    '<div style="font-weight:bold;margin-bottom:6px;">' + weekRangeLabel_(week.getName()) + ' を公開しました</div>' +
+    '<div>' + sent + '</div>' +
+    '<div style="margin-top:10px;">' +
+    '<a href="' + pdfUrl + '" target="_blank" style="display:inline-block;background:#1a73e8;color:#fff;' +
+    'padding:8px 14px;border-radius:6px;text-decoration:none;font-weight:bold;">PDFを開いて印刷する</a></div>' +
+    // スタッフのページのリンクは、そのまま押すとブラウザがアカウント番号を足して開けないことがあるため、
+    // コピーして貼り付けられるようにする
+    '<div style="margin-top:12px;font-size:12px;color:#555;">スタッフのページ（コピーして開いてください）</div>' +
+    '<div style="display:flex;gap:6px;margin-top:4px;">' +
+    '<input id="pageUrl" readonly value="' + pageUrl + '" style="flex:1;font-size:12px;padding:6px;">' +
+    '<button onclick="var b=document.getElementById(\'pageUrl\');b.select();document.execCommand(\'copy\');' +
+    'this.textContent=\'コピーしました\';" style="font-size:12px;padding:6px 10px;">コピー</button></div>' +
+    '</div>';
+  SpreadsheetApp.getUi().showModalDialog(
+    HtmlService.createHtmlOutput(html).setWidth(460).setHeight(280), 'シフトの公開');
+}
+
+// ===================== 決まりの見張り（未成年・休憩） =====================
+// 守る決まり（労働基準法）
+//  ・18歳未満（年度で見る）と高校生 … 22時〜5時は働けない／1日8時間・週40時間まで（労基法60条・61条）
+//  ・全員 … 実働6時間超で45分以上、8時間超で60分以上の休憩（労基法34条）
+// 年度で見るのは、高校生の学年に合わせるため。4月1日の時点で18歳未満なら、その年度いっぱい対象にする。
+var MINOR_NIGHT_START = 2200;      // これ以降の退勤は不可
+var MINOR_NIGHT_END = 500;         // これより前の出勤は不可
+var MINOR_DAY_HOURS = 8;           // 1日の実働の上限
+var MINOR_WEEK_HOURS = 40;         // 1週の実働の上限（年少者は44時間の特例が使えない）
+var BREAK_RULES = [{ over: 8, need: 60 }, { over: 6, need: 45 }];   // 実働◯時間超なら休憩◯分
+var LAW_WARN_COLOR = '#FFC7CE';    // 決まりに反する人の名前を塗る色
+var ROSTER_URL_CELL = 'E28';       // シフト希望設定：アルバイト名簿ファイルのURL（空ならスタッフ区分シートの入力を使う）
+var ROLE_BIRTH_COL = 3;            // スタッフ区分：C列＝生年月日
+var ROLE_SCHOOL_COL = 4;           // スタッフ区分：D列＝高校生（〇）
+var MINOR_CACHE_KEY = 'MINOR_INFO_V1';
+var MINOR_CACHE_SEC = 1800;        // 名簿の読み直しは30分に1回でよい
+
+// 名前のゆれ（全角・半角の空白）をなくす
+function flatName_(name) {
+  return String(name == null ? '' : name).replace(/[\s　]+/g, '');
+}
+
+// その日が属する年度（4月1日はじまり）
+function fiscalYearOf_(date) {
+  return date.getMonth() + 1 >= 4 ? date.getFullYear() : date.getFullYear() - 1;
+}
+
+// 年度の4月1日の時点で18歳未満か（＝その年度いっぱいは高校生と同じ扱いにする）
+function isMinorOn_(birth, date) {
+  if (!(birth instanceof Date)) return false;
+  var april1 = new Date(fiscalYearOf_(date), 3, 1);
+  var age = april1.getFullYear() - birth.getFullYear();
+  var beforeBirthday = (april1.getMonth() < birth.getMonth()) ||
+    (april1.getMonth() === birth.getMonth() && april1.getDate() < birth.getDate());
+  if (beforeBirthday) age--;
+  return age < 18;
+}
+
+// 名前ごとの { birth, highSchool } を集める。名簿ファイルがあればそれを優先し、
+// 無い人はシフト表の「スタッフ区分」シートに入れた分を使う（名簿が無くても単体で使えるようにするため）
+function minorInfoMap_(useCache) {
+  var cache = null;
+  if (useCache !== false) {
+    try { cache = CacheService.getScriptCache(); } catch (e) { cache = null; }
+    if (cache) {
+      var hit = cache.get(MINOR_CACHE_KEY);
+      if (hit) return reviveMinorMap_(JSON.parse(hit));
+    }
+  }
+  var map = readRoleSheetBirths_();
+  var fromRoster = readRosterBirths_();
+  Object.keys(fromRoster).forEach(function(key) { map[key] = fromRoster[key]; });
+  if (cache) {
+    try {
+      cache.put(MINOR_CACHE_KEY, JSON.stringify(dryMinorMap_(map)), MINOR_CACHE_SEC);
+    } catch (e) {}
+  }
+  return map;
+}
+
+function dryMinorMap_(map) {
+  var out = {};
+  Object.keys(map).forEach(function(key) {
+    out[key] = { name: map[key].name, birth: map[key].birth ? map[key].birth.getTime() : 0, highSchool: map[key].highSchool };
+  });
+  return out;
+}
+
+function reviveMinorMap_(plain) {
+  var out = {};
+  Object.keys(plain).forEach(function(key) {
+    out[key] = { name: plain[key].name, birth: plain[key].birth ? new Date(plain[key].birth) : null, highSchool: plain[key].highSchool };
+  });
+  return out;
+}
+
+// シフト表の「スタッフ区分」シート（A名前・B区分・C生年月日・D高校生）
+function readRoleSheetBirths_() {
+  var sheet = getRoleSheet_();
+  var map = {};
+  var last = sheet.getLastRow();
+  if (last < 2) return map;
+  sheet.getRange(2, 1, last - 1, 4).getValues().forEach(function(r) {
+    var key = flatName_(r[0]);
+    if (!key) return;
+    map[key] = {
+      name: String(r[0]).trim(),
+      birth: (r[ROLE_BIRTH_COL - 1] instanceof Date) ? r[ROLE_BIRTH_COL - 1] : null,
+      highSchool: String(r[ROLE_SCHOOL_COL - 1]).trim() !== '' || String(r[1]).indexOf('高校') === 0
+    };
+  });
+  return map;
+}
+
+// アルバイト名簿ファイル（「名前」「生年月日」「区分」の見出しがある表を探す）
+function readRosterBirths_() {
+  var map = {};
+  var settings = getRequestSettingsSheet_();
+  var url = String(settings.getRange(ROSTER_URL_CELL).getDisplayValue()).trim();
+  if (!url) return map;
+  var book;
+  try { book = openBookByUrl_(url); } catch (e) { return map; }
+  if (!book) return map;
+  book.getSheets().forEach(function(sheet) {
+    if (Object.keys(map).length) return;                 // 最初に見つかった表だけ使う
+    var last = sheet.getLastRow(), lastCol = sheet.getLastColumn();
+    if (last < 2 || lastCol < 2) return;
+    var values = sheet.getRange(1, 1, Math.min(last, 200), lastCol).getValues();
+    for (var h = 0; h < Math.min(values.length, 5); h++) {
+      var head = values[h].map(function(v) { return String(v).trim(); });
+      var nameCol = head.indexOf('名前');
+      var birthCol = head.indexOf('生年月日');
+      if (nameCol < 0 || birthCol < 0) continue;
+      var kindCol = head.indexOf('区分');
+      for (var r = h + 1; r < values.length; r++) {
+        var key = flatName_(values[r][nameCol]);
+        if (!key) continue;
+        var birth = values[r][birthCol];
+        map[key] = {
+          name: String(values[r][nameCol]).trim(),
+          birth: (birth instanceof Date) ? birth : null,
+          highSchool: kindCol >= 0 && String(values[r][kindCol]).indexOf('高校') === 0
+        };
+      }
+      return;
+    }
+  });
+  return map;
+}
+
+function openBookByUrl_(url) {
+  var id = /[-\w]{25,}/.exec(String(url));
+  return id ? SpreadsheetApp.openById(id[0]) : null;
+}
+
+// 時間の数字（900・2130）を分に直す
+function minutesOfTime_(value) {
+  var n = Number(value);
+  if (!isFinite(n) || n <= 0) return null;
+  var h = Math.floor(n / 100), m = n % 100;
+  if (m >= 60 || h > 29) return null;
+  return h * 60 + m;
+}
+
+// 1人・1日の決まり破りを調べる。戻り値は理由の配列（空なら問題なし）
+function dayViolations_(person, info, date) {
+  var reasons = [];
+  var start = minutesOfTime_(person.start), end = minutesOfTime_(person.end);
+  if (start === null || end === null) return reasons;
+  if (end <= start) return reasons;                       // 書きかけは見ない
+  var bStart = minutesOfTime_(person.breakStart), bEnd = minutesOfTime_(person.breakEnd);
+  var breakMin = (bStart !== null && bEnd !== null && bEnd > bStart) ? bEnd - bStart : 0;
+  var work = end - start - breakMin;
+
+  var minor = !!info && (info.highSchool || isMinorOn_(info.birth, date));
+  if (minor) {
+    if (end > minutesOfTime_(MINOR_NIGHT_START)) reasons.push('22時以降の勤務');
+    if (start < minutesOfTime_(MINOR_NIGHT_END)) reasons.push('5時前の勤務');
+    if (work > MINOR_DAY_HOURS * 60) reasons.push('1日8時間を超える勤務（' + (Math.round(work / 6) / 10) + '時間）');
+  }
+  for (var i = 0; i < BREAK_RULES.length; i++) {
+    if (work > BREAK_RULES[i].over * 60) {
+      if (breakMin < BREAK_RULES[i].need) {
+        reasons.push('実働' + (Math.round(work / 6) / 10) + '時間に対して休憩' + breakMin + '分（' + BREAK_RULES[i].need + '分必要）');
+      }
+      break;
+    }
+  }
+  if (breakMin > 0 && bStart !== null && (bStart < start || bEnd > end)) {
+    reasons.push('休憩が勤務時間の外にある');
+  }
+  return reasons;
+}
+
+// 週シートの1日ぶん（日ブロック）の人を読む
+function blockPeople_(week, blockIndex) {
+  var block = ADJUST_BLOCKS[blockIndex];
+  var values = week.getRange(block.head + 1, block.col - 5, ADJUST_ROWS, 5).getValues();
+  return values.map(function(r, p) {
+    return { row: block.head + 1 + p, name: String(r[0]).trim(), start: r[1], end: r[2], breakStart: r[3], breakEnd: r[4] };
+  });
+}
+
+// 週シートの日付（月曜）
+function weekMondayOf_(week) {
+  var name = week.getName();
+  if (/^\d{6}$/.test(name)) {
+    return new Date(2000 + Number(name.slice(0, 2)), Number(name.slice(2, 4)) - 1, Number(name.slice(4, 6)));
+  }
+  var t1 = week.getRange('T1').getValue();
+  return (t1 instanceof Date) ? t1 : new Date();
+}
+
+// 週ぜんぶを調べる。見つけた分の名前を塗り、理由をメモに入れる
+function checkWeekLaw_(week, paint) {
+  var info = minorInfoMap_();
+  var monday = weekMondayOf_(week);
+  var found = [];
+  var weekWork = {};
+  ADJUST_BLOCKS.forEach(function(block, day) {
+    var date = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + day);
+    var people = blockPeople_(week, day);
+    people.forEach(function(person) {
+      if (!person.name) return;
+      var who = info[flatName_(person.name)] || null;
+      var reasons = dayViolations_(person, who, date);
+      var start = minutesOfTime_(person.start), end = minutesOfTime_(person.end);
+      if (start !== null && end !== null && end > start) {
+        var bs = minutesOfTime_(person.breakStart), be = minutesOfTime_(person.breakEnd);
+        var brk = (bs !== null && be !== null && be > bs) ? be - bs : 0;
+        var key = flatName_(person.name);
+        weekWork[key] = (weekWork[key] || 0) + (end - start - brk);
+      }
+      if (paint) paintLawWarning_(week, block, person.row, reasons);
+      if (reasons.length) {
+        found.push({ day: day, name: person.name, date: date, reasons: reasons });
+      }
+    });
+  });
+  // 週の合計（未成年・高校生だけ）
+  Object.keys(weekWork).forEach(function(key) {
+    var who = info[key];
+    var minor = who && (who.highSchool || isMinorOn_(who.birth, monday));
+    if (minor && weekWork[key] > MINOR_WEEK_HOURS * 60) {
+      found.push({ day: -1, name: who.name, date: monday,
+        reasons: ['1週40時間を超える勤務（' + (Math.round(weekWork[key] / 6) / 10) + '時間）'] });
+    }
+  });
+  return found;
+}
+
+// 名前のマスに色とメモを付ける／消す
+function paintLawWarning_(week, block, row, reasons) {
+  var cell = week.getRange(row, block.col - 5);
+  if (reasons.length) {
+    cell.setBackground(LAW_WARN_COLOR);
+    cell.setNote('決まりの確認：\n・' + reasons.join('\n・'));
+  } else if (String(cell.getNote()).indexOf('決まりの確認') === 0) {
+    cell.setBackground(null);
+    cell.setNote('');
+  }
+}
+
+// 入力したその場で調べる（onEditから呼ぶ。直した行のまわりだけ）
+function checkEditedLaw_(week, range) {
+  var r0 = range.getRow(), c0 = range.getColumn();
+  var r1 = r0 + range.getNumRows() - 1;
+  var c1 = c0 + range.getNumColumns() - 1;
+  var info = null, monday = null, messages = [];
+  ADJUST_BLOCKS.forEach(function(block, day) {
+    if (c1 < block.col - 5 || c0 > block.col - 1) return;      // 名前〜休終の列に当たっていない
+    if (!info) { info = minorInfoMap_(); monday = weekMondayOf_(week); }
+    var date = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + day);
+    blockPeople_(week, day).forEach(function(person) {
+      if (person.row < r0 || person.row > r1 || !person.name) return;
+      var reasons = dayViolations_(person, info[flatName_(person.name)] || null, date);
+      paintLawWarning_(week, block, person.row, reasons);
+      if (reasons.length) messages.push(DOW_JP[date.getDay()] + '曜 ' + person.name + '：' + reasons[0]);
+    });
+  });
+  if (messages.length) {
+    SpreadsheetApp.getActiveSpreadsheet().toast(messages.join(' ／ '), '決まりの確認', 8);
+  }
+  return messages.length;
+}
+
+// メニュー「決まりを点検する」
+function checkWeekLawNow() {
+  var week = activeWeekSheet_();
+  if (!week) return;
+  var found = checkWeekLaw_(week, true);
+  if (!found.length) {
+    SpreadsheetApp.getActiveSpreadsheet().toast('決まりに反するところはありませんでした。', '決まりの確認', 6);
+    return;
+  }
+  SpreadsheetApp.getUi().alert('決まりの確認（' + week.getName() + '）', lawReportText_(found), SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function lawReportText_(found) {
+  return found.map(function(x) {
+    var day = x.day >= 0 ? (x.date.getMonth() + 1) + '/' + x.date.getDate() + '(' + DOW_JP[x.date.getDay()] + ') ' : '週の合計 ';
+    return '・' + day + x.name + '：' + x.reasons.join('／');
+  }).join('\n');
+}
+
+// メニュー「スタッフの生年月日」：名簿が無くても使えるようにする入力画面
+function openMinorSettings() {
+  var settings = getRequestSettingsSheet_();
+  var rosterUrl = String(settings.getRange(ROSTER_URL_CELL).getDisplayValue()).trim();
+  var info = minorInfoMap_(false);
+  var names = [];
+  var newest = newestWeekSheet_(SpreadsheetApp.getActiveSpreadsheet());
+  if (newest) getRosterNames_(newest).forEach(function(n) { if (String(n).trim()) names.push(String(n).trim()); });
+  Object.keys(info).forEach(function(key) {
+    if (!names.some(function(n) { return flatName_(n) === key; })) names.push(info[key].name);
+  });
+
+  var rows = names.map(function(name) {
+    var who = info[flatName_(name)] || {};
+    var ymd = who.birth ? Utilities.formatDate(who.birth, Session.getScriptTimeZone(), 'yyyy-MM-dd') : '';
+    return '<tr><td style="padding:2px 6px;">' + name + '</td>' +
+      '<td><input type="date" value="' + ymd + '" data-name="' + name + '" class="birth" style="font-size:13px;"></td>' +
+      '<td style="text-align:center;"><input type="checkbox" class="hs" data-name="' + name + '"' +
+      (who.highSchool ? ' checked' : '') + '></td></tr>';
+  }).join('');
+
+  var html = '<div style="font-family:sans-serif;font-size:13px;padding:6px 10px;">' +
+    '<p style="margin:0 0 8px;color:#555;">18歳未満（年度で判定）と高校生は、22時以降の勤務と1日8時間を超える勤務ができません。<br>' +
+    'アルバイト名簿のURLを入れておくと、生年月日は名簿から自動で読みます。</p>' +
+    '<div style="margin-bottom:8px;">名簿ファイルのURL<br>' +
+    '<input id="rosterUrl" value="' + rosterUrl + '" style="width:100%;font-size:12px;padding:4px;"></div>' +
+    '<table style="border-collapse:collapse;"><tr><th style="text-align:left;">名前</th><th>生年月日</th><th>高校生</th></tr>' +
+    rows + '</table>' +
+    '<div style="margin-top:10px;"><button onclick="save()" style="padding:6px 14px;font-weight:bold;">保存する</button>' +
+    '<span id="msg" style="margin-left:8px;color:#1a73e8;"></span></div>' +
+    '<script>' +
+    'function save(){' +
+    'var list=[];' +
+    'var b=document.getElementsByClassName("birth");' +
+    'for(var i=0;i<b.length;i++){' +
+    'var n=b[i].getAttribute("data-name");' +
+    'var hs=document.querySelector(\'.hs[data-name="\'+n+\'"]\').checked;' +
+    'list.push({name:n,birth:b[i].value,highSchool:hs});}' +
+    'document.getElementById("msg").textContent="保存中…";' +
+    'google.script.run.withSuccessHandler(function(){document.getElementById("msg").textContent="保存しました";})' +
+    '.saveMinorSettings(document.getElementById("rosterUrl").value,list);}' +
+    '<\/script></div>';
+  SpreadsheetApp.getUi().showModalDialog(
+    HtmlService.createHtmlOutput(html).setWidth(460).setHeight(520), 'スタッフの生年月日');
+}
+
+// 入力画面からの保存（スタッフ区分シートのC・D列に書く）
+function saveMinorSettings(rosterUrl, list) {
+  var settings = getRequestSettingsSheet_();
+  settings.getRange(ROSTER_URL_CELL).setValue(String(rosterUrl || '').trim());
+  var sheet = getRoleSheet_();
+  sheet.getRange('C1:D1').setValues([['生年月日', '高校生']]);
+  var last = sheet.getLastRow();
+  var names = last >= 2 ? sheet.getRange(2, 1, last - 1, 1).getValues().map(function(r) { return flatName_(r[0]); }) : [];
+  (list || []).forEach(function(item) {
+    var key = flatName_(item.name);
+    var idx = names.indexOf(key);
+    var row;
+    if (idx >= 0) {
+      row = idx + 2;
+    } else {
+      row = sheet.getLastRow() + 1;
+      sheet.getRange(row, 1).setValue(item.name);
+      names.push(key);
+    }
+    sheet.getRange(row, ROLE_BIRTH_COL).setValue(item.birth ? new Date(item.birth + 'T00:00:00+09:00') : '');
+    sheet.getRange(row, ROLE_SCHOOL_COL).setValue(item.highSchool ? '〇' : '');
+  });
+  try { CacheService.getScriptCache().remove(MINOR_CACHE_KEY); } catch (e) {}
+  return true;
+}
 
 // ===================== ポジションの色分け =====================
 // 時間帯バーの水色は「値が0.25なら#00B0F0」という条件付き書式で付いている。
@@ -2323,11 +2950,45 @@ function countPositionButtons_(sheet) {
   }).length;
 }
 
-// メニュー「ボタンを画面に置く」
+// メニュー「ボタンを画面に置く」（今のシート）
 function placePositionButtons() {
   var week = activeWeekSheet_();
   if (!week) return;
   syncPositionColors_();
+  var placed = putPositionButtons_(week);
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    'ボタンを' + placed + '個置きました。' +
+    (placed < POSITION_BUTTON_FUNCS.length ? '足りないときはもう一度押してください。'
+                                           : '画面に出ないときは、ページを再読み込みしてください。'),
+    'ポジション', 8);
+}
+
+// メニュー「すべての週シートにボタンを置く」
+// 週シートは1枚ずつ作られてきたため、あとからボタンを足したいときに使う
+function placePositionButtonsAllWeeks() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var weeks = ss.getSheets().filter(function(sh) { return isWeekSheetName_(sh.getName()); });
+  if (!weeks.length) {
+    ss.toast('週シートが見つかりませんでした。', 'ポジション', 5);
+    return;
+  }
+  var ui = SpreadsheetApp.getUi();
+  if (ui.alert(weeks.length + '枚の週シートすべてに、ポジションのボタンを置き直します。\n' +
+      '少し時間がかかります。よろしいですか。', ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+  syncPositionColors_();
+  var done = 0, short = [];
+  weeks.forEach(function(sh) {
+    var placed = putPositionButtons_(sh);
+    if (placed >= POSITION_BUTTON_FUNCS.length) done++;
+    else short.push(sh.getName() + '（' + placed + '個）');
+  });
+  ss.toast(weeks.length + '枚のうち' + done + '枚にボタンを置きました。' +
+    (short.length ? '足りないシート：' + short.join('・') + '。もう一度押すと足せます。'
+                  : 'ページを再読み込みすると出てきます。'), 'ポジション', 10);
+}
+
+// 1枚のシートにボタンを置き直す（置けた数を返す）
+function putPositionButtons_(week) {
   removePositionButtons_(week);
   SpreadsheetApp.flush();                       // 消したのを確定させてから置く
   for (var i = 0; i < POSITION_BUTTON_FUNCS.length; i++) {
@@ -2343,12 +3004,7 @@ function placePositionButtons() {
     img.assignScript(POSITION_BUTTON_FUNCS[i]);
     SpreadsheetApp.flush();                     // 1個ずつ確定させる（まとめて置くと出ないことがある）
   }
-  var placed = countPositionButtons_(week);
-  SpreadsheetApp.getActiveSpreadsheet().toast(
-    'ボタンを' + placed + '個置きました。' +
-    (placed < POSITION_BUTTON_FUNCS.length ? '足りないときはもう一度押してください。'
-                                           : '画面に出ないときは、ページを再読み込みしてください。'),
-    'ポジション', 8);
+  return countPositionButtons_(week);
 }
 
 // メニュー「ボタンを消す」
@@ -2483,14 +3139,14 @@ function sendDeadlineNotice_(ss, settings, period, today) {
   if (notice.days.indexOf(left) === -1) return '';
   var key = 'line/' + period.start + '/' + left;
   if (noticeAlreadySent_(settings, key)) return '';
-  var what = 'シフト希望の催促（スタッフ入力締切の' + left + '日前）';
+  var what = 'シフト希望の催促（スタッフ入力締切の' + (left === 0 ? '当日' : left + '日前') + '）';
   var line = lineConfig_(settings);
   if (!line.token || !line.target) {
     noticeSendFailure_(settings, what, line.token ? '送り先のグループが登録されていません。' : 'チャネルアクセストークンが入っていません。');
     return '';
   }
 
-  var text = fillNoticeText_(left === notice.days[0] ? notice.first : notice.later, ss, period, left);
+  var text = fillNoticeText_(noticeTemplateFor_(notice, left), ss, period, left);
   try {
     linePush_(line, text);
   } catch (e) {
@@ -2724,8 +3380,11 @@ var NOTICE_DAYS_CELL = 'E13';    // 送る日（例「14,7,5,3」＝締切の何
 var NOTICE_HOUR_CELL = 'E14';    // 送る時刻（0〜23時）
 var NOTICE_FIRST_CELL = 'E15';   // 1回目（いちばん早い日）に送る文
 var NOTICE_LATER_CELL = 'E16';   // 2回目以降に送る文
+var NOTICE_LAST_CELL = 'E31';    // 締切の当日（送る日に0を入れたとき）に送る文
 var NOTICE_DEFAULT_FIRST = 'シフト希望の入力をお願いします。\n期間 {期間}\nスタッフ入力締切 {締切}\n{リンク}';
-var NOTICE_DEFAULT_LATER = '【あと{残り日数}日】シフト希望のスタッフ入力締切が近づいています。\n期間 {期間}\nスタッフ入力締切 {締切}\n{入力状況}\n{リンク}';
+var NOTICE_DEFAULT_LATER = '【あと{残り日数}日】シフト希望のスタッフ入力締切が近づいています。\n期間 {期間}\nスタッフ入力締切 {締切}\n{入力状況}\n\n{人手不足}\n{リンク}';
+// 締切の当日に送る文。{お礼}と{人手不足}は必ずどちらか片方だけが出る
+var NOTICE_DEFAULT_LAST = '【本日が締切】シフト希望のスタッフ入力締切は今日 {締切} です。\n期間 {期間}\n{入力状況}\n\n{お礼}{人手不足}\n{リンク}';
 
 // 「14,7,5,3」のような文字を数字の一覧にする（空の切れ端は落とす）
 function splitDays_(text) {
@@ -2743,18 +3402,168 @@ function readNoticeSettings_(settings) {
   var hour = Number(String(settings.getRange(NOTICE_HOUR_CELL).getDisplayValue()).trim());
   var first = String(settings.getRange(NOTICE_FIRST_CELL).getValue());
   var later = String(settings.getRange(NOTICE_LATER_CELL).getValue());
+  var last = String(settings.getRange(NOTICE_LAST_CELL).getValue());
   return {
     days: days.length ? days : NOTICE_DAYS.slice(),
     hour: hour >= 0 && hour <= 23 ? Math.floor(hour) : NOTICE_HOUR,
     first: first.trim() ? first : NOTICE_DEFAULT_FIRST,
-    later: later.trim() ? later : NOTICE_DEFAULT_LATER
+    later: later.trim() ? later : NOTICE_DEFAULT_LATER,
+    last: last.trim() ? last : NOTICE_DEFAULT_LAST
   };
 }
 
-// 文の中の {…} を、その時の中身に置き換える
-function fillNoticeText_(template, ss, period, left) {
+// その日に使う文を選ぶ。締切の当日（残り0日）は専用の文、いちばん早い日は1回目の文
+function noticeTemplateFor_(notice, left) {
+  if (left === 0) return notice.last;
+  return left === notice.days[0] ? notice.first : notice.later;
+}
+
+/* ================= 人が少なめの日（お知らせの {人手不足}・{お礼}） ================= */
+// 募集期間の日ごとに、希望を出している人数を数えて、欲しい人数より少ない日を知らせる。
+// 「あと◯名」と言い切らずに「目安は◯名くらい」と書く（その日の売上や顔ぶれで変わるため）。
+// 言い方は3段階。①そろっている＝お礼（{お礼}）②少し足りない＝軽めの声かけ
+// ③ひとりあと1日以上足りない＝運営に支障が出ることを伝えて、具体的な日数をお願いする。
+// ③にするのは締切まであと3日以内の回だけ（早い回から強く言うと効き目が薄れるため）。
+var NEED_WEEKDAY_CELL = 'E29';       // 1日に欲しい人数の目安（平日）
+var NEED_WEEKEND_CELL = 'E30';       // 1日に欲しい人数の目安（土日祝）
+var NEED_DEFAULT = { weekday: 3, weekend: 5 };
+var NEED_LIST_LIMIT = 3;             // 少なめの日がこれより多いときは、曜日でまとめて知らせる
+var NEED_HARD_PER_PERSON = 1;        // ひとりあたりこれ以上足りないときは、強めの言い方にする
+var NEED_HARD_WITHIN_DAYS = 3;       // 強めの言い方をするのは、締切まであとこの日数以内のときだけ
+// 人がそろっている時のお礼（差し込み {お礼}）。足りない日がある時は出ない
+var NOTICE_THANKS_TEXT = 'おかげさまで、どの日も人がそろいました。ご協力ありがとうございます。';
+var NEED_URGENT_MAX = 3;             // 「とくに少ない日」に名前を出す日数
+
+// 欲しい人数の目安を読む（空や変な数字なら初期値）
+function readNeedCounts_(settings) {
+  var weekday = Number(settings.getRange(NEED_WEEKDAY_CELL).getDisplayValue());
+  var weekend = Number(settings.getRange(NEED_WEEKEND_CELL).getDisplayValue());
+  return {
+    weekday: weekday > 0 ? weekday : NEED_DEFAULT.weekday,
+    weekend: weekend > 0 ? weekend : NEED_DEFAULT.weekend
+  };
+}
+
+// 募集期間の日ごとに、希望を出している人数を数える（出勤の時間が入っていれば1人）。
+// まだ作っていない週シートの日は0人（誰も入っていない日）として数える。
+function dailyRequestCounts_(ss, period, keys, needs) {
+  var out = [];
+  for (var w = 0; w < period.weeks; w++) {
+    var sheetName = addDaysYmd_(period.start, w * 7).slice(2).replace(/-/g, '');
+    var sheet = ss.getSheetByName(sheetName);
+    var rows = sheet ? sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, REQUEST_INPUT_COLS + 1).getValues() : null;
+    for (var d = 0; d < 7; d++) {
+      var ymd = addDaysYmd_(period.start, w * 7 + d);
+      var cat = categoryOfYmd_(ymd, keys);
+      var count = 0;
+      if (rows) {
+        for (var i = 0; i < rows.length; i++) {
+          if (!String(rows[i][0]).trim()) continue;
+          if (String(rows[i][1 + d * 2]).trim() !== '') count++;
+        }
+      }
+      out.push({ ymd: ymd, count: count, cat: cat, need: cat === '平日' ? needs.weekday : needs.weekend });
+    }
+  }
+  return out;
+}
+
+// 日付の見せ方。祝日は「11/3(火・祝)」
+function needDayLabel_(day) {
+  var label = ymdLabel_(day.ymd);
+  return day.cat === '祝日' ? label.replace(')', '・祝)') : label;
+}
+
+// 曜日（祝日は「祝日」）でまとめるときの名前
+function needGroupOf_(day) {
+  return day.cat === '祝日' ? '祝日' : DOW_JP[dowOfYmd_(day.ymd)] + '曜';
+}
+
+// 「ひとりあと◯日」の言い方。2.1なら「2〜3」、2ちょうどなら「2」
+function perDaysLabel_(per) {
+  var low = Math.max(1, Math.floor(per));
+  var high = Math.ceil(per);
+  return low === high ? String(low) : low + '〜' + high;
+}
+
+// さいごの一文。足りない量をみんなで分けると、ひとりあたり何日かで言い方を変える。
+//   ひとり1日より少ない … 軽めに声をかける
+//   ひとり1日以上      … 運営に支障が出ることを伝えて、具体的な日数をお願いする
+function shortStaffAppeal_(few, people, allowHard) {
+  var total = 0;
+  few.forEach(function(d) { total += d.need - d.count; });
+  var per = people > 0 ? total / people : 0;
+  if (!allowHard || per < NEED_HARD_PER_PERSON) return '入れそうな方がいたら、お願いします。';
+  return 'このままでは運営に支障が出ます。\n' +
+    'ひとりあと' + perDaysLabel_(per) + '日程度でも、足りない日に出勤希望のご協力をお願いします。';
+}
+
+// 名簿に載っている人数（いちばん新しい週シートの名前の欄で数える）
+function rosterCount_(ss) {
+  var newest = newestWeekSheet_(ss);
+  if (!newest) return 0;
+  return getRosterNames_(newest).filter(function(n) { return String(n).trim(); }).length;
+}
+
+// お知らせに入れる「人が少なめの日」の文。少なめの日が無ければ空文字
+// 日ごとの人数を数える（重いのはここだけ。文の組み立てとは分けてあるので、言い方違いを作り直しても速い）
+function shortStaffInfo_(ss, period) {
+  var days = dailyRequestCounts_(ss, period, holidayKeys_(), readNeedCounts_(getRequestSettingsSheet_()));
+  return {
+    days: days,
+    few: days.filter(function(d) { return d.count < d.need; }),
+    people: rosterCount_(ss)
+  };
+}
+
+// 数えてから文を作る
+function shortStaffText_(ss, period, allowHard) {
+  return shortStaffTextFrom_(shortStaffInfo_(ss, period), allowHard);
+}
+
+// 数えた結果から文を作る。allowHard ＝ 強めの言い方をしてよい日か（締切が近い日だけ）
+function shortStaffTextFrom_(info, allowHard) {
+  var days = info.days;
+  var few = info.few;
+  if (!few.length) return '';
+
+  var lines = [];
+  if (few.length <= NEED_LIST_LIMIT) {
+    lines.push('【人が少なめの日】');
+    few.forEach(function(d) {
+      lines.push('・' + needDayLabel_(d) + ' いま' + d.count + '名（目安は' + d.need + '名くらい）');
+    });
+  } else {
+    lines.push('【人が少なめの日】' + few.length + '日あります');
+    var all = {}, short = {};
+    days.forEach(function(d) { var g = needGroupOf_(d); all[g] = (all[g] || 0) + 1; });
+    few.forEach(function(d) { var g = needGroupOf_(d); short[g] = (short[g] || 0) + 1; });
+    ['月曜', '火曜', '水曜', '木曜', '金曜', '土曜', '日曜', '祝日'].forEach(function(g) {
+      if (!short[g]) return;
+      lines.push('・' + g + ' ' + (short[g] === all[g] ? all[g] + '日ぜんぶ' : all[g] + '日のうち' + short[g] + '日'));
+    });
+    // まだ誰も入っていない日・1人だけの日は、日付を出す（いちばん困る日なので）
+    var urgent = few.filter(function(d) { return d.count <= 1; })
+      .sort(function(a, b) { return a.count - b.count || (a.ymd < b.ymd ? -1 : 1); })
+      .slice(0, NEED_URGENT_MAX);
+    if (urgent.length) {
+      lines.push('とくに少ない日');
+      urgent.forEach(function(d) {
+        lines.push('・' + needDayLabel_(d) + ' ' + (d.count ? d.count + '名だけです' : 'まだ誰も入っていません'));
+      });
+    }
+  }
+  lines.push(shortStaffAppeal_(few, info.people, allowHard));
+  return lines.join('\n');
+}
+
+// 文の中の {…} を、その時の中身に置き換える。
+// ready ＝ 何通も続けて作るときに、同じ数え直しをくり返さないための入れ物
+//（「今の内容で見てみる」は送る日の数だけ文を作るので、これが無いと同じ集計を何回もやることになる）
+function fillNoticeText_(template, ss, period, left, ready) {
   var text = String(template);
   var last = addDaysYmd_(period.start, period.weeks * 7 - 1);
+  var done = ready || {};
   var map = {
     '{期間}': ymdLabel_(period.start) + '〜' + ymdLabel_(last),
     '{締切}': ymdLabel_(period.deadline.slice(0, 10)) + ' ' + period.deadline.slice(11),
@@ -2763,7 +3572,8 @@ function fillNoticeText_(template, ss, period, left) {
     '{店舗名}': getStoreName_()
   };
   if (/\{未提出\}|\{途中\}|\{入力状況\}/.test(text)) {
-    var waiting = waitingCounts_(ss, period);
+    if (!done.waiting) done.waiting = waitingCounts_(ss, period);
+    var waiting = done.waiting;
     var lines = [];
     if (waiting.notSubmitted) lines.push('まだ出していない人：' + waiting.notSubmitted + '人');
     if (waiting.partial) lines.push('途中の人（1週でも空きがある）：' + waiting.partial + '人');
@@ -2771,8 +3581,15 @@ function fillNoticeText_(template, ss, period, left) {
     map['{途中}'] = String(waiting.partial);
     map['{入力状況}'] = lines.length ? lines.join('\n') : 'みなさん提出ありがとうございます。変える方はお早めに。';
   }
+  if (/\{人手不足\}|\{お礼\}/.test(text)) {
+    if (!done.info) done.info = shortStaffInfo_(ss, period);       // 数えるのは1回だけ
+    var short = shortStaffTextFrom_(done.info, left <= NEED_HARD_WITHIN_DAYS);
+    map['{人手不足}'] = short;
+    // 人が足りている時だけお礼。足りない日がある時は {人手不足} のほうが出る
+    map['{お礼}'] = short ? '' : NOTICE_THANKS_TEXT;
+  }
   Object.keys(map).forEach(function(key) { text = text.split(key).join(map[key]); });
-  return text;
+  return text.replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '');   // 中身が空だった差し込みの空行を詰める
 }
 
 // メニュー「お知らせの文面・日程」
@@ -2781,7 +3598,7 @@ function openNoticeSettings() {
   var notice = readNoticeSettings_(settings);
   var box = 'width:100%;padding:6px;font-size:12px;';
   var html = '<div style="font-family:sans-serif;padding:4px 8px;font-size:14px;line-height:1.6;">' +
-    '<label style="display:block;font-weight:bold;">送る日（スタッフ入力締切の何日前か。カンマ区切り）</label>' +
+    '<label style="display:block;font-weight:bold;">送る日（スタッフ入力締切の何日前か。カンマ区切り。0＝締切当日）</label>' +
     '<input id="days" value="' + notice.days.join(',') + '" style="' + box + '">' +
     '<label style="display:block;font-weight:bold;margin-top:10px;">送る時刻</label>' +
     '<select id="hour" style="' + box + '">' + numberOptions_(0, 23, notice.hour, '#時ごろ') + '</select>' +
@@ -2789,9 +3606,16 @@ function openNoticeSettings() {
     '<textarea id="first" style="' + box + 'height:90px;">' + escapeHtml_(notice.first) + '</textarea>' +
     '<label style="display:block;font-weight:bold;margin-top:10px;">2回目以降の文</label>' +
     '<textarea id="later" style="' + box + 'height:110px;">' + escapeHtml_(notice.later) + '</textarea>' +
+    '<label style="display:block;font-weight:bold;margin-top:10px;">締切当日の文（送る日に「0」を入れると送ります）</label>' +
+    '<textarea id="last" style="' + box + 'height:110px;">' + escapeHtml_(notice.last) + '</textarea>' +
     '<p style="margin:8px 0 0;font-size:12px;color:#555;">使える差し込み：<br>' +
-    '{期間}／{締切}／{リンク}／{残り日数}／{未提出}／{途中}／{入力状況}／{店舗名}<br>' +
-    '{入力状況}＝「まだ出していない人：◯人」などを自動で作ります（全員そろっていればお礼の文になります）。</p>' +
+    '{期間}／{締切}／{リンク}／{残り日数}／{未提出}／{途中}／{入力状況}／{人手不足}／{お礼}／{店舗名}<br>' +
+    '{入力状況}＝「まだ出していない人：◯人」などを自動で作ります（全員そろっていればお礼の文になります）。<br>' +
+    '{人手不足}＝人が少なめの日を知らせます（少ない日が4日以上なら曜日でまとめます）。足りている時は何も出ません。<br>' +
+    '　「このままでは運営に支障が出ます」という強めの言い方になるのは、<b>締切まであと3日以内</b>で、なおかつ<br>' +
+    '　ひとりあと1日以上足りないときだけです。それより前の日は「入れそうな方がいたら」の軽い声かけになります。<br>' +
+    '{お礼}＝人がそろっている時だけ出ます（足りない日がある時は{人手不足}のほうが出ます）。締切当日の文に向いています。<br>' +
+    '　欲しい人数の目安は「シフト希望設定」シートのE29（平日）・E30（土日祝）で変えられます。</p>' +
     '<p id="msg" style="margin:8px 0 0;font-size:12px;color:#186A3B;"></p>' +
     '<div style="margin-top:10px;text-align:right;">' +
     '<button onclick="doPreview()" style="margin-right:8px;padding:6px 12px;">今の内容で見てみる</button>' +
@@ -2802,7 +3626,8 @@ function openNoticeSettings() {
     '<script>' +
     'function show(t, err){ var m = document.getElementById("msg"); m.textContent = t; m.style.color = err ? "#B03A2E" : "#186A3B"; }' +
     'function values(){ return { days: document.getElementById("days").value, hour: document.getElementById("hour").value,' +
-    '  first: document.getElementById("first").value, later: document.getElementById("later").value }; }' +
+    '  first: document.getElementById("first").value, later: document.getElementById("later").value,' +
+    '  last: document.getElementById("last").value }; }' +
     'function doSave(){' +
     '  document.getElementById("saveBtn").disabled = true;' +
     '  google.script.run' +
@@ -2829,7 +3654,7 @@ function saveNoticeSettings(values) {
   });
   var hour = Number(values.hour);
   if (!(hour >= 0 && hour <= 23)) throw new Error('送る時刻が正しくありません。');
-  ['first', 'later'].forEach(function(key) {
+  ['first', 'later', 'last'].forEach(function(key) {
     if (String(values[key] || '').length > 1000) throw new Error('文が長すぎます（1000文字まで）。');
   });
 
@@ -2837,6 +3662,7 @@ function saveNoticeSettings(values) {
   settings.getRange(NOTICE_HOUR_CELL).setValue(String(hour));
   settings.getRange(NOTICE_FIRST_CELL).setValue(String(values.first || ''));
   settings.getRange(NOTICE_LATER_CELL).setValue(String(values.later || ''));
+  settings.getRange(NOTICE_LAST_CELL).setValue(String(values.last || ''));
 
   // 送る時刻を変えたら、毎日の予約も入れ直す（自動が動いている時だけ）
   var running = ScriptApp.getProjectTriggers().filter(function(t) { return t.getHandlerFunction() === 'dailyShiftCheck'; });
@@ -2855,12 +3681,18 @@ function previewNoticeText(values) {
   var period = currentRequestPeriod_(settings, new Date());
   if (!period) return '今は募集期間がありません。';
   var days = splitDays_(values.days).filter(function(n) { return n >= 0; }).sort(function(a, b) { return b - a; });
-  var first = String(values.first || NOTICE_DEFAULT_FIRST);
-  var later = String(values.later || NOTICE_DEFAULT_LATER);
+  var notice = {
+    days: days,
+    first: String(values.first || NOTICE_DEFAULT_FIRST),
+    later: String(values.later || NOTICE_DEFAULT_LATER),
+    last: String(values.last || NOTICE_DEFAULT_LAST)
+  };
   var out = [];
-  days.forEach(function(left, i) {
-    out.push('― ' + left + '日前（' + ymdLabel_(addDaysYmd_(period.deadline.slice(0, 10), -left)) + '） ―');
-    out.push(fillNoticeText_(i === 0 ? first : later, ss, period, left));
+  var ready = {};                        // 何通ぶんも作るので、人数の数え直しは1回で済ませる
+  days.forEach(function(left) {
+    out.push('― ' + (left === 0 ? '締切当日' : left + '日前') +
+      '（' + ymdLabel_(addDaysYmd_(period.deadline.slice(0, 10), -left)) + '） ―');
+    out.push(fillNoticeText_(noticeTemplateFor_(notice, left), ss, period, left, ready));
     out.push('');
   });
   return out.join('\n');
@@ -2883,8 +3715,22 @@ var MONTHLY_DEFAULT_DAYS = [14, 7, 3];
 var MONTHLY_TEXT_SEP = '\n----\n';
 var MONTHLY_DEFAULT_FIRST = '【期日厳守】\n検体キットが届いています。締切り{残り}前です。\n{月}月{日}日{曜日}までに提出と記入をお願いします。';
 var MONTHLY_DEFAULT_TEXT = '【期日厳守】\n検体キットが届いています。締切りまで{残り}です。\n{月}月{日}日{曜日}までに提出と記入をお願いします。';
+// 期日の当日に送る文（「締切りまで当日です」では変なので、当日だけ別の言い方にする）
+var MONTHLY_DEFAULT_LAST = '【本日が期日】\n検体キットの締切りは本日です。\n{月}月{日}日{曜日}までに提出と記入をお願いします。';
 // 1回目だけ「締切り2週間前です」、2回目からは「締切りまで1週間です」になる
 var MONTHLY_DEFAULT_TEXTS = [MONTHLY_DEFAULT_FIRST, MONTHLY_DEFAULT_TEXT];
+
+// 送る日に合わせた文を並べ直す。書いていない日のぶんは最後の文を使いまわす。
+// ただし当日のぶんに「締切りまで◯です」の初期文が当たると「締切りまで当日です」と変になるので、
+// 自分で書いた文でなければ当日用に差し替える
+function monthlyTextsFor_(days, texts) {
+  return days.map(function(d, i) {
+    var text = i < texts.length ? texts[i] : texts[texts.length - 1];
+    if (d !== 0) return text;
+    var isDefault = i >= texts.length || text === MONTHLY_DEFAULT_FIRST || text === MONTHLY_DEFAULT_TEXT;
+    return isDefault ? MONTHLY_DEFAULT_LAST : text;
+  });
+}
 // 前の版（送る日ごとに分けられなかった頃）の文。そのまま残っていたら今の初期値に読み替える
 var MONTHLY_TEXT_V1 = '【期日厳守】\n検体キットが届いています。{月}月{日}日{曜日}までに提出と記入をお願いします。';
 
@@ -2913,8 +3759,7 @@ function readMonthlyNotice_(settings) {
   var raw = String(settings.getRange(MONTHLY_TEXT_CELL).getValue());
   var texts = splitMonthlyTexts_(raw === MONTHLY_TEXT_V1 ? '' : raw);
   if (!texts.length) texts = MONTHLY_DEFAULT_TEXTS.slice();
-  // 送る日の数にそろえる（足りないぶんは最後の文を使いまわす）
-  texts = days.map(function(d, i) { return texts[Math.min(i, texts.length - 1)]; });
+  texts = monthlyTextsFor_(days, texts);       // 送る日の数にそろえる
 
   var hour = Number(String(settings.getRange(MONTHLY_HOUR_CELL).getDisplayValue()).trim());
   return {
@@ -2963,7 +3808,7 @@ function sendMonthlyNotice_(settings, today) {
     if (left < 0 || index === -1) continue;
     var key = 'month/' + due + '/' + left;
     if (noticeAlreadySent_(settings, key)) return '';
-    var what = '毎月のおしらせ（' + ymdLabel_(due) + 'の' + left + '日前）';
+    var what = '毎月のおしらせ（' + ymdLabel_(due) + (left === 0 ? ' 当日' : 'の' + left + '日前') + '）';
     var line = lineConfig_(settings);
     if (!line.token || !line.target) {
       noticeSendFailure_(settings, what, line.token ? '送り先のグループが登録されていません。' : 'チャネルアクセストークンが入っていません。');
@@ -3001,7 +3846,8 @@ function resetMonthlyTrigger_(monthly) {
 function openMonthlyNotice() {
   var monthly = readMonthlyNotice_(getRequestSettingsSheet_());
   var box = 'width:100%;padding:6px;font-size:12px;';
-  var data = JSON.stringify({ days: monthly.days, texts: monthly.texts, def: MONTHLY_DEFAULT_TEXT }).replace(/</g, '\\u003c');
+  var data = JSON.stringify({ days: monthly.days, texts: monthly.texts,
+    def: MONTHLY_DEFAULT_TEXT, lastDef: MONTHLY_DEFAULT_LAST }).replace(/</g, '\\u003c');
   var html = '<div style="font-family:sans-serif;padding:4px 8px;font-size:14px;line-height:1.6;">' +
     '<p style="margin:0 0 8px;font-size:12px;color:#555;">毎月の決まった日を期日にして、その前にLINEのグループへお知らせを送ります。</p>' +
 
@@ -3013,7 +3859,7 @@ function openMonthlyNotice() {
     '<label style="display:block;font-weight:bold;margin-top:10px;">期日（毎月この日）</label>' +
     '<select id="day" style="' + box + '">' + numberOptions_(1, 31, monthly.day, '毎月#日') + '</select>' +
 
-    '<label style="display:block;font-weight:bold;margin-top:10px;">送る日（期日の何日前か。カンマ区切り）</label>' +
+    '<label style="display:block;font-weight:bold;margin-top:10px;">送る日（期日の何日前か。カンマ区切り。0＝期日の当日）</label>' +
     '<input id="days" value="' + monthly.days.join(',') + '" oninput="build()" style="' + box + '">' +
 
     '<label style="display:block;font-weight:bold;margin-top:10px;">送る時刻</label>' +
@@ -3022,7 +3868,7 @@ function openMonthlyNotice() {
     '<div id="texts"></div>' +
 
     '<p style="margin:8px 0 0;font-size:12px;color:#555;">使える差し込み：<br>' +
-    '{月}／{日}／{曜日}（木曜日）／{期日}（9/25(木)）／{残り}（2週間・1週間・3日）／{残り日数}（数字だけ）／{店舗名}</p>' +
+    '{月}／{日}／{曜日}（木曜日）／{期日}（9/25(木)）／{残り}（2週間・1週間・3日・当日）／{残り日数}（数字だけ）／{店舗名}</p>' +
     '<p id="msg" style="margin:8px 0 0;font-size:12px;color:#186A3B;"></p>' +
     '<div style="margin-top:10px;text-align:right;">' +
     '<button onclick="doPreview()" style="margin-right:8px;padding:6px 12px;">今の内容で見てみる</button>' +
@@ -3046,10 +3892,12 @@ function openMonthlyNotice() {
     '  days.forEach(function(d, i){' +
     '    var lab = document.createElement("label");' +
     '    lab.style.display = "block"; lab.style.fontWeight = "bold"; lab.style.marginTop = "10px";' +
-    '    lab.textContent = d + "日前に送る文";' +
+    '    lab.textContent = (d === 0 ? "期日の当日に送る文" : d + "日前に送る文");' +
     '    var ta = document.createElement("textarea");' +
     '    ta.setAttribute("data-day", d); ta.style.cssText = TA_STYLE;' +
-    '    ta.value = byDay[d] !== undefined ? byDay[d] : (olds[i] !== undefined ? olds[i] : (olds.length ? olds[olds.length - 1] : DATA.def));' +
+    '    ta.value = byDay[d] !== undefined ? byDay[d]' +
+    '      : (d === 0 ? DATA.lastDef' +
+    '      : (olds[i] !== undefined ? olds[i] : (olds.length ? olds[olds.length - 1] : DATA.def)));' +
     '    wrap.appendChild(lab); wrap.appendChild(ta);' +
     '  });' +
     '}' +
@@ -3089,7 +3937,7 @@ function monthlyValues_(values) {
             : splitMonthlyTexts_(values.text);
   texts = texts.map(function(t) { return String(t).replace(/^[\r\n]+|[\r\n\s]+$/g, ''); }).filter(function(t) { return t !== ''; });
   if (!texts.length) texts = MONTHLY_DEFAULT_TEXTS.slice();
-  texts = days.map(function(d, i) { return texts[Math.min(i, texts.length - 1)]; });
+  texts = monthlyTextsFor_(days, texts);
   texts.forEach(function(t) {
     if (t.length > 1000) throw new Error('文が長すぎます（1つにつき1000文字まで）。');
     if (t.indexOf('----') !== -1) throw new Error('文の中に「----」だけの行は入れられません（区切りに使っています）。');
@@ -3126,7 +3974,7 @@ function previewMonthlyText(values) {
   if (daysBetweenYmd_(today, due) < 0) due = monthlyDueYmd_(today, day, 1);   // 今月の期日を過ぎていれば来月
   var out = ['次の期日：' + ymdLabel_(due), ''];
   set.days.forEach(function(left, i) {
-    out.push('― ' + left + '日前（' + ymdLabel_(addDaysYmd_(due, -left)) + '） ―');
+    out.push('― ' + (left === 0 ? '当日' : left + '日前') + '（' + ymdLabel_(addDaysYmd_(due, -left)) + '） ―');
     out.push(fillMonthlyText_(set.texts[i], due, left));
     out.push('');
   });
@@ -3348,6 +4196,8 @@ function onEdit(e) {
     // 出勤・退勤・休憩を直したら、その人の色をその場で塗り直す
     SpreadsheetApp.flush();
     repaintEditedRows_(sheet, e.range);
+    // 未成年の夜間・8時間超や、休憩の足りない勤務をその場で知らせる
+    checkEditedLaw_(sheet, e.range);
   } catch (err) {
     Logger.log('onEdit: ' + err.message);
   }

@@ -514,7 +514,7 @@
   function totalsLabelText(){
     return PERIODS.length ? (SHOW_OFF ? '休日合計（参考）' : '出勤合計（参考）') : '合計（参考）';
   }
-  // 例：「10月〆 22日」「11月〆 5日」
+  // 例：「10月20日〆 22日」「11月20日〆 5日」
   function periodRowsHtml(){
     return PERIODS.map(function(p){
       var n = SHOW_OFF ? p.days - workDays(p) : workDays(p);

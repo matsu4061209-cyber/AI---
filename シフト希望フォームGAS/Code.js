@@ -75,7 +75,11 @@ var TEST_BROWSER_MARK = 'HeadlessChrome';
 // 自動確認の記録は、確かめる時間を残して1時間たったら、ふつうの操作のついでに自動で消す
 var TEST_RECORD_KEEP_MINUTES = 60;
 
-function doGet() {
+function doGet(e) {
+  // カレンダーアプリが読みに来たとき（?cal=その人の鍵）は、その人のシフトだけを返す
+  if (e && e.parameter && e.parameter.cal) return calendarFeed_(String(e.parameter.cal));
+  // スタッフが「できたシフトを見る」ページ（?shift=週シート名。週の指定が無くてもよい）
+  if (e && e.parameter && e.parameter.shift) return shiftPage_(String(e.parameter.shift));
   var config;
   try {
     config = loadConfig_(SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID));
@@ -484,7 +488,8 @@ function holidaysInPeriod_(shiftSs, start, weekCount) {
 /* ================= 締め期間ごとの合計（参考） ================= */
 
 // 画面に出ている週にかかる、この人の締め期間（店長・社員は社員の締め日、キャストはキャストの締め日で区切る）。
-// 表示は「11月〆」のように締める月で出す。店長・社員は休日日数、キャストは出勤日数を数えるので、showOff で伝える。
+// 表示は「11月20日〆」のように締める日で出す（何日までの分かが分かるように）。
+// 店長・社員は休日日数、キャストは出勤日数を数えるので、showOff で伝える。
 // 締め期間のうち画面に出ていない日（募集期間より前の、シフトが決まっている日など）の出勤日数は「出勤履歴」から先に数えておく
 // （画面に出ている日は、画面の入力で数える。休日日数は「締め期間の日数 − 出勤日数」で画面が出す）
 function closingPeriods_(shiftSs, config, name) {
@@ -493,7 +498,7 @@ function closingPeriods_(shiftSs, config, name) {
   var formStart = config.startDate;
   var formEnd = addDays_(config.startDate, config.weekCount * 7 - 1);
   var periods = closingRanges_(formStart, formEnd, closingDayOf_(settings, employee)).map(function(p) {
-    return { start: p.start, end: p.end, label: Number(p.end.split('-')[1]) + '月〆', days: daysBetween_(p.start, p.end) + 1, fixedDays: 0 };
+    return { start: p.start, end: p.end, label: closingLabel_(p.end), days: daysBetween_(p.start, p.end) + 1, fixedDays: 0 };
   });
   var result = { showOff: employee, periods: periods };
 
@@ -540,6 +545,12 @@ function closingRanges_(fromYmd, toYmd, closingDay) {
     if (end >= fromYmd) out.push({ start: start, end: end });
   }
   return out;
+}
+
+// 締め期間の見出し。締める日まで出す（例：2026-11-20 → 「11月20日〆」）
+function closingLabel_(endYmd) {
+  var p = endYmd.split('-');
+  return Number(p[1]) + '月' + Number(p[2]) + '日〆';
 }
 
 // その月の締め日（月の日数を超える締め日は末日）。month は13や0でもよい
@@ -980,4 +991,261 @@ function safeRow_(row) {
   return row.map(function(v) {
     return (typeof v === 'string' && /^[=+\-@]/.test(v)) ? "'" + v : v;
   });
+}
+
+/* ================= カレンダー配信（自分のシフトをカレンダーアプリに出す） ================= */
+
+// 鍵を作るための秘密の文字。変えると、全員のカレンダー登録URLが使えなくなる
+var CALENDAR_SECRET = '739be42f457eb4bdce51a7d9292861c2bcc453fb3306b677';
+var CALENDAR_KEY_LENGTH = 16;
+var CALENDAR_PAST_DAYS = 28;          // 何日前の週まで載せるか（過去の出勤も少し残す）
+// 週シートの日ブロック（シフト表GASの ADJUST_BLOCKS と同じ）。head＝見出しの行、col＝時間の升目が始まる列
+var CALENDAR_BLOCKS = [
+  { head: 23, col: 25 }, { head: 42, col: 25 }, { head: 61, col: 25 },
+  { head: 3, col: 113 }, { head: 23, col: 113 }, { head: 42, col: 113 }, { head: 61, col: 113 }
+];
+var CALENDAR_PEOPLE = 16;             // 1日に並ぶ人数
+// このウェブアプリ自身のアドレス（カレンダー登録やお知らせのリンクに使う。作り直さない決まり）
+var SELF_URL = 'https://script.google.com/macros/s/AKfycbwFtgsWnq75UnttAODig9q3c89E1Iek0Oow-lV8tHzF_Zp5qBQe2DXPahAeksqkd4i2/exec';
+var PUBLISHED_WEEKS_CELL = 'E26';     // シフト希望設定：確定して公開した週（シフト表GASが書く）
+
+// 名前から、その人だけのURLの鍵を作る（同じ名前なら毎回同じ鍵）
+function calendarKey_(name) {
+  var bytes = Utilities.computeHmacSha256Signature(normalizeName_(name), CALENDAR_SECRET, Utilities.Charset.UTF_8);
+  return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/, '').slice(0, CALENDAR_KEY_LENGTH);
+}
+
+function normalizeName_(name) {
+  return String(name == null ? '' : name).replace(/[\s　]+/g, '');
+}
+
+function calendarFeed_(key) {
+  var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
+  var weeks = readPublishedWeeks_(shiftSs, new Date());
+  var who = '';
+  namesInWeeks_(weeks).some(function(n) {
+    if (calendarKey_(n) === key) { who = n; return true; }
+    return false;
+  });
+  var storeName = STORE_NAME;
+  try { storeName = loadConfig_(shiftSs).storeName || STORE_NAME; } catch (err) {}
+  var ics = buildIcs_(who ? personShifts_(weeks, who) : [], storeName, who);
+  return ContentService.createTextOutput(ics).setMimeType(ContentService.MimeType.ICAL);
+}
+
+// 公開した週に出てくる名前（表に書かれたままの形）
+function namesInWeeks_(weeks) {
+  var seen = {}, names = [];
+  weeks.forEach(function(wk) {
+    wk.days.forEach(function(people) {
+      people.forEach(function(p) {
+        var key = normalizeName_(p.name);
+        if (seen[key]) return;
+        seen[key] = true;
+        names.push(p.name);
+      });
+    });
+  });
+  return names;
+}
+
+// 載せる週：今日から CALENDAR_PAST_DAYS 日前以降で、店長が「確定する」を押して公開した週。
+// まだ一度も公開していない間は、希望を受け付けている週より前を載せる（今までどおり）
+function calendarWeekSheets_(shiftSs, today) {
+  var from = new Date(today.getTime() - (CALENDAR_PAST_DAYS + 7) * 86400000);
+  var published = publishedWeeks_(shiftSs);
+  return shiftSs.getSheets().filter(function(sh) {
+    var n = sh.getName();
+    if (!/^\d{6}$/.test(n)) return false;
+    if (published.length ? published.indexOf(n) === -1 : n >= FIRST_WRITABLE_SHEET) return false;
+    return weekStartOf_(n) >= from;
+  });
+}
+
+// 店長が確定して公開した週（シフト希望設定の E26。シフト表GASが書きます）
+function publishedWeeks_(shiftSs) {
+  try {
+    var settings = shiftSs.getSheetByName(REQUEST_SETTINGS_SHEET);
+    if (!settings) return [];
+    return String(settings.getRange(PUBLISHED_WEEKS_CELL).getDisplayValue())
+      .split('|').map(function(x) { return x.trim(); }).filter(function(x) { return /^\d{6}$/.test(x); });
+  } catch (err) {
+    return [];
+  }
+}
+
+function weekStartOf_(sheetName) {
+  return new Date(2000 + Number(sheetName.slice(0, 2)), Number(sheetName.slice(2, 4)) - 1, Number(sheetName.slice(4, 6)));
+}
+
+// その人のシフトだけを取り出す（カレンダー用）
+function personShifts_(weeks, name) {
+  var key = normalizeName_(name);
+  var out = [];
+  weeks.forEach(function(wk) {
+    wk.days.forEach(function(people, day) {
+      people.forEach(function(p) {
+        if (normalizeName_(p.name) !== key) return;
+        out.push({ ymd: wk.ymds[day], start: p.start, end: p.end, breakStart: p.breakStart, breakEnd: p.breakEnd });
+      });
+    });
+  });
+  return out;
+}
+
+// 公開した週を、週ごと・曜日ごとに読む
+// [{ sheet, ymds:[7], labels:[7], days:[[{name,start,end,breakStart,breakEnd}]×7] }]
+function readPublishedWeeks_(shiftSs, today) {
+  var weeks = [];
+  calendarWeekSheets_(shiftSs, today).forEach(function(sh) {
+    var monday = weekStartOf_(sh.getName());
+    var week = { sheet: sh.getName(), ymds: [], labels: [], days: [[], [], [], [], [], [], []] };
+    var areas = {};
+    CALENDAR_BLOCKS.forEach(function(b, day) {
+      var nameCol = b.col - 5;
+      if (!areas[nameCol]) {
+        var rg = sh.getRange(1, nameCol, 80, 5);
+        areas[nameCol] = { values: rg.getValues(), displays: rg.getDisplayValues() };
+      }
+      var area = areas[nameCol];
+      var date = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + day);
+      week.ymds[day] = Utilities.formatDate(date, 'Asia/Tokyo', 'yyyyMMdd');
+      week.labels[day] = (date.getMonth() + 1) + '/' + date.getDate();
+      for (var r = b.head; r < b.head + CALENDAR_PEOPLE; r++) {
+        var v = area.values[r] || [], d = area.displays[r] || [];
+        var name = String(v[0] || '').trim();
+        var start = sheetTime_(v[1], d[1]), end = sheetTime_(v[2], d[2]);
+        if (!name || !start || !end) continue;
+        week.days[day].push({
+          name: name, start: start, end: end,
+          breakStart: sheetTime_(v[3], d[3]), breakEnd: sheetTime_(v[4], d[4])
+        });
+      }
+      week.days[day].sort(function(a, b2) { return toSheetNumber_(a.start) - toSheetNumber_(b2.start) || toSheetNumber_(a.end) - toSheetNumber_(b2.end); });
+    });
+    weeks.push(week);
+  });
+  weeks.sort(function(a, b) { return a.sheet < b.sheet ? -1 : 1; });
+  return weeks;
+}
+
+function buildIcs_(shifts, storeName, name) {
+  var stamp = Utilities.formatDate(new Date(), 'UTC', "yyyyMMdd'T'HHmmss'Z'");
+  var lines = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//' + icsText_(storeName) + '//shift//JA',
+    'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+    'X-WR-CALNAME:' + icsText_('シフト（' + storeName + '）'),
+    'X-WR-TIMEZONE:Asia/Tokyo',
+    'REFRESH-INTERVAL;VALUE=DURATION:PT1H', 'X-PUBLISHED-TTL:PT1H',
+    'BEGIN:VTIMEZONE', 'TZID:Asia/Tokyo', 'BEGIN:STANDARD', 'DTSTART:19700101T000000',
+    'TZOFFSETFROM:+0900', 'TZOFFSETTO:+0900', 'TZNAME:JST', 'END:STANDARD', 'END:VTIMEZONE'
+  ];
+  shifts.forEach(function(x) {
+    var brk = x.breakStart && x.breakEnd ? '休憩' + trimZero_(x.breakStart) + '〜' + trimZero_(x.breakEnd) : '休憩なし';
+    lines.push(
+      'BEGIN:VEVENT',
+      // 日付と名前で決まるID。シフトが変わっても同じ予定として書き換わる
+      'UID:' + x.ymd + '-' + calendarKey_(name) + '@shift',
+      'DTSTAMP:' + stamp,
+      'DTSTART;TZID=Asia/Tokyo:' + x.ymd + 'T' + x.start.replace(':', '') + '00',
+      'DTEND;TZID=Asia/Tokyo:' + x.ymd + 'T' + x.end.replace(':', '') + '00',
+      // スマホの月表示は名前の先頭6文字ほどしか見えないので、短い「出勤-退勤」を先頭に置く（9-18 休16-17）
+      'SUMMARY:' + icsText_(shortTime_(x.start) + '-' + shortTime_(x.end) + ' ' + (x.breakStart && x.breakEnd ? '休' + shortTime_(x.breakStart) + '-' + shortTime_(x.breakEnd) : '休なし')),
+      'LOCATION:' + icsText_(storeName),
+      'DESCRIPTION:' + icsText_('出勤 ' + trimZero_(x.start) + '〜' + trimZero_(x.end) + '\n' + brk),
+      'END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
+  return lines.map(foldIcsLine_).join('\r\n') + '\r\n';
+}
+
+// 09:00→9、21:30→21:30
+function shortTime_(t) {
+  return trimZero_(t).replace(/:00$/, '');
+}
+
+function trimZero_(t) {
+  return String(t).replace(/^0(\d):/, '$1:');
+}
+
+function icsText_(text) {
+  return String(text).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+}
+
+// 1行75バイトまでの決まりに合わせて折り返す（日本語は1文字3バイト）
+function foldIcsLine_(line) {
+  var out = [], cur = '', bytes = 0;
+  for (var i = 0; i < line.length; i++) {
+    var ch = line.charAt(i);
+    var b = ch.charCodeAt(0) < 0x80 ? 1 : 3;
+    if (bytes + b > (out.length ? 74 : 75)) { out.push(cur); cur = ''; bytes = 0; }
+    cur += ch; bytes += b;
+  }
+  out.push(cur);
+  return out.join('\r\n ');
+}
+
+/* ================= できたシフトを見るページ ================= */
+
+function shiftPage_(weekParam) {
+  var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
+  var weeks = readPublishedWeeks_(shiftSs, new Date());
+  var storeName = STORE_NAME;
+  try { storeName = loadConfig_(shiftSs).storeName || STORE_NAME; } catch (err) {}
+
+  var data = {
+    storeName: storeName,
+    today: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd'),
+    openWeek: /^\d{6}$/.test(weekParam) ? weekParam : '',
+    names: staffNames_(shiftSs, weeks),
+    keys: {},
+    holidays: holidayLabels_(shiftSs, weeks),
+    weeks: weeks.map(function(wk) {
+      return { sheet: wk.sheet, ymds: wk.ymds, labels: wk.labels, days: wk.days };
+    }),
+    selfUrl: SELF_URL
+  };
+  data.names.forEach(function(n) { data.keys[n] = calendarKey_(n); });
+
+  var template = HtmlService.createTemplateFromFile('shift');
+  template.dataJson = JSON.stringify(data).replace(/</g, '\u003c');
+  return template.evaluate()
+    .setTitle('シフト｜' + storeName)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+// 名前の一覧＝一番新しい週シートの名簿＋公開した週に出てくる名前
+function staffNames_(shiftSs, weeks) {
+  var names = [];
+  var seen = {};
+  function add(n) {
+    var key = normalizeName_(n);
+    if (!key || seen[key]) return;
+    seen[key] = true;
+    names.push(String(n).trim());
+  }
+  var sheets = shiftSs.getSheets().filter(function(sh) { return /^\d{6}$/.test(sh.getName()); })
+    .sort(function(a, b) { return a.getName() < b.getName() ? 1 : -1; });
+  if (sheets.length) rosterNames_(sheets[0]).forEach(add);
+  namesInWeeks_(weeks).forEach(add);
+  return names;
+}
+
+// 公開した週の中にある祝日（{ '20261012': 'スポーツの日' } の形）
+function holidayLabels_(shiftSs, weeks) {
+  var out = {};
+  if (!weeks.length) return out;
+  var sheet = shiftSs.getSheetByName(HOLIDAY_SHEET_NAME);
+  if (!sheet) return out;
+  var last = sheet.getLastRow();
+  if (last < 1) return out;
+  var first = weeks[0].ymds[0], end = weeks[weeks.length - 1].ymds[6];
+  sheet.getRange(1, 1, last, 2).getValues().forEach(function(r) {
+    if (!(r[0] instanceof Date)) return;
+    var ymd = Utilities.formatDate(r[0], 'Asia/Tokyo', 'yyyyMMdd');
+    if (ymd < first || ymd > end) return;
+    out[ymd] = String(r[1] || '祝日');
+  });
+  return out;
 }
