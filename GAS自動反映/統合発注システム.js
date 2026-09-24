@@ -7141,30 +7141,45 @@ function buildHolidayMultByDate_(ss) {
     fcByDate[ds] = Number(r[8]) || 0;      // I列＝予測売上
     dowOfDate[ds] = d.getDay();            // 0=日..6=土（JST）
   });
-  // ★イベント登録の「単発イベント」(除外以外・繰り返し以外・7日以内・倍率≠1)を発注・仕込みへ反映。MARKER_ORDER_EVENT_MULT
+  // ★イベント登録の「短期イベント」(除外以外・7日以内・倍率≠1)を発注・仕込みへ反映。MARKER_ORDER_EVENT_MULT
   //   狙い：花火大会など年1回で最近の使用トレンドに無いイベントを、発注・仕込みへ確実に反映（過去に「常に1」で切られていた穴を塞ぐ）。
   //   倍率は「予測比」でなく登録の倍率(次回予測倍率(適用)N列＝実績学習込み・無ければ補正倍率G列)を直接使う。
   //     ＝予測ロジックの日付マッチ不具合に左右されず確実。基準(下のdowSum)からは特別日として除外＝通常日ordering不変・二重計上なし。
-  //   日付は生の値からJST文字列で厳密一致させる（T15:00Zズレ対策）。長期(>7日)・繰り返しは対象外。
+  //   ★繰り返しイベント(毎年M月D日 暫定 等)も対象：expandEventRepeat_で今年の回に展開し、短期(≤7日)の回だけ反映。
+  //     （花火を毎年くり返し登録に変えたら発注・仕込みから漏れた不具合の恒久修正。予測F列は1.7なのに発注/仕込みが1.0になる不整合を解消）。
+  //   長期(>7日・夏休み等)は既に直近56日トレンドに入っている＝二重計上になるので対象外。
   const eventSpecialSet = {}, eventRateByDate = {};
   const evSheetH = ss.getSheetByName('イベント登録');
   if (evSheetH && evSheetH.getLastRow() > 1) {
     const ecH = Math.max(14, evSheetH.getLastColumn());
+    const winFromEv = new Date(todayO); winFromEv.setDate(todayO.getDate() - 28);
+    const winToEv   = new Date(todayO); winToEv.setDate(todayO.getDate() + 60);   // 少し先まで（来週分の仕込みにも効くよう）
     evSheetH.getRange(2, 1, evSheetH.getLastRow() - 1, ecH).getValues().forEach(row => {
       if (!row[0]) return;
       if ((row[4] || '').toString().trim() === '除外') return;              // 除外区分は対象外
-      if ((ecH >= 11 ? (row[10] || '') : '').toString().trim()) return;      // 繰り返しは対象外
-      const rs = row[1], re = row[2]; if (!rs || !re) return;
-      const s0 = (rs instanceof Date) ? rs : new Date(rs);
-      const e0 = (re instanceof Date) ? re : new Date(re);
-      if (isNaN(s0.getTime()) || isNaN(e0.getTime())) return;
-      if (Math.round((e0.getTime() - s0.getTime()) / 86400000) + 1 > 7) return;   // 短期(7日以内)のみ
-      let rate = Number(row[13]) || Number(row[6]) || 1.0;                   // N列(次回予測倍率適用)優先→無ければG列(補正倍率)
-      if (rate === 1.0) return;                                              // 効果なし(1.0)は特別日にしない＝基準を減らさない
-      for (let t = s0.getTime(); t <= e0.getTime() + 1000; t += 86400000) {
-        const ds = Utilities.formatDate(new Date(t), 'Asia/Tokyo', 'yyyy/MM/dd');
-        eventSpecialSet[ds] = true; eventRateByDate[ds] = rate;
+      const rate = Number(row[13]) || Number(row[6]) || 1.0;                // N列(次回予測倍率適用)優先→無ければG列(補正倍率)
+      if (rate === 1.0) return;                                             // 効果なし(1.0)は特別日にしない＝基準を減らさない
+      const repeatPat = (ecH >= 11 ? (row[10] || '') : '').toString().trim();
+      const occ = [];
+      if (repeatPat) {
+        // 繰り返し：今年・来年へ展開し、窓に重なる短期(≤7日)の回だけ対象
+        expandEventRepeat_(repeatPat, todayO, winToEv).forEach(o => {
+          if (Math.round((o.end - o.start) / 86400000) + 1 <= 7 && o.end >= winFromEv && o.start <= winToEv) occ.push({ s: o.start, e: o.end });
+        });
+      } else {
+        const rs = row[1], re = row[2]; if (!rs || !re) return;
+        const s0 = (rs instanceof Date) ? rs : new Date(rs);
+        const e0 = (re instanceof Date) ? re : new Date(re);
+        if (isNaN(s0.getTime()) || isNaN(e0.getTime())) return;
+        if (Math.round((e0.getTime() - s0.getTime()) / 86400000) + 1 > 7) return;   // 短期(7日以内)のみ
+        occ.push({ s: s0, e: e0 });
       }
+      occ.forEach(o => {
+        for (let t = o.s.getTime(); t <= o.e.getTime() + 1000; t += 86400000) {
+          const ds = Utilities.formatDate(new Date(t), 'Asia/Tokyo', 'yyyy/MM/dd');
+          eventSpecialSet[ds] = true; eventRateByDate[ds] = rate;
+        }
+      });
     });
   }
   const isRealHol = ds => (holidayOffSet[ds] === true) || (eventSpecialSet[ds] === true);   // 実際の休みの祝日＋単発イベント。飛び石平日は対象外

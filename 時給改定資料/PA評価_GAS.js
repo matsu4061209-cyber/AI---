@@ -7,9 +7,10 @@ const EVAL_SS_ID    = '1jv1lKCDfz_GL14cSSkH9OJEchgZxYOjzbrK5It3VHl0';   // 評�
 const ROSTER_SS_ID  = '1AaK0BWbvooMvuFUKX_94TiFq6XkvhS6BclS_FUOcNgE';   // アルバイト名簿（会社ドライブ・本番）
 
 // ===== 店舗情報（初期値）。メニュー「🏢 店舗情報を変更」で各店舗ごとに設定できます =====
-const STORE_DIVISION = '第4事業部';
-const STORE_NAME     = 'ペッパーランチ飯塚';
-const STORE_MANAGER  = '松山　貴志';
+// 店舗情報の初期値は空（固有名を直書きしない）。各店で「🏢店舗情報を変更」から設定する ★NO_HARDCODE_STORE★
+const STORE_DIVISION = '';
+const STORE_NAME     = '';
+const STORE_MANAGER  = '';
 
 // 押印欄の役職名（初期値）。メニュー「🖊️ 押印欄の役職名を変更」で変更できます
 const STAMP_TITLES_DEFAULT = ['会長', '社長', '専務', '管理部', '部長', '次長'];
@@ -203,7 +204,7 @@ function onOpen() {
       .addItem('② 全員ぶん作成（入力フォーム）', 'createContractNotices'))
     .addSubMenu(ui.createMenu('🏢 全体')
       .addItem('📄 PDF一括出力（提出時用）', 'exportAllPDFs')
-      .addItem('📝 名簿に新クラスターを反映（上長申請後）', 'applyToRoster')
+      .addItem('✅ 最新の評価を名簿に登録（承認して反映）', 'applyLatestToRoster')
       .addSeparator()
       .addItem('⚙️ 初回セットアップ／最新に更新', 'setupTrigger')
       .addSeparator()
@@ -851,11 +852,12 @@ function refreshSummaryDataOnly_(ss, period, rows) {
   sh.getRange(RT.info3, 3).setValue(`¥${avgOld.toLocaleString()}`);
   sh.getRange(RT.info3, 6).setValue(`¥${avgNew.toLocaleString()}`);
   // 店舗情報（事業部名・店舗名・店長名）値のみ ※値はJ列（10列目）
+  //  未設定（空）のときは既存の表示を消さない（固有名を直書きしないため）
   try {
     const info = getStoreInfo_();
-    sh.getRange(RT.info1, 10).setValue(info.division || '');
-    sh.getRange(RT.info2, 10).setValue(info.name || '');
-    sh.getRange(RT.info3, 10).setValue(info.manager || '');
+    if (info.division) sh.getRange(RT.info1, 10).setValue(info.division);
+    if (info.name)     sh.getRange(RT.info2, 10).setValue(info.name);
+    if (info.manager)  sh.getRange(RT.info3, 10).setValue(info.manager);
   } catch (e) {}
 
   // データ行（値のみ）
@@ -1328,6 +1330,111 @@ function applyStoreInfoToSummary_(ss) {
 
 // ------------------------------------------------------------
 //  アルバイト名簿に時給・クラスターを反映（承認済みのみ）
+// ------------------------------------------------------------
+// ------------------------------------------------------------
+//  【推奨】最新の評価だけを名簿に登録（承認して反映）★APPLY_LATEST★
+//  各人の一番新しい評価行だけを自動で集め、対象人数を確認→OKで
+//  「承認済み」にして名簿へ反映まで一気に行う（手作業でM列を触らない）
+// ------------------------------------------------------------
+function applyLatestToRoster() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(EVAL_SHEET);
+  const ui    = SpreadsheetApp.getUi();
+  const period = sheet.getRange(C_PERIOD).getDisplayValue();
+  if (!period) { ui.alert('評価年月を選択してください。'); return; }
+
+  const histSheet = ss.getSheetByName(HISTORY_SHEET);
+  if (!histSheet) { ui.alert('評価履歴がありません。'); return; }
+  const lastHist = histSheet.getLastRow();
+  if (lastHist < 2) { ui.alert('評価履歴が空です。'); return; }
+
+  const histData = histSheet.getRange(2, 1, lastHist - 1, 14).getValues();
+
+  // 今期の行を、氏名ごとに「一番新しい1行」だけ採用（保存日時→無ければ後の行）
+  const latest = {};
+  histData.forEach((r, i) => {
+    if (normalizePeriod_(r[1]) !== period) return;
+    const name = String(r[0]).trim();
+    if (!name) return;
+    const savedAt = (r[13] instanceof Date) ? r[13].getTime()
+                  : (r[13] ? (new Date(r[13])).getTime() : 0);
+    const cur = latest[name];
+    const sheetRow = i + 2;
+    if (!cur || savedAt > cur.savedAt || (savedAt === cur.savedAt && sheetRow > cur.sheetRow)) {
+      latest[name] = { r: r, sheetRow: sheetRow, savedAt: isNaN(savedAt) ? 0 : savedAt };
+    }
+  });
+  const allTargets = Object.keys(latest).map(n => latest[n]);
+  if (allTargets.length === 0) { ui.alert(`${period}の評価データがありません。`); return; }
+
+  // 名簿マスタを読み、退職者（退社日あり）・名簿に無い人を先に除外する
+  const rosterSS    = getRosterSS_();
+  const masterSheet = rosterSS.getSheetByName(ROSTER_SHEET);
+  const lastMaster  = masterSheet.getLastRow();
+  const masterData  = masterSheet.getRange(2, 1, lastMaster - 1, 15).getValues();
+
+  const active = [];   // 反映対象（在籍）
+  const retired = [];  // 退職者（除外）
+  const notFound = []; // 名簿に無し（除外）
+  allTargets.forEach(t => {
+    const nm  = String(t.r[0]).trim();
+    const idx = masterData.findIndex(m => String(m[MC_NAME - 1]).trim() === nm);
+    if (idx < 0) { notFound.push(nm); return; }
+    const leave = masterData[idx][MC_LEAVE - 1];        // F列: 退社日（空＝在職）
+    if (leave !== '' && leave != null) { retired.push(nm); return; }
+    t.masterIdx = idx;
+    active.push(t);
+  });
+
+  // 除外の注記（確認・完了メッセージ両方で使う）
+  let extra = '';
+  if (retired.length)  extra += `\n\n※退職者につき除外（${retired.length}名）：${retired.join('、')}`;
+  if (notFound.length) extra += `\n\n※名簿に無く除外（${notFound.length}名）：${notFound.join('、')}`;
+
+  if (active.length === 0) {
+    ui.alert('反映できる在籍スタッフがいません。' + extra);
+    return;
+  }
+
+  // 上長承認の確認ゲート（うっかり更新を防ぐ）
+  const okBoss = ui.alert(
+    '⚠️ 上長の承認確認',
+    '上長の承認は取れていますか？\n\n' +
+    '取れていない場合は必ず「キャンセル」を押してください。\n' +
+    '（承認前にアルバイト名簿の時給・クラスターを書き換えないための確認です）',
+    ui.ButtonSet.OK_CANCEL);
+  if (okBoss !== ui.Button.OK) return;
+
+  // 確認一覧（在籍者のみ・旧→新時給・新クラスター）
+  const lines = active.map(t => {
+    const nm = t.r[0], oldW = t.r[10], newW = t.r[11], newCls = t.r[9];
+    const diff = (Number(newW) || 0) - (Number(oldW) || 0);
+    const mark = diff > 0 ? `（+${diff}円）` : diff < 0 ? `（${diff}円）` : '（変更なし）';
+    return `・${nm}　${oldW}→${newW}円　${newCls}${mark}`;
+  }).join('\n');
+
+  const res = ui.alert(
+    '✅ 名簿に登録（最新の評価だけ）',
+    `${period}　在籍 ${active.length}名を「承認済み」で名簿に反映します。\n` +
+    `※各人の一番新しい評価だけを使います。元に戻せません。\n\n${lines}${extra}\n\n` +
+    'この内容で登録して良いですか？',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (res !== ui.Button.OK) return;
+
+  let count = 0;
+  active.forEach(t => {
+    masterSheet.getRange(t.masterIdx + 2, MC_CLUSTER).setValue(t.r[9]);   // 新クラスター
+    masterSheet.getRange(t.masterIdx + 2, MC_WAGE).setValue(t.r[11]);     // 新時給
+    histSheet.getRange(t.sheetRow, 13).setValue('承認済み');              // M列を承認済みに
+    count++;
+  });
+
+  ui.alert(`✅ ${count}名のクラスター・時給をアルバイト名簿に反映しました。` + extra);
+}
+
+// ------------------------------------------------------------
+//  （旧・手動）評価履歴のM列を手で「承認済み」にしてから反映する方式
 // ------------------------------------------------------------
 function applyToRoster() {
   const ss    = SpreadsheetApp.getActiveSpreadsheet();
@@ -1878,7 +1985,7 @@ function setupContractTemplate() {
 
   let note = '';
   if (removed > 0)  note = '・散らばる○（図形）を' + removed + '個 自動で消しました。\n';
-  else if (removed === -1) note = '⚠️ 図形の自動削除でエラーが出ました（○が残る場合があります）。松山に連絡してください。\n';
+  else if (removed === -1) note = '⚠️ 図形の自動削除でエラーが出ました（○が残る場合があります）。管理者に連絡してください。\n';
   else note = '・図形（○）は見つかりませんでした。\n';
 
   ui.alert('✅ 差し込みテンプレートを作成しました：「' + CONTRACT_TEMPLATE_NAME + '」\n\n' +

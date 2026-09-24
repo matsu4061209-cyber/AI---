@@ -42,9 +42,10 @@ function getFormDefaults(){
 
 function getNextHpcd(){
   var rows=SpreadsheetApp.getActiveSpreadsheet().getSheetByName(MASTER_SHEET).getDataRange().getValues();
-  var max=462000;
+  // 店舗ごとにHPCDの番号帯が違うため、固定の初期値は持たない。登録済みの最大値+1。まだ誰もいなければ空欄（手入力）
+  var max=0;
   for(var i=1;i<rows.length;i++){var h=Number(rows[i][COL_HPCD-1]);if(!isNaN(h)&&h>max)max=h;}
-  return max+1;
+  return max>0?max+1:'';
 }
 
 function westernToEraGAS(y){
@@ -116,7 +117,7 @@ function buildFormHtml(nextHpcd,today,d){
   h+='.bc{background:#f1f3f4;color:#3c4043}.bo{background:#1a73e8;color:white}.bo:disabled{background:#a8c7fa}';
   h+='</style></head><body><div class="fb">';
   h+='<div class="sec"><div class="st">基本情報</div><div class="gr">';
-  h+='<div><label>HPCD <span class="bj at">自動採番（変更可）</span></label><input type="text" id="hpcd" value="'+nextHpcd+'" placeholder="例: '+nextHpcd+'"></div>';
+  h+='<div><label>HPCD <span class="bj at">自動採番（変更可）</span></label><input type="text" id="hpcd" value="'+nextHpcd+'" placeholder="'+(nextHpcd?'例: '+nextHpcd:'この店舗のHPCDを入力')+'"></div>';
   h+='<div><label>社員CD <span class="bj op">任意</span></label><input type="text" id="shaCD" value="'+d.shaCD+'" placeholder="例: 101056"></div>';
   h+='<div class="fu"><label>名前 <span class="bj rq">必須</span></label><input type="text" id="name" placeholder="例: 山田　太郎"></div>';
   h+='<div><label>性別</label><select id="gender"><option value="">選択</option><option>男</option><option>女</option></select></div>';
@@ -132,7 +133,7 @@ function buildFormHtml(nextHpcd,today,d){
   h+='</div></div></div>';
   h+='<div class="sec"><div class="st">雇用区分・役職</div><div class="gr">';
   h+='<div><label>区分</label><select id="kubun"><option value="">選択</option><option>高校</option><option>大学</option><option>短大</option><option>専門</option><option>主婦</option><option>フリーター</option><option>フリー</option><option>社員</option></select></div>';
-  h+='<div><label>詳細</label><input type="text" id="detail" placeholder="例: 近大、主婦 など"></div>';
+  h+='<div><label>詳細</label><input type="text" id="detail" placeholder="例: 大学名、主婦 など"></div>';
   h+='<div><label>クラスター</label><select id="cluster"><option value="">選択</option><option selected>ルーキー</option><option>1クルー</option><option>2クルー</option><option>3クルー</option><option>1トレーナー</option><option>マネージャー</option></select></div>';
   h+='<div><label>時給（円）</label><input type="number" id="wage" value="'+d.wage+'" placeholder="例: 1100"></div>';
   h+='<div class="fu"><label>勤務メモ</label><input type="text" id="workInfo" placeholder="例: 週3、土日〇、掛持ちあり"></div>';
@@ -146,12 +147,12 @@ function buildFormHtml(nextHpcd,today,d){
   h+='<div><label>上サイズ</label><select id="sizeTop"><option value="">選択</option><option>S</option><option>M</option><option>L</option><option>LL</option><option>3L</option></select></div>';
   h+='<div><label>貸与枚数</label><select id="lendCnt"><option value="">選択</option><option value="1" selected>1枚</option><option value="2">2枚</option><option value="3">3枚</option></select></div>';
   h+='<div><label>靴サイズ（cm）</label><select id="sizeShoe">'+so+'</select></div>';
-  h+='<div><label>車情報</label><input type="text" id="carInfo" placeholder="例: 筑豊500あ1234 プリウス"></div>';
+  h+='<div><label>車情報</label><input type="text" id="carInfo" placeholder="例: ナンバー・車種"></div>';
   h+='</div></div>';
   h+='<div class="sec"><div class="st">連絡先・住所</div><div class="gr">';
   h+='<div><label>携帯番号</label><input type="tel" id="mobile" placeholder="例: 090-1234-5678"></div>';
   h+='<div><label>緊急連絡先</label><input type="tel" id="emergency" placeholder="例: 080-1234-5678"></div>';
-  h+='<div class="fu"><label>郵便番号</label><div class="zr"><input type="text" id="postcode" placeholder="例: 820-0001" maxlength="8"><button class="zb" type="button" onclick="lookupZip()">住所を検索</button></div></div>';
+  h+='<div class="fu"><label>郵便番号</label><div class="zr"><input type="text" id="postcode" placeholder="例: 123-4567" maxlength="8"><button class="zb" type="button" onclick="lookupZip()">住所を検索</button></div></div>';
   h+='<div class="fu"><label>住所</label><input type="text" id="address" placeholder="郵便番号検索後、番地・号を追加してください"><div class="zs" id="zipSt"></div></div>';
   h+='</div></div>';
   h+='</div>';
@@ -211,13 +212,13 @@ function saveNewStaff(d){
   // HPCDの検証（編集可にしたため）と重複チェック
   var hpcdNum=Number(d.hpcd);
   if(d.hpcd===''||d.hpcd==null||isNaN(hpcdNum)){
-    throw new Error('HPCDは数字で入力してください（自動採番の候補: '+getNextHpcd()+'）。');
+    throw new Error('HPCDは数字で入力してください'+(getNextHpcd()?'（自動採番の候補: '+getNextHpcd()+'）':'')+'。');
   }
   var all=master.getDataRange().getValues();
   for(var k=1;k<all.length;k++){
     if(Number(all[k][COL_HPCD-1])===hpcdNum){
       var dupName=all[k][COL_NAME-1]||'(名前なし)';
-      throw new Error('HPCD '+hpcdNum+' は既に「'+dupName+'」さんで使われています。\n後から登録するこの番号を別の番号に変更してください（次の空き番号: '+getNextHpcd()+'）。');
+      throw new Error('HPCD '+hpcdNum+' は既に「'+dupName+'」さんで使われています。\n後から登録するこの番号を別の番号に変更してください（次の空き番号: '+getNextHpcd()+'）。');  // ここに来る時点で登録済みがあるので必ず数字
     }
   }
   var newRow=master.getLastRow()+1;
@@ -240,7 +241,8 @@ function saveNewStaff(d){
   if(d.wage)master.getRange(newRow,COL_WAGE).setNumberFormat('\\#,##0');
   master.getRange(newRow,COL_TENURE).setFormula('=IF(E'+newRow+'="","",DATEDIF(E'+newRow+',TODAY(),"Y")&"年"&DATEDIF(E'+newRow+',TODAY(),"YM")&"ヶ月")');
   master.getRange(newRow,COL_AGE).setFormula('=IF(I'+newRow+'="","",DATEDIF(I'+newRow+',TODAY(),"Y"))');
-  return d.name+' を登録しました（HPCD: '+d.hpcd+'）';
+  var listMsg=refreshRosterLists_()?'\n在籍スタッフシートに反映しました':'\n※一覧シートの自動反映でエラー（メニューの「一覧を更新」を実行してください）';
+  return d.name+' を登録しました（HPCD: '+d.hpcd+'）'+listMsg;
 }
 
 function parseLocalDate(str){
@@ -294,18 +296,8 @@ function processRetirement(hpcd,dateStr){
   if(targetRow===-1)throw new Error('HPCDが見つかりません: '+hpcd);
   var rd=parseLocalDate(dateStr),cell=master.getRange(targetRow,COL_RESIGN);
   cell.setValue(rd);cell.setNumberFormat('yyyy/MM/dd');
-  var as=ss.getSheetByName(ACTIVE_SHEET);
-  if(as&&!as.getRange(2,1).getFormula()){
-    var ad=as.getDataRange().getValues();
-    for(var j=ad.length-1;j>=1;j--){if(String(ad[j][COL_HPCD-1])===hpcd){as.deleteRow(j+1);break;}}
-  }
-  // 退職者シートへ自動反映（マスタの退社日ありを作り直す）
-  var resignedMsg='';
-  try{
-    var rn=rebuildResignedList_();
-    resignedMsg=(rn>=0)?('\n退職者シートに反映しました（計 '+rn+' 名）')
-                       :'\n※退職者シートが見つからず反映できませんでした';
-  }catch(e){ resignedMsg='\n※退職者シートの反映でエラー: '+e.message; }
+  // 在籍スタッフ・退職者シートへ自動反映（マスタから作り直す）
+  var resignedMsg=refreshRosterLists_()?'\n在籍スタッフ・退職者シートに反映しました':'\n※一覧シートの自動反映でエラー（メニューの「一覧を更新」を実行してください）';
   return staffName+' の退職処理が完了しました\n退職日: '+Utilities.formatDate(rd,'Asia/Tokyo','yyyy/MM/dd')+resignedMsg;
 }
 
@@ -368,7 +360,8 @@ function updateStaff(hpcd,d){
   master.getRange(targetRow,COL_EMERGENCY).setValue(d.emergency||'');
   master.getRange(targetRow,COL_POSTCODE).setValue(d.postcode||'');
   master.getRange(targetRow,COL_ADDRESS).setValue(d.address||'');
-  return d.name+' の情報を更新しました';
+  var listMsg=refreshRosterLists_()?'\n在籍スタッフ・退職者シートに反映しました':'\n※一覧シートの自動反映でエラー（メニューの「一覧を更新」を実行してください）';
+  return d.name+' の情報を更新しました'+listMsg;
 }
 
 function buildEditFormHtml(list,d){
@@ -520,11 +513,18 @@ function buildEditFormHtml(list,d){
 }
 
 function formatForA4(){
+  var n=rebuildActiveList_();
+  if(n<0){SpreadsheetApp.getUi().alert('「'+MASTER_SHEET+'」または「'+ACTIVE_SHEET+'」シートが見つかりません');return;}
+  SpreadsheetApp.getUi().alert('整形完了！（在籍 '+n+' 名）\n\n印刷: ファイル → 印刷\n・用紙: A4・横\n・拡大縮小: ページ幅に合わせる');
+}
+
+// 在籍スタッフシートをマスタ（退社日なし）から作り直す。件数を返す。シートが無ければ -1。
+// ※UI（alert等）は出さない ＝ 登録・変更・退職処理や自動更新（onEdit）からも安全に呼べる
+function rebuildActiveList_(){
   var ss=SpreadsheetApp.getActiveSpreadsheet();
   var master=ss.getSheetByName(MASTER_SHEET);
   var sheet=ss.getSheetByName(ACTIVE_SHEET);
-  if(!master){SpreadsheetApp.getUi().alert('「'+MASTER_SHEET+'」シートが見つかりません');return;}
-  if(!sheet){SpreadsheetApp.getUi().alert('「'+ACTIVE_SHEET+'」シートが見つかりません');return;}
+  if(!master||!sheet)return -1;
   function skillLabel(s){if(s==='D')return 'デシャップ';if(s==='K')return 'キッチン';return s||'';}
   var rows=master.getDataRange().getValues().slice(1)
     .filter(function(r){return r[COL_HPCD-1]&&r[COL_NAME-1]&&!r[COL_RESIGN-1];});
@@ -563,7 +563,7 @@ function formatForA4(){
     if(sheet.getColumnWidth(c)<minW[c-1])sheet.setColumnWidth(c,minW[c-1]);
   }
   protectSheetWarning_(ACTIVE_SHEET);
-  SpreadsheetApp.getUi().alert('整形完了！（在籍 '+data.length+' 名）\n\n印刷: ファイル → 印刷\n・用紙: A4・横\n・拡大縮小: ページ幅に合わせる');
+  return data.length;
 }
 
 function formatResignedList(){
@@ -762,6 +762,29 @@ function clearForTemplate(){
 }
 
 // ------------------------------------------------------------
+//  在籍スタッフ／退職者シートをマスタから作り直す（自動更新の共通入口）
+//  mode: 'active'＝在籍のみ／'resigned'＝退職者のみ／それ以外＝両方
+//  ・同時に複数回動いても順番待ちにする（表が混ざらないように）
+//  ・成功でtrue／失敗でfalse（呼び出し元の登録・退職処理は失敗させない）
+// ------------------------------------------------------------
+function refreshRosterLists_(mode){
+  var lock=LockService.getScriptLock();
+  try{
+    lock.waitLock(30000);
+    try{
+      if(mode!=='resigned')rebuildActiveList_();
+      if(mode!=='active')rebuildResignedList_();
+    }finally{
+      lock.releaseLock();
+    }
+    return true;
+  }catch(err){
+    console.log('一覧の自動更新エラー: '+err.message);
+    return false;
+  }
+}
+
+// ------------------------------------------------------------
 //  自動生成シートに「警告のみ」の保護をかける
 //  ・手で直接編集しようとすると警告が出る（事故防止）
 //  ・メニューのスクリプトは問題なく書き込める（誰が実行してもOK）
@@ -770,8 +793,11 @@ function clearForTemplate(){
 function protectSheetWarning_(sheetName){
   var sh=SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
   if(!sh)return;
+  // 警告のみの保護が既にあれば何もしない（自動更新のたびに作り直さない）
+  var ex=sh.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+  if(ex.length===1&&ex[0].isWarningOnly())return;
   // 既存のシート保護を一旦すべて解除（重複防止）
-  sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function(p){p.remove();});
+  ex.forEach(function(p){p.remove();});
   // 警告のみの保護をかけ直す
   sh.protect()
     .setDescription('自動生成シート：直接編集しないでください（「スタッフ管理」メニューの更新で上書きされます）')
@@ -786,6 +812,23 @@ function protectSheetWarning_(sheetName){
 function onEdit(e){
   if(!e||!e.range)return;
   var name=e.range.getSheet().getName();
+  // ★AUTO_REFRESH_LISTS★ スタッフマスタを手で編集・貼り付けしたら、在籍スタッフ／退職者を自動で更新
+  if(name===MASTER_SHEET){
+    var r=e.range;
+    if(r.getLastRow()<2)return;  // 見出し行だけの編集は対象外
+    var multi=r.getNumRows()>1||r.getNumColumns()>1;
+    var touchResign=r.getColumn()<=COL_RESIGN&&r.getLastColumn()>=COL_RESIGN;
+    var mode='';  // 空＝両方
+    if(!multi&&!touchResign){
+      // 1マスだけの編集は、その行が在籍か退職かで、該当する一覧だけ更新（速くする）
+      mode=r.getSheet().getRange(r.getRow(),COL_RESIGN).getValue()?'resigned':'active';
+    }
+    var ok=refreshRosterLists_(mode);
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      ok?'在籍スタッフ・退職者の一覧を自動で更新しました。':'一覧の自動更新に失敗しました。メニューの「一覧を更新」を実行してください。',
+      'スタッフマスタの変更',ok?3:8);
+    return;
+  }
   if(name==='在籍スタッフ'||name==='退職者'||name==='チェックシート'){
     SpreadsheetApp.getActiveSpreadsheet().toast(
       '直接入力しても記録に残りません（次の更新で消えます）。変更は上の「スタッフ管理」メニューから行ってください。',

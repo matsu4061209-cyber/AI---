@@ -218,7 +218,8 @@ function onOpen() {
     .addSeparator()
     .addItem('決まりを点検する（未成年・休憩）', 'checkWeekLawNow')
     .addItem('スタッフの生年月日', 'openMinorSettings')
-    .addItem('お試し公開（LINEは送らない）', 'publishWeekTest')
+    .addItem('時給と交通費の設定', 'openWageSettings')
+    .addItem('お試し公開（スタッフには送らない）', 'publishWeekTest')
     .addItem('色を塗り直す（掃除）', 'refreshWeekColors')
     .addSubMenu(ui.createMenu('ポジション色分け')
       .addItem('色分けを始める（このシート）', 'unlockPositionColors')
@@ -250,9 +251,20 @@ function onOpen() {
 // ===================== 店長・社員・キャストの時間数 =====================
 
 // 「スタッフ区分」シートを取得（無ければ非表示で作る）
+// 前の版は、D列に「数式の自動チェック」の結果を書いていた（今はJ列に書く）。
+// D列は「高校生」の印に使うので、古い書き込みが残っていたら見出しごと直す
+function fixOldRoleHeader_(sheet) {
+  if (String(sheet.getRange('D1').getDisplayValue()).trim() !== '数式の自動チェック') return;
+  var old = sheet.getRange('D2').getDisplayValue();
+  sheet.getRange('D1:D2').clearContent();
+  sheet.getRange(1, ROLE_BIRTH_COL, 1, 2).setValues([['生年月日', '高校生']]);
+  if (old) sheet.getRange('J1:J2').setValues([['数式の自動チェック'], [old]]);   // 点検の結果はJ列へ移す
+}
+
 function getRoleSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(ROLE_SHEET_NAME);
+  if (sheet) fixOldRoleHeader_(sheet);
   if (!sheet) {
     var active = ss.getActiveSheet(); // シート作成で表示中のシートが切り替わるため先に覚えておく
     sheet = ss.insertSheet(ROLE_SHEET_NAME);
@@ -434,7 +446,8 @@ function setupRoleHours() {
   targets.forEach(function(s) { applyRoleHoursFormulas_(s); });
 
   var result = selfTestRoleFormula_();
-  roleSheet.getRange('D1:D2').setValues([['数式の自動チェック'], [result]]);
+  // D列は「高校生」の印に使うので、点検の結果はJ列に書く
+  roleSheet.getRange('J1:J2').setValues([['数式の自動チェック'], [result]]);
   Logger.log('対象シート: ' + targets.map(function(s) { return s.getName(); }).join(', ') + ' / チェック結果: ' + result);
 }
 
@@ -642,7 +655,7 @@ function getRequestSettingsSheet_() {
   // 前の版で入っていた1〜4以外の数字（14など）は初期値に直す
   var weeksNow = Number(sheet.getRange(REQUEST_BASE_WEEKS_CELL).getDisplayValue());
   if (!(weeksNow >= 1 && weeksNow <= 4)) sheet.getRange(REQUEST_BASE_WEEKS_CELL).setValue(String(REQUEST_DEFAULT_BASE.deadlineWeeks));
-  sheet.getRange('D3:D31').setValues([
+  sheet.getRange('D3:D37').setValues([
     ['基本設定：社員の締め日（毎月この日）'],
     ['基本設定：スタッフ入力締切は募集が始まる何週間前の日曜日'],
     ['基本設定：スタッフ入力締切の時刻'],
@@ -671,7 +684,13 @@ function getRequestSettingsSheet_() {
     ['アルバイト名簿ファイルのURL（生年月日を読みます。空ならスタッフ区分シートの入力を使います）'],
     ['1日に欲しい人数の目安（平日）。お知らせの{人手不足}で使います'],
     ['1日に欲しい人数の目安（土曜・日曜・祝日）。お知らせの{人手不足}で使います'],
-    ['お知らせ：締切当日の文（送る日に0を入れると送ります）']
+    ['お知らせ：締切当日の文（送る日に0を入れると送ります）'],
+    ['LINE：お試しの送り先（メニュー「お試し公開」だけがここへ送ります）'],
+    ['交通費の出し方（メニュー「時給と交通費の設定」で選びます）'],
+    ['交通費：何日以上はたらいたら出すか'],
+    ['交通費：金額（円）'],
+    ['契約が更新される月（例「3,9」。この日に時給が変わります）'],
+    ['契約が更新される日（例「21」）']
   ]);
   // 欲しい人数の目安。空のときだけ初期値を入れる
   if (String(sheet.getRange(NEED_WEEKDAY_CELL).getDisplayValue()).trim() === '') {
@@ -1742,8 +1761,9 @@ function confirmAdjust() {
       '・全員の表をPDFにして、LINEのグループにお知らせを送ります\n\nよろしいですか。',
       ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
   var found = checkWeekLaw_(week, true);
-  if (found.length && ui.alert('決まりの確認（' + week.getName() + '）',
-      lawReportText_(found) + '\n\nこのまま確定して公開しますか。\n「いいえ」を押すと、直してから確定できます。',
+  var unknown = unknownBirthNames_(week);
+  if ((found.length || unknown.length) && ui.alert('決まりの確認（' + week.getName() + '）',
+      lawReportText_(found, unknown) + '\n\nこのまま確定して公開しますか。\n「いいえ」を押すと、直してから確定できます。',
       ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
   setPen_(week, null);                 // 確定したらペンは置く
   var cleared = clearAdjustMarks_(week, ourColors_());
@@ -1864,25 +1884,61 @@ function savePdf_(folder, blob) {
 }
 
 // お知らせの文
-function publishNoticeText_(week, pdfUrl) {
-  return weekRangeLabel_(week.getName()) + 'のシフトができました。\n' +
-    '・自分の分だけ見る → ' + STAFF_PAGE_URL + '?shift=' + week.getName() + '\n' +
-    '・全員の表（PDF） → ' + pdfUrl;
+// LINEに送るお知らせ。長いアドレスをそのまま並べると読みにくいので、
+// 「自分の分だけ見る」「全員の表（PDF）」という2つのボタンが付いたカード（Flex Message）で送る。
+// altText ＝ 通知や、カードを出せない古いLINEで代わりに出る文
+function publishNoticeMessage_(week, pageUrl, pdfUrl) {
+  var range = weekRangeLabel_(week.getName());
+  return {
+    type: 'flex',
+    altText: range + 'のシフトができました',
+    contents: {
+      type: 'bubble',
+      // 何通も並んだときに、どの週のぶんか一目で分かるよう、日にちを大きくして1行にまとめる
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        contents: [
+          { type: 'text', wrap: true, contents: [
+            { type: 'span', text: range, weight: 'bold', size: 'lg', color: '#111111' },
+            { type: 'span', text: ' のシフト', size: 'sm', color: '#666666' }
+          ] }
+        ]
+      },
+      footer: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        contents: [
+          { type: 'button', style: 'primary', height: 'sm',
+            action: { type: 'uri', label: '自分の分だけ見る', uri: pageUrl } },
+          { type: 'button', style: 'secondary', height: 'sm',
+            action: { type: 'uri', label: '全員の表（PDF）', uri: pdfUrl } }
+        ]
+      }
+    }
+  };
 }
 
-// メニュー用：お試し（PDFを作るだけ。LINEは送らない）
+// メニュー用：お試し。お試しの送り先を登録してあれば、そこへ本物と同じお知らせを送る。
+// 登録していなければ、今までどおりLINEには何も送らない
 function publishWeekTest() {
   var week = activeWeekSheet_();
   if (!week) return;
   var ui = SpreadsheetApp.getUi();
-  if (ui.alert('「' + week.getName() + '」のPDFを作って、スタッフのページに公開します。\n' +
-      'LINEへのお知らせは送りません。よろしいですか。',
+  var settings = getRequestSettingsSheet_();
+  var testTarget = String(settings.getRange(LINE_TEST_TARGET_CELL).getDisplayValue()).trim();
+  if (ui.alert('「' + week.getName() + '」のPDFを作って、スタッフのページに公開します。\n\n' +
+      (testTarget ? 'LINEは「お試しの送り先」にだけ送ります。スタッフのグループには送りません。'
+                  : 'LINEへのお知らせは送りません。\n'
+                    + '（お試しの送り先を登録しておくと、そこへ本物と同じお知らせを送って見え方を確かめられます）') +
+      '\n\nよろしいですか。',
       ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
-  publishWeek_(week, false, true);
+  publishWeek_(week, true, !testTarget, true);
 }
 
 // 公開する本体。resend＝true なら、もう一度LINEを送る。skipLine＝true ならLINEを送らない
-function publishWeek_(week, resend, skipLine) {
+function publishWeek_(week, resend, skipLine, useTestTarget) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var settings = getRequestSettingsSheet_();
   var name = week.getName();
@@ -1906,14 +1962,16 @@ function publishWeek_(week, resend, skipLine) {
   if (skipLine) {
     sent = 'お試しのため、LINEへのお知らせは送っていません。';
   } else if (resend || !noticeAlreadySent_(settings, key)) {
-    var line = lineConfig_(settings);
+    var line = lineConfig_(settings, useTestTarget);
     if (!line.token || !line.target) {
       sent = 'LINEの設定がないため、お知らせは送っていません。';
     } else {
       try {
-        linePush_(line, publishNoticeText_(week, pdfUrl));
-        if (!resend) writeNoticeLog_(settings, key);
-        sent = 'LINEのグループにお知らせを送りました。';
+        linePush_(line, publishNoticeMessage_(week, pageUrl, pdfUrl));
+        // お試しのときは「送った控え」を残さない（本番の確定でちゃんと送れるように）
+        if (!resend && !useTestTarget) writeNoticeLog_(settings, key);
+        sent = useTestTarget ? 'お試しの送り先に、本物と同じお知らせを送りました（スタッフのグループには送っていません）。'
+                             : 'LINEのグループにお知らせを送りました。';
       } catch (e) {
         sent = 'LINEへ送れませんでした：' + e.message;
         noticeSendFailure_(settings, name + 'のシフト公開のお知らせ', e.message);
@@ -2040,15 +2098,48 @@ function readRoleSheetBirths_() {
 }
 
 // アルバイト名簿ファイル（「名前」「生年月日」「区分」の見出しがある表を探す）
+// 名簿ファイルを開く。設定にURLがあればそれを、無ければシフト表と同じフォルダから
+// 名前に「名簿」が入っている表を探す（他のお店にフォルダごと渡しても動くように）
+function rosterBook_() {
+  var url = String(getRequestSettingsSheet_().getRange(ROSTER_URL_CELL).getDisplayValue()).trim();
+  if (url) {
+    try { return openBookByUrl_(url); } catch (e) { return null; }
+  }
+  try {
+    var parents = DriveApp.getFileById(SpreadsheetApp.getActiveSpreadsheet().getId()).getParents();
+    while (parents.hasNext()) {
+      var files = parents.next().getFilesByType(MimeType.GOOGLE_SHEETS);
+      var other = null;
+      while (files.hasNext()) {
+        var file = files.next();
+        var name = file.getName();
+        if (name.indexOf('アルバイト名簿') !== -1) return SpreadsheetApp.openById(file.getId());
+        if (!other && name.indexOf('名簿') !== -1) other = file;
+      }
+      if (other) return SpreadsheetApp.openById(other.getId());
+    }
+  } catch (e) {}
+  return null;
+}
+
+// 名簿のシートを見る順番。「在籍」の表を先に見る（退職した人と混ざらないように）
+function rosterSheetsInOrder_(book) {
+  var sheets = book.getSheets();
+  var first = sheets.filter(function(s) { return s.getName().indexOf('在籍') !== -1; });
+  return first.concat(sheets.filter(function(s) { return first.indexOf(s) === -1; }));
+}
+
+// 「\1,220」のような書き方からも数字だけ取り出す
+function wageNumber_(value) {
+  var n = Number(String(value == null ? '' : value).replace(/[^0-9.]/g, ''));
+  return n > 0 ? Math.round(n) : 0;
+}
+
 function readRosterBirths_() {
   var map = {};
-  var settings = getRequestSettingsSheet_();
-  var url = String(settings.getRange(ROSTER_URL_CELL).getDisplayValue()).trim();
-  if (!url) return map;
-  var book;
-  try { book = openBookByUrl_(url); } catch (e) { return map; }
+  var book = rosterBook_();
   if (!book) return map;
-  book.getSheets().forEach(function(sheet) {
+  rosterSheetsInOrder_(book).forEach(function(sheet) {
     if (Object.keys(map).length) return;                 // 最初に見つかった表だけ使う
     var last = sheet.getLastRow(), lastCol = sheet.getLastColumn();
     if (last < 2 || lastCol < 2) return;
@@ -2059,14 +2150,19 @@ function readRosterBirths_() {
       var birthCol = head.indexOf('生年月日');
       if (nameCol < 0 || birthCol < 0) continue;
       var kindCol = head.indexOf('区分');
+      var wageCol = head.indexOf('時給');
+      var leftCol = head.indexOf('退社日');
       for (var r = h + 1; r < values.length; r++) {
         var key = flatName_(values[r][nameCol]);
         if (!key) continue;
+        if (leftCol >= 0 && values[r][leftCol] instanceof Date) continue;     // 辞めた人は入れない
         var birth = values[r][birthCol];
         map[key] = {
           name: String(values[r][nameCol]).trim(),
           birth: (birth instanceof Date) ? birth : null,
-          highSchool: kindCol >= 0 && String(values[r][kindCol]).indexOf('高校') === 0
+          highSchool: kindCol >= 0 && String(values[r][kindCol]).indexOf('高校') === 0,
+          kind: kindCol >= 0 ? String(values[r][kindCol]).trim() : '',
+          wage: wageCol >= 0 ? wageNumber_(values[r][wageCol]) : 0
         };
       }
       return;
@@ -2216,18 +2312,48 @@ function checkWeekLawNow() {
   var week = activeWeekSheet_();
   if (!week) return;
   var found = checkWeekLaw_(week, true);
-  if (!found.length) {
+  var unknown = unknownBirthNames_(week);
+  if (!found.length && !unknown.length) {
     SpreadsheetApp.getActiveSpreadsheet().toast('決まりに反するところはありませんでした。', '決まりの確認', 6);
     return;
   }
-  SpreadsheetApp.getUi().alert('決まりの確認（' + week.getName() + '）', lawReportText_(found), SpreadsheetApp.getUi().ButtonSet.OK);
+  SpreadsheetApp.getUi().alert('決まりの確認（' + week.getName() + '）', lawReportText_(found, unknown), SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
-function lawReportText_(found) {
-  return found.map(function(x) {
+// この週に出ている人のうち、生年月日が分からない人（＝未成年かどうか調べられない人）。
+// 店長・社員は大人と分かっているので数えない。
+function unknownBirthNames_(week) {
+  var info = minorInfoMap_();
+  var roles = {};
+  var rolesRaw = getStaffRoles_();
+  Object.keys(rolesRaw).forEach(function(n) { if (String(rolesRaw[n]).trim()) roles[flatName_(n)] = true; });
+  var seen = {}, out = [];
+  ADJUST_BLOCKS.forEach(function(block, day) {
+    blockPeople_(week, day).forEach(function(person) {
+      var key = flatName_(person.name);
+      if (!key || seen[key] || roles[key]) return;
+      if (minutesOfTime_(person.start) === null || minutesOfTime_(person.end) === null) return;   // 出勤の無い行は見ない
+      var who = info[key];
+      if (who && (who.birth || who.highSchool)) return;
+      seen[key] = true;
+      out.push(person.name);
+    });
+  });
+  return out;
+}
+
+function lawReportText_(found, unknown) {
+  var lines = found.map(function(x) {
     var day = x.day >= 0 ? (x.date.getMonth() + 1) + '/' + x.date.getDate() + '(' + DOW_JP[x.date.getDay()] + ') ' : '週の合計 ';
     return '・' + day + x.name + '：' + x.reasons.join('／');
-  }).join('\n');
+  });
+  if (unknown && unknown.length) {
+    if (lines.length) lines.push('');
+    lines.push('生年月日が未登録のため、未成年かどうか調べられませんでした。');
+    lines.push('・' + unknown.join('、'));
+    lines.push('（スタッフ管理 → スタッフの生年月日 で入れられます）');
+  }
+  return lines.join('\n');
 }
 
 // メニュー「スタッフの生年月日」：名簿が無くても使えるようにする入力画面
@@ -3036,6 +3162,9 @@ var RECORD_NAME_COL = 3;    // 名前の列
 var RECORD_DATA_COL = 16;   // 送った中身（この期間のものかを見る）
 var LINE_PUSH_URL = 'https://api.line.me/v2/bot/message/push';
 var LINE_REGISTER_CELL = 'E12';     // 送り先の登録を受け付ける期限（他の人に書き換えられないように、10分間だけ受け付ける）
+// お試しの送り先。本番のグループとは別のトーク（テスト用のグループなど）を入れておくと、
+// 「お試し公開」のときだけ、そちらへ本物と同じお知らせが届く。本番には行かない
+var LINE_TEST_TARGET_CELL = 'E32';
 var LINE_REGISTER_MINUTES = 10;
 // LINE Developers の「Webhook URL」に貼るアドレス（スマホのフォームと同じアドレスで受け取る）
 var LINE_WEBHOOK_URL = REQUEST_FORM_URL;
@@ -3235,20 +3364,22 @@ function submittedNames_(period) {
   }
 }
 
-function lineConfig_(settings) {
+function lineConfig_(settings, useTestTarget) {
   return {
     token: String(settings.getRange(LINE_TOKEN_CELL).getDisplayValue()).trim(),
-    target: String(settings.getRange(LINE_TARGET_CELL).getDisplayValue()).trim()
+    target: String(settings.getRange(useTestTarget ? LINE_TEST_TARGET_CELL : LINE_TARGET_CELL).getDisplayValue()).trim()
   };
 }
 
 // LINEへ送る。うまくいかない時は理由をそのまま出す（トークンの間違い・無料通数切れなどが分かるように）
-function linePush_(line, text) {
+// message ＝ ふつうの文字列（そのまま文で送る）か、組み立てたメッセージ（ボタン付きカードなど）
+function linePush_(line, message) {
+  var body = typeof message === 'string' ? { type: 'text', text: message } : message;
   var res = UrlFetchApp.fetch(LINE_PUSH_URL, {
     method: 'post',
     contentType: 'application/json',
     headers: { Authorization: 'Bearer ' + line.token },
-    payload: JSON.stringify({ to: line.target, messages: [{ type: 'text', text: text }] }),
+    payload: JSON.stringify({ to: line.target, messages: [body] }),
     muteHttpExceptions: true
   });
   if (res.getResponseCode() !== 200) {
@@ -3292,6 +3423,7 @@ function writeNoticeLog_(settings, key) {
 function openLineSettings() {
   var settings = getRequestSettingsSheet_();
   var line = lineConfig_(settings);
+  var testTarget = String(settings.getRange(LINE_TEST_TARGET_CELL).getDisplayValue()).trim();
   var box = 'width:100%;padding:6px;font-size:12px;';
   var html = '<div style="font-family:sans-serif;padding:4px 8px;font-size:14px;line-height:1.6;">' +
     '<p style="margin:0 0 8px;font-size:12px;color:#555;">LINE公式アカウントから、スタッフのグループへお知らせを送るための設定です。</p>' +
@@ -3308,6 +3440,14 @@ function openLineSettings() {
     '<p style="margin:2px 0;font-size:12px;color:' + (line.target ? '#186A3B' : '#B03A2E') + ';">' +
     (line.target ? '登録済み（' + escapeHtml_(line.target.slice(0, 8)) + '…）' :
       'まだ登録されていません。公式アカウントをグループに招待し、そのグループで何か一言送ってください。') + '</p>' +
+
+    '<label style="display:block;font-weight:bold;margin-top:12px;">④ お試しの送り先（なくても構いません）</label>' +
+    '<p style="margin:2px 0;font-size:12px;color:#555;">テスト用のグループを登録しておくと、メニューの「お試し公開」で' +
+    '<b>本物と同じお知らせがそちらにだけ</b>届きます。スタッフのグループには送りません。</p>' +
+    '<button onclick="doOpenTest()" style="padding:5px 10px;">お試しの送り先を登録する（' + LINE_REGISTER_MINUTES + '分）</button>' +
+    '<button onclick="doClearTest()" style="margin-left:6px;padding:5px 10px;">消す</button>' +
+    '<p style="margin:2px 0;font-size:12px;color:#555;">' +
+    (testTarget ? '登録済み（' + escapeHtml_(testTarget.slice(0, 8)) + '…）' : 'まだ登録されていません。') + '</p>' +
 
     '<p id="msg" style="margin:10px 0 0;font-size:12px;color:#186A3B;"></p>' +
     '<div style="margin-top:12px;text-align:right;">' +
@@ -3329,6 +3469,18 @@ function openLineSettings() {
     '    .withFailureHandler(function(e){ show(e.message, true); })' +
     '    .openLineRegister();' +
     '}' +
+    'function doOpenTest(){' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function(t){ show(t); })' +
+    '    .withFailureHandler(function(e){ show(e.message, true); })' +
+    '    .openLineRegisterTest();' +
+    '}' +
+    'function doClearTest(){' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function(t){ show(t); })' +
+    '    .withFailureHandler(function(e){ show(e.message, true); })' +
+    '    .clearLineTestTarget();' +
+    '}' +
     'function doTest(){' +
     '  show("送っています…");' +
     '  google.script.run' +
@@ -3345,11 +3497,26 @@ function saveLineSettings(token) {
   return '保存しました。';
 }
 
-// 「送り先の登録を受け付ける」：これから10分の間だけ、LINEから来た連絡の送り先を登録する
-function openLineRegister() {
+// 「送り先の登録を受け付ける」：これから10分の間だけ、LINEから来た連絡の送り先を登録する。
+// forTest＝true なら、本番ではなく「お試しの送り先」として登録する（期限のうしろに |test を付けて見分ける）
+function openLineRegister(forTest) {
   var until = new Date(Date.now() + LINE_REGISTER_MINUTES * 60000);
-  getRequestSettingsSheet_().getRange(LINE_REGISTER_CELL).setValue(Utilities.formatDate(until, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'));
-  return LINE_REGISTER_MINUTES + '分の間、登録を受け付けます。グループで何か一言送ってください。';
+  var value = Utilities.formatDate(until, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') + (forTest ? '|test' : '');
+  getRequestSettingsSheet_().getRange(LINE_REGISTER_CELL).setValue(value);
+  return LINE_REGISTER_MINUTES + '分の間、' + (forTest ? 'お試しの送り先' : 'お知らせの送り先') +
+    'の登録を受け付けます。\n登録したいトーク（' + (forTest ? 'テスト用のグループなど' : 'スタッフのグループ') +
+    '）で、何か一言送ってください。';
+}
+
+// 「お試しの送り先を登録する」
+function openLineRegisterTest() {
+  return openLineRegister(true);
+}
+
+// お試しの送り先を消す（お試し公開でLINEを送らないように戻す）
+function clearLineTestTarget() {
+  getRequestSettingsSheet_().getRange(LINE_TEST_TARGET_CELL).setValue('');
+  return 'お試しの送り先を消しました。お試し公開ではLINEを送りません。';
 }
 
 function sendLineTest() {
@@ -3416,6 +3583,290 @@ function readNoticeSettings_(settings) {
 function noticeTemplateFor_(notice, left) {
   if (left === 0) return notice.last;
   return left === notice.days[0] ? notice.first : notice.later;
+}
+
+/* ================= 時給と交通費（スタッフのページに出す概算の給与で使う） ================= */
+// 時給は契約の更新（3月21日／9月21日）で変わるので、「今の時給」と「前の時給」「いつから今の時給か」を持つ。
+// 締め期間の初日が「いつから」より前なら前の時給で計算する。
+var ROLE_WAGE_COL = 5;             // スタッフ区分シート：今の時給
+var ROLE_PREV_WAGE_COL = 6;        // 前の時給（契約が更新される前の時給）
+var ROLE_WAGE_FROM_COL = 7;        // 今の時給がいつからか
+var FARE_KIND_CELL = 'E33';        // 交通費の出し方
+var FARE_DAYS_CELL = 'E34';        // 「◯日以上で決まった額」のときの日数
+var FARE_AMOUNT_CELL = 'E35';      // 金額
+var FARE_KINDS = ['なし', '日数以上で決まった額', '出勤1日ごと'];
+// 契約が更新される月と日。会社によって違うので設定で変えられる（飯塚店は3月21日と9月21日）
+var CONTRACT_MONTHS_CELL = 'E36';
+var CONTRACT_DAY_CELL = 'E37';
+var CONTRACT_DEFAULT = { months: [3, 9], day: 21 };
+
+// 契約の更新日の決まりを読む（空や書き間違いのときは初期値）
+function readContractRule_(settings) {
+  var months = splitDays_(settings.getRange(CONTRACT_MONTHS_CELL).getDisplayValue())
+    .filter(function(n) { return n >= 1 && n <= 12 && Math.floor(n) === n; });
+  months = months.filter(function(n, i) { return months.indexOf(n) === i; }).sort(function(a, b) { return a - b; });
+  var day = Number(settings.getRange(CONTRACT_DAY_CELL).getDisplayValue());
+  return {
+    months: months.length ? months : CONTRACT_DEFAULT.months.slice(),
+    day: day >= 1 && day <= 31 ? Math.floor(day) : CONTRACT_DEFAULT.day
+  };
+}
+
+// 「4月21日」のような言い方にする（画面の説明に使う）
+function contractRuleLabel_(rule) {
+  return rule.months.map(function(m) { return m + '月' + rule.day + '日'; }).join('・');
+}
+
+// その月の更新日（月の日数を超える日は末日にする）
+function contractDateOf_(year, month, day) {
+  var lastDay = new Date(year, month, 0).getDate();
+  return new Date(year, month - 1, Math.min(day, lastDay));
+}
+
+// today の直前にあった契約更新日
+function contractStartOn_(today, rule) {
+  rule = rule || readContractRule_(getRequestSettingsSheet_());
+  var year = today.getFullYear();
+  for (var i = rule.months.length - 1; i >= 0; i--) {
+    var day = contractDateOf_(year, rule.months[i], rule.day);
+    if (today >= day) return day;
+  }
+  return contractDateOf_(year - 1, rule.months[rule.months.length - 1], rule.day);
+}
+
+// スタッフ区分シートの時給を読む（名前でひく）
+function readWageMap_() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(ROLE_SHEET_NAME);
+  var map = {};
+  if (!sheet || sheet.getLastRow() < 2) return map;
+  sheet.getRange(2, 1, sheet.getLastRow() - 1, ROLE_WAGE_FROM_COL).getValues().forEach(function(row) {
+    var key = flatName_(row[0]);
+    if (!key) return;
+    map[key] = {
+      name: String(row[0]).trim(),
+      kind: String(row[1]).trim(),
+      wage: wageNumber_(row[ROLE_WAGE_COL - 1]),
+      prevWage: wageNumber_(row[ROLE_PREV_WAGE_COL - 1]),
+      from: (row[ROLE_WAGE_FROM_COL - 1] instanceof Date) ? row[ROLE_WAGE_FROM_COL - 1] : null
+    };
+  });
+  return map;
+}
+
+// その締め期間に使う時給。期間の初日が「いつから」より前なら、前の時給を使う
+function wageForPeriod_(info, startYmd) {
+  if (!info) return 0;
+  if (info.from && info.prevWage > 0) {
+    var from = Utilities.formatDate(info.from, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    if (startYmd < from) return info.prevWage;
+  }
+  return info.wage;
+}
+
+// 交通費の決まりを読む
+function readFareRule_(settings) {
+  var kind = String(settings.getRange(FARE_KIND_CELL).getDisplayValue()).trim();
+  return {
+    kind: FARE_KINDS.indexOf(kind) >= 0 ? kind : FARE_KINDS[0],
+    days: Number(settings.getRange(FARE_DAYS_CELL).getDisplayValue()) || 0,
+    amount: Number(settings.getRange(FARE_AMOUNT_CELL).getDisplayValue()) || 0
+  };
+}
+
+// 出勤日数から交通費を出す
+function fareFor_(rule, workDays) {
+  if (!rule || !workDays) return 0;
+  if (rule.kind === '日数以上で決まった額') return workDays >= rule.days ? rule.amount : 0;
+  if (rule.kind === '出勤1日ごと') return workDays * rule.amount;
+  return 0;
+}
+
+// メニュー「時給と交通費の設定」
+function openWageSettings() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var settings = getRequestSettingsSheet_();
+  var rule = readFareRule_(settings);
+  var contract = readContractRule_(settings);
+  var wages = readWageMap_();
+  var newest = newestWeekSheet_(ss);
+  var names = newest ? getRosterNames_(newest).filter(function(n) { return String(n).trim(); }) : [];
+  var rows = names.map(function(name) {
+    var info = wages[flatName_(name)] || {};
+    return {
+      name: String(name).trim(),
+      wage: info.wage || '',
+      prevWage: info.prevWage || '',
+      from: info.from ? Utilities.formatDate(info.from, ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd') : ''
+    };
+  });
+  var data = JSON.stringify({ rule: rule, rows: rows, kinds: FARE_KINDS, contract: contract }).replace(/</g, '\\u003c');
+  var box = 'width:100%;padding:6px;font-size:12px;';
+  var html = '<div style="font-family:sans-serif;padding:4px 8px;font-size:14px;line-height:1.6;">' +
+    '<p style="margin:0 0 8px;font-size:12px;color:#555;">スタッフのページに出す「概算の給与」で使います。社員には出しません。</p>' +
+    '<label style="display:block;font-weight:bold;">交通費の出し方</label>' +
+    '<select id="kind" style="' + box + '" onchange="build()"></select>' +
+    '<div id="fareBox"></div>' +
+    '<label style="display:block;font-weight:bold;margin-top:12px;">契約が更新される月（カンマ区切り）</label>' +
+    '<p style="margin:2px 0;font-size:12px;color:#555;">この日に時給が変わります。会社によって違うので、お店に合わせて直してください。</p>' +
+    '<input id="months" value="' + contract.months.join(',') + '" style="' + box + '">' +
+    '<label style="display:block;font-weight:bold;margin-top:8px;">その月の何日から</label>' +
+    '<select id="cday" style="' + box + '">' + numberOptions_(1, 31, contract.day, '#日から') + '</select>' +
+
+    '<label style="display:block;font-weight:bold;margin-top:12px;">時給</label>' +
+    '<p style="margin:2px 0;font-size:12px;color:#555;">「いつから」を入れると、それより前の締め期間は「前の時給」で計算します。' +
+    '名簿から取り込むこともできます。</p>' +
+    '<button onclick="doImport()" style="padding:5px 10px;margin-bottom:6px;">名簿から時給を取り込む</button>' +
+    '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr>' +
+    '<th style="text-align:left;">名前</th><th>時給</th><th>前の時給</th><th>いつから</th></tr></thead>' +
+    '<tbody id="rows"></tbody></table>' +
+    '<p id="msg" style="margin:8px 0 0;font-size:12px;color:#186A3B;"></p>' +
+    '<div style="margin-top:10px;text-align:right;">' +
+    '<button id="saveBtn" onclick="doSave()" style="padding:6px 12px;">保存する</button></div></div>' +
+    '<script>' +
+    'var DATA = ' + data + ';' +
+    'function show(t, err){ var m = document.getElementById("msg"); m.textContent = t; m.style.color = err ? "#B03A2E" : "#186A3B"; }' +
+    'function build(){' +
+    '  var sel = document.getElementById("kind");' +
+    '  if (!sel.options.length) { DATA.kinds.forEach(function(k){ var o = document.createElement("option"); o.value = k; o.textContent = k; if (k === DATA.rule.kind) o.selected = true; sel.appendChild(o); }); }' +
+    '  var box = document.getElementById("fareBox");' +
+    '  var kind = sel.value;' +
+    '  box.innerHTML = kind === "なし" ? "" :' +
+    '    (kind === "日数以上で決まった額"' +
+    '      ? \'<label style="display:block;margin-top:8px;">この日数以上はたらいたら</label><input id="days" type="number" value="\' + (DATA.rule.days || 15) + \'" style="' + box + '">\' +' +
+    '        \'<label style="display:block;margin-top:8px;">この金額（円）</label><input id="amount" type="number" value="\' + (DATA.rule.amount || 8000) + \'" style="' + box + '">\'' +
+    '      : \'<label style="display:block;margin-top:8px;">出勤1日あたり（円）</label><input id="amount" type="number" value="\' + (DATA.rule.amount || 200) + \'" style="' + box + '">\');' +
+    '}' +
+    'function drawRows(){' +
+    '  var body = document.getElementById("rows");' +
+    '  body.innerHTML = "";' +
+    '  DATA.rows.forEach(function(r, i){' +
+    '    var tr = document.createElement("tr");' +
+    '    tr.innerHTML = \'<td style="padding:2px 0;">\' + r.name + \'</td>\' +' +
+    '      \'<td><input id="w\' + i + \'" type="number" value="\' + r.wage + \'" style="width:70px;"></td>\' +' +
+    '      \'<td><input id="p\' + i + \'" type="number" value="\' + r.prevWage + \'" style="width:70px;"></td>\' +' +
+    '      \'<td><input id="f\' + i + \'" type="date" value="\' + r.from + \'" style="width:130px;"></td>\';' +
+    '    body.appendChild(tr);' +
+    '  });' +
+    '}' +
+    'function values(){' +
+    '  var kind = document.getElementById("kind").value;' +
+    '  var days = document.getElementById("days");' +
+    '  var amount = document.getElementById("amount");' +
+    '  return { kind: kind, days: days ? days.value : "", amount: amount ? amount.value : "",' +
+    '    months: document.getElementById("months").value, contractDay: document.getElementById("cday").value,' +
+    '    wages: DATA.rows.map(function(r, i){ return { name: r.name,' +
+    '      wage: document.getElementById("w" + i).value,' +
+    '      prevWage: document.getElementById("p" + i).value,' +
+    '      from: document.getElementById("f" + i).value }; }) };' +
+    '}' +
+    'function doSave(){' +
+    '  document.getElementById("saveBtn").disabled = true;' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function(t){ show(t); document.getElementById("saveBtn").disabled = false; })' +
+    '    .withFailureHandler(function(e){ show(e.message, true); document.getElementById("saveBtn").disabled = false; })' +
+    '    .saveWageSettings(values());' +
+    '}' +
+    'function doImport(){' +
+    '  show("名簿を見ています…");' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function(res){ DATA.rows = res.rows; drawRows(); show(res.message); })' +
+    '    .withFailureHandler(function(e){ show(e.message, true); })' +
+    '    .importWagesFromRoster(values());' +
+    '}' +
+    'build(); drawRows();' +
+    '</script>';
+  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(520).setHeight(640), '時給と交通費');
+}
+
+// 画面に入っている契約の決まりを使う（まだ保存していなくても、その場で効くように）。
+// 空や書き間違いのときは null を返して、保存してある設定を使わせる
+function contractRuleFromValues_(values) {
+  if (!values || values.months === undefined) return null;
+  var months = splitDays_(values.months).filter(function(n) { return n >= 1 && n <= 12 && Math.floor(n) === n; });
+  var day = Number(values.contractDay);
+  if (!months.length || !(day >= 1 && day <= 31)) return null;
+  months = months.filter(function(n, i) { return months.indexOf(n) === i; }).sort(function(a, b) { return a - b; });
+  return { months: months, day: Math.floor(day) };
+}
+
+// 画面の「名簿から時給を取り込む」。今の画面の内容を受け取り、名簿の時給で上書きしたものを返す
+// （時給が変わっていたら、今の時給を「前の時給」に移して、いつからを直近の契約更新日にする）
+function importWagesFromRoster(values) {
+  var roster = readRosterBirths_();
+  if (!Object.keys(roster).length) {
+    throw new Error('名簿が見つかりませんでした。「シフト希望設定」シートのE28に名簿ファイルのURLを入れるか、' +
+      'シフト表と同じフォルダに名簿を置いてください。');
+  }
+  var start = contractStartOn_(new Date(), contractRuleFromValues_(values));
+  var startText = Utilities.formatDate(start, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var changed = 0, found = 0, births = 0;
+  var rows = (values && values.wages ? values.wages : []).map(function(row) {
+    var info = roster[flatName_(row.name)];
+    if (!info || !info.wage) return row;
+    found++;
+    var now = wageNumber_(row.wage);
+    // 生年月日も持ち帰る（スタッフのページで「自分かどうか」を確かめるのに使う）
+    var birth = info.birth ? Utilities.formatDate(info.birth, Session.getScriptTimeZone(), 'yyyy-MM-dd') : '';
+    if (birth) births++;
+    // まだ時給が入っていない人（はじめての取り込み）は、そのまま入れるだけ。前の時給はいじらない
+    if (!now || now === info.wage) return { name: row.name, wage: info.wage, prevWage: row.prevWage, from: row.from, birth: birth };
+    changed++;
+    return { name: row.name, wage: info.wage, prevWage: now, from: startText, birth: birth };
+  });
+  return {
+    rows: rows,
+    message: found + '人の時給を名簿から読みました。' +
+      (births ? births + '人は生年月日も読みました（スタッフが自分の給与を見るときの確認に使います）。' : '') +
+      (changed ? changed + '人は名簿の時給が変わっていたので、これまでの時給を「前の時給」に移して、' +
+                 '「いつから」を ' + startText + ' にしました。' : '') +
+      '内容を確かめて「保存する」を押してください。'
+  };
+}
+
+// 画面から来た時給と交通費を保存する
+function saveWageSettings(values) {
+  var settings = getRequestSettingsSheet_();
+  var kind = FARE_KINDS.indexOf(String(values.kind)) >= 0 ? String(values.kind) : FARE_KINDS[0];
+  var days = Number(values.days) || 0;
+  var amount = Number(values.amount) || 0;
+  if (kind === '日数以上で決まった額' && !(days >= 1 && days <= 31)) throw new Error('日数は1〜31で入れてください。');
+  if (kind !== 'なし' && !(amount >= 0)) throw new Error('金額が正しくありません。');
+  settings.getRange(FARE_KIND_CELL).setValue(kind);
+  settings.getRange(FARE_DAYS_CELL).setValue(kind === '日数以上で決まった額' ? days : '');
+  settings.getRange(FARE_AMOUNT_CELL).setValue(kind === 'なし' ? '' : amount);
+
+  // 契約が更新される月と日
+  if (values.months !== undefined) {
+    var months = splitDays_(values.months).filter(function(n) { return n >= 1 && n <= 12 && Math.floor(n) === n; });
+    if (!months.length) throw new Error('契約が更新される月を1つ以上入れてください（例 3,9）。');
+    var contractDay = Number(values.contractDay);
+    if (!(contractDay >= 1 && contractDay <= 31)) throw new Error('契約が更新される日が正しくありません。');
+    months = months.filter(function(n, i) { return months.indexOf(n) === i; }).sort(function(a, b) { return a - b; });
+    settings.getRange(CONTRACT_MONTHS_CELL).setValue(months.join(','));
+    settings.getRange(CONTRACT_DAY_CELL).setValue(String(Math.floor(contractDay)));
+  }
+
+  var sheet = getRoleSheet_();
+  sheet.getRange(1, ROLE_BIRTH_COL, 1, 2).setValues([['生年月日', '高校生']]);
+  sheet.getRange(1, ROLE_WAGE_COL, 1, 3).setValues([['時給', '前の時給', '今の時給はいつから']]);
+  var last = sheet.getLastRow();
+  var names = last >= 2 ? sheet.getRange(2, 1, last - 1, 1).getValues().map(function(r) { return flatName_(r[0]); }) : [];
+  (values.wages || []).forEach(function(row) {
+    var key = flatName_(row.name);
+    if (!key) return;
+    var index = names.indexOf(key);
+    var rowNo = index >= 0 ? index + 2 : sheet.getLastRow() + 1;
+    if (index < 0) { sheet.getRange(rowNo, 1).setValue(String(row.name).trim()); names.push(key); }
+    sheet.getRange(rowNo, ROLE_WAGE_COL).setValue(wageNumber_(row.wage) || '');
+    sheet.getRange(rowNo, ROLE_PREV_WAGE_COL).setValue(wageNumber_(row.prevWage) || '');
+    sheet.getRange(rowNo, ROLE_WAGE_FROM_COL).setValue(
+      /^\d{4}-\d{2}-\d{2}$/.test(String(row.from)) ? new Date(String(row.from) + 'T00:00:00+09:00') : '');
+    // 名簿から生年月日が読めていれば、空のときだけ入れる（手で直した内容は消さない）
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(row.birth)) && !(sheet.getRange(rowNo, ROLE_BIRTH_COL).getValue() instanceof Date)) {
+      sheet.getRange(rowNo, ROLE_BIRTH_COL).setValue(new Date(String(row.birth) + 'T00:00:00+09:00'));
+    }
+  });
+  return '保存しました。';
 }
 
 /* ================= 人が少なめの日（お知らせの {人手不足}・{お礼}） ================= */

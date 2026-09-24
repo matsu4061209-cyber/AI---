@@ -35,7 +35,8 @@ var PENDING_DEVICE_INDEX = 18;
 // LINE公式アカウント（お知らせはシフト表GASが送る。ここは「送り先の登録」を受け取るだけ）
 var LINE_TOKEN_CELL = 'E9';         // チャネルアクセストークン
 var LINE_TARGET_CELL = 'E10';       // お知らせを送る先のID
-var LINE_REGISTER_CELL = 'E12';     // 登録を受け付ける期限（シフト表のメニューで開く）
+var LINE_REGISTER_CELL = 'E12';     // 登録を受け付ける期限（シフト表のメニューで開く。うしろに |test が付くとお試し用）
+var LINE_TEST_TARGET_CELL = 'E32';  // お試しの送り先のID（お試し公開のときだけ使われる）
 var LINE_REPLY_URL = 'https://api.line.me/v2/bot/message/reply';
 
 // 記録を書き込むスプレッドシート（14380@hotpalette.com の「ペッパーランチ飯塚店」フォルダ内）
@@ -124,16 +125,24 @@ function doPost(e) {
     if (!events.length) return ContentService.createTextOutput('OK');
     var settings = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID).getSheetByName(REQUEST_SETTINGS_SHEET);
     if (!settings) return ContentService.createTextOutput('OK');
-    var until = String(settings.getRange(LINE_REGISTER_CELL).getDisplayValue()).trim();
+    // 期限のうしろに |test が付いていたら、本番ではなく「お試しの送り先」として登録する
+    var raw = String(settings.getRange(LINE_REGISTER_CELL).getDisplayValue()).trim();
+    var parts = raw.split('|');
+    var until = String(parts[0]).trim();
+    var forTest = String(parts[1] || '').trim() === 'test';
     var open = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(until) && jstTime_(until) > Date.now();
     events.forEach(function(event) {
       var source = event.source || {};
       var id = source.groupId || source.roomId || source.userId;
       if (!id || !open) return;
-      settings.getRange(LINE_TARGET_CELL).setValue(id);
+      settings.getRange(forTest ? LINE_TEST_TARGET_CELL : LINE_TARGET_CELL).setValue(id);
       settings.getRange(LINE_REGISTER_CELL).setValue('');   // 1回登録したら受付を閉じる
       var token = String(settings.getRange(LINE_TOKEN_CELL).getDisplayValue()).trim();
-      if (token && event.replyToken) lineReply_(token, event.replyToken, 'シフト希望のお知らせ先として、このトークを登録しました。');
+      if (token && event.replyToken) {
+        lineReply_(token, event.replyToken, forTest
+          ? 'お試しの送り先として、このトークを登録しました。「お試し公開」のときだけ、ここに届きます。'
+          : 'シフト希望のお知らせ先として、このトークを登録しました。');
+      }
     });
   } catch (err) {
     console.error('doPost: ' + err.message);
@@ -1101,6 +1110,8 @@ function readPublishedWeeks_(shiftSs, today) {
     var monday = weekStartOf_(sh.getName());
     var week = { sheet: sh.getName(), ymds: [], labels: [], days: [[], [], [], [], [], [], []] };
     var areas = {};
+    var order = {};                                   // 名簿（週シートの名前の欄）の並び順
+    rosterNames_(sh).forEach(function(n, i) { order[normalizeName_(n)] = i; });
     CALENDAR_BLOCKS.forEach(function(b, day) {
       var nameCol = b.col - 5;
       if (!areas[nameCol]) {
@@ -1121,7 +1132,12 @@ function readPublishedWeeks_(shiftSs, today) {
           breakStart: sheetTime_(v[3], d[3]), breakEnd: sheetTime_(v[4], d[4])
         });
       }
-      week.days[day].sort(function(a, b2) { return toSheetNumber_(a.start) - toSheetNumber_(b2.start) || toSheetNumber_(a.end) - toSheetNumber_(b2.end); });
+      // 並びは週シートの名前の欄と同じ順（名簿順）。名簿に無い人は後ろに回し、同じ位置なら早い出勤から
+      week.days[day].sort(function(a, b2) {
+        var ia = order.hasOwnProperty(normalizeName_(a.name)) ? order[normalizeName_(a.name)] : 9999;
+        var ib = order.hasOwnProperty(normalizeName_(b2.name)) ? order[normalizeName_(b2.name)] : 9999;
+        return ia - ib || toSheetNumber_(a.start) - toSheetNumber_(b2.start);
+      });
     });
     weeks.push(week);
   });
@@ -1187,9 +1203,206 @@ function foldIcsLine_(line) {
 
 /* ================= できたシフトを見るページ ================= */
 
+/* ================= 自分の給与（概算） =================
+   スタッフのページで、締め期間ごとの勤務時間と概算の給与を見せる。
+   ・他の人のぶんが見えないように、生年月日の月日4桁（0131など）が合った人にだけ返す
+   ・社員（スタッフ区分シートに載っている人）には出さない
+   ・元にするのは「出勤履歴」シート（店長が転写した日のぶんだけ入っている）
+   ・割増（深夜・残業）は考えない。実際の支給額とは違うことがある */
+var ROLE_BIRTH_COL = 3;             // スタッフ区分：C列＝生年月日
+var ROLE_WAGE_COL = 5;              // E列＝今の時給
+var ROLE_PREV_WAGE_COL = 6;         // F列＝前の時給
+var ROLE_WAGE_FROM_COL = 7;         // G列＝今の時給はいつから
+var HISTORY_DATE_COL = 1;           // 出勤履歴：A列＝日付
+var HISTORY_NAME_COL = 3;           // C列＝名前
+var HISTORY_HOURS_COL = 8;          // H列＝実働時間
+var FARE_KIND_CELL = 'E33';         // 交通費の出し方
+var FARE_DAYS_CELL = 'E34';
+var FARE_AMOUNT_CELL = 'E35';
+
+// 店長・社員の名前（この人たちには給与を出さない）
+function employeeNames_(shiftSs) {
+  var roles = shiftSs.getSheetByName(ROLE_SHEET_NAME);
+  if (!roles || roles.getLastRow() < 2) return [];
+  return roles.getRange(2, 1, roles.getLastRow() - 1, 2).getValues()
+    .filter(function(r) { return EMPLOYEE_ROLES.indexOf(String(r[1]).trim()) !== -1; })
+    .map(function(r) { return String(r[0]).trim(); })
+    .filter(function(n) { return n; });
+}
+
+// 日付のマスをそのまま「2026-09-21」にする（時差でずれないよう、時間帯の変換はしない）
+function dateToYmd_(date) {
+  return date.getFullYear() + '-' + ('0' + (date.getMonth() + 1)).slice(-2) + '-' + ('0' + date.getDate()).slice(-2);
+}
+
+// 「9/21(月)」のような見せ方
+function ymdLabel_(ymd) {
+  var p = ymd.split('-').map(Number);
+  var dow = ['日', '月', '火', '水', '木', '金', '土'][new Date(p[0], p[1] - 1, p[2]).getDay()];
+  return p[1] + '/' + p[2] + '(' + dow + ')';
+}
+
+// 名前と生年月日から、その人の時給・生年月日を読む
+function staffPayInfo_(shiftSs, name) {
+  var sheet = shiftSs.getSheetByName(ROLE_SHEET_NAME);
+  if (!sheet || sheet.getLastRow() < 2) return null;
+  var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, ROLE_WAGE_FROM_COL).getValues();
+  var key = normalizeName_(name);
+  for (var i = 0; i < rows.length; i++) {
+    if (normalizeName_(rows[i][0]) !== key) continue;
+    return {
+      birth: (rows[i][ROLE_BIRTH_COL - 1] instanceof Date) ? rows[i][ROLE_BIRTH_COL - 1] : null,
+      wage: Number(rows[i][ROLE_WAGE_COL - 1]) || 0,
+      prevWage: Number(rows[i][ROLE_PREV_WAGE_COL - 1]) || 0,
+      wageFrom: (rows[i][ROLE_WAGE_FROM_COL - 1] instanceof Date) ? rows[i][ROLE_WAGE_FROM_COL - 1] : null
+    };
+  }
+  return null;
+}
+
+// その締め期間に使う時給（期間の初日が「いつから」より前なら、前の時給）
+function wageForPeriod_(info, startYmd, tz) {
+  if (!info) return 0;
+  if (info.wageFrom && info.prevWage > 0 && startYmd < dateToYmd_(info.wageFrom)) {
+    return info.prevWage;
+  }
+  return info.wage;
+}
+
+// 交通費の決まり
+function readFareRule_(settings) {
+  return {
+    kind: String(settings.getRange(FARE_KIND_CELL).getDisplayValue()).trim(),
+    days: Number(settings.getRange(FARE_DAYS_CELL).getDisplayValue()) || 0,
+    amount: Number(settings.getRange(FARE_AMOUNT_CELL).getDisplayValue()) || 0
+  };
+}
+
+function fareFor_(rule, workDays) {
+  if (!rule || !workDays) return 0;
+  if (rule.kind === '日数以上で決まった額') return workDays >= rule.days ? rule.amount : 0;
+  if (rule.kind === '出勤1日ごと') return workDays * rule.amount;
+  return 0;
+}
+
+// 今日を含む締め期間と、その1つ前（今月分・先月分）
+function payPeriods_(settings, todayYmd) {
+  var day = closingDayOf_(settings, false);          // キャストの締め日
+  var ranges = closingRanges_(addDays_(todayYmd, -80), todayYmd, day);
+  return ranges.slice(-2);
+}
+
+// 出勤履歴から、その人の日ごとの実働時間を締め期間ごとに足す
+function payTotals_(shiftSs, name, periods) {
+  var out = periods.map(function(p) { return { start: p.start, end: p.end, days: 0, hours: 0 }; });
+  var history = shiftSs.getSheetByName(HISTORY_SHEET_NAME);
+  if (!history || history.getLastRow() < 2) return out;
+  var tz = shiftSs.getSpreadsheetTimeZone();
+  var key = normalizeName_(name);
+  var counted = {};
+  history.getRange(2, 1, history.getLastRow() - 1, HISTORY_HOURS_COL).getValues().forEach(function(r) {
+    if (!(r[HISTORY_DATE_COL - 1] instanceof Date)) return;
+    if (normalizeName_(r[HISTORY_NAME_COL - 1]) !== key) return;
+    var hours = Number(r[HISTORY_HOURS_COL - 1]);
+    if (!(hours > 0)) return;
+    var ymd = dateToYmd_(r[HISTORY_DATE_COL - 1]);
+    for (var i = 0; i < out.length; i++) {
+      if (ymd >= out[i].start && ymd <= out[i].end) {
+        if (!counted[ymd]) { counted[ymd] = true; out[i].days++; }   // 同じ日が2行あっても1日
+        out[i].hours += hours;                                       // 時間のほうは足す
+        return;
+      }
+    }
+  });
+  return out;
+}
+
+// この端末の持ち主（「シフト希望_アクセス記録」の端末の持ち主シートで、店長が選んだ人）。
+// 分からなければ空。給与は「この端末の持ち主 ＝ 選んだ名前」のときだけ見せる
+function deviceOwner_(deviceId) {
+  var id = String(deviceId == null ? '' : deviceId).trim();
+  if (!id) return '';
+  try {
+    var sheet = getStore_().getSheetByName(SHEETS.devices.name);
+    if (!sheet || sheet.getLastRow() < 2) return '';
+    var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, OWNER_COL).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]).trim() === id) return String(rows[i][OWNER_COL - 1]).trim();
+    }
+  } catch (err) {}
+  return '';
+}
+
+// 画面から呼ぶ：この端末の持ち主で、生年月日も合っていれば、その人の今月分・先月分を返す
+function myPayInfo(name, birthCode, deviceId) {
+  var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
+  var settings = shiftSs.getSheetByName(REQUEST_SETTINGS_SHEET);
+  if (!settings) return { ok: false, reason: 'ほかの理由', message: '今は見られません。店長に伝えてください。' };
+  if (isEmployee_(shiftSs, name)) {
+    return { ok: false, reason: '社員', message: 'この画面では、アルバイトの方の給与だけを出しています。' };
+  }
+  // ①この端末の持ち主かどうか（他の人のスマホからは見られない）
+  var owner = deviceOwner_(deviceId);
+  if (!owner) {
+    return { ok: false, reason: '端末なし', message:
+      'このスマホはまだ登録されていません。\nシフト希望のフォームを一度開いてから、店長に伝えてください。' };
+  }
+  if (normalizeName_(owner) !== normalizeName_(name)) {
+    return { ok: false, reason: '端末ちがい', message:
+      'このスマホは、ほかの方のものとして登録されています。\n自分のスマホで開いてください。' };
+  }
+  var info = staffPayInfo_(shiftSs, name);
+  if (!info || !info.birth) {
+    return { ok: false, reason: '生年月日なし', message: '生年月日がまだ登録されていません。店長に伝えてください。' };
+  }
+  var tz = shiftSs.getSpreadsheetTimeZone();
+  var right = dateToYmd_(info.birth).slice(5).replace('-', '');
+  if (String(birthCode).replace(/[^0-9]/g, '') !== right) {
+    return { ok: false, reason: '合わない', message: '生年月日が合いません。誕生日の月日を4けたで入れてください（1月31日なら 0131）。' };
+  }
+  if (!info.wage) {
+    return { ok: false, reason: '時給なし', message: '時給がまだ登録されていません。店長に伝えてください。' };
+  }
+
+  var todayYmd = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  var periods = payPeriods_(settings, todayYmd);
+  var rule = readFareRule_(settings);
+  var totals = payTotals_(shiftSs, name, periods);
+  return {
+    ok: true,
+    periods: totals.map(function(t, i) {
+      var wage = wageForPeriod_(info, t.start, tz);
+      var pay = Math.round(wage * t.hours);
+      var fare = fareFor_(rule, t.days);
+      return {
+        label: Number(t.end.split('-')[1]) + '月' + Number(t.end.split('-')[2]) + '日〆',
+        range: ymdLabel_(t.start) + '〜' + ymdLabel_(t.end),
+        startYmd: t.start,
+        endYmd: t.end,
+        days: t.days,
+        hours: Math.round(t.hours * 10) / 10,
+        wage: wage,
+        pay: pay,
+        fare: fare,
+        total: pay + fare,
+        ongoing: todayYmd <= t.end
+      };
+    }).reverse()
+  };
+}
+
+// ページに出す週は「今週から先」だけにする。終わった週はLINEに残っているPDFで見てもらう
+// （カレンダーのほうは実績として少し前まで残す＝CALENDAR_PAST_DAYS）
+function weeksFromThisWeek_(weeks, today) {
+  var d = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));        // 今週の月曜
+  var from = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+  return weeks.filter(function(wk) { return wk.ymds[6] >= from; });   // 週の最終日が今週の月曜以降なら出す
+}
+
 function shiftPage_(weekParam) {
   var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
-  var weeks = readPublishedWeeks_(shiftSs, new Date());
+  var weeks = weeksFromThisWeek_(readPublishedWeeks_(shiftSs, new Date()), new Date());
   var storeName = STORE_NAME;
   try { storeName = loadConfig_(shiftSs).storeName || STORE_NAME; } catch (err) {}
 
@@ -1203,7 +1416,8 @@ function shiftPage_(weekParam) {
     weeks: weeks.map(function(wk) {
       return { sheet: wk.sheet, ymds: wk.ymds, labels: wk.labels, days: wk.days };
     }),
-    selfUrl: SELF_URL
+    selfUrl: SELF_URL,
+    employees: employeeNames_(shiftSs)          // この人たちには給与のボタンを出さない
   };
   data.names.forEach(function(n) { data.keys[n] = calendarKey_(n); });
 

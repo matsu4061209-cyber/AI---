@@ -157,6 +157,8 @@
       <section class="list" id="list"></section>
       <button type="button" class="cal" id="calBtn">カレンダーに登録する</button>
       <div class="calbox" id="calBox" hidden></div>
+      <button type="button" class="cal" id="payBtn">はたらいた時間とお給料（目安）を見る</button>
+      <div class="calbox" id="payBox" hidden></div>
     </section>
 
     <section id="allView" hidden style="flex-direction:column;gap:10px">
@@ -180,6 +182,7 @@
   var STORE_KEY = 'shiftName';
   var OPEN = '09:00', CLOSE = '21:30';
   var state = { who: '', week: 0, day: 0, mode: 'mine' };
+  var payShownFor = '';          // お給料を出している人（名前が変わったら閉じる）
 
   function el(id){ return document.getElementById(id); }
   function mins(t){ var p = String(t).split(':'); return Number(p[0]) * 60 + Number(p[1]); }
@@ -240,6 +243,61 @@
     el('calBtn').textContent = box.hidden ? 'カレンダーに登録する' : '閉じる';
   });
 
+  // はたらいた時間とお給料（目安）。ほかの人に見えないよう、誕生日の月日4けたで確かめる
+  el('payBtn').addEventListener('click', function(){
+    var box = el('payBox');
+    box.hidden = !box.hidden;
+    el('payBtn').textContent = box.hidden ? 'はたらいた時間とお給料（目安）を見る' : '閉じる';
+    if (!box.hidden) askBirth();
+  });
+
+  function askBirth(msg){
+    el('payBox').innerHTML =
+      '<div class="lead">ほかの人に見えないように、<b>自分のスマホ</b>と<b>自分の誕生日</b>の2つで確かめます。</div>' +
+      '<div class="hint" style="margin-bottom:6px;">' + (state.who || '') +
+      ' さんの誕生日の<b>月日を4けた</b>で入れてください（1月31日なら 0131）。</div>' +
+      '<div style="display:flex;gap:8px;align-items:center;">' +
+      '<input id="birthCode" inputmode="numeric" maxlength="4" placeholder="0131" ' +
+      'style="width:90px;padding:8px;font-size:16px;text-align:center;border:1px solid var(--line);border-radius:8px;">' +
+      '<button type="button" class="calgo" id="payGo" style="margin:0;">見る</button></div>' +
+      (msg ? '<div class="hint" style="color:#c0392b;margin-top:8px;">' + msg + '</div>' : '');
+    el('payGo').addEventListener('click', loadPay);
+    el('birthCode').addEventListener('keydown', function(e){ if (e.key === 'Enter') loadPay(); });
+  }
+
+  // シフト希望フォームがこのスマホに保存した番号。持ち主かどうかの確認に使う
+  function deviceId(){
+    try { return localStorage.getItem('shiftRequestDeviceId') || ''; } catch (e) { return ''; }
+  }
+
+  function loadPay(){
+    var code = el('birthCode').value;
+    el('payBox').innerHTML = '<div class="hint">調べています…</div>';
+    google.script.run
+      .withSuccessHandler(showPay)
+      .withFailureHandler(function(){ askBirth('うまく読めませんでした。もう一度お願いします。'); })
+      .myPayInfo(state.who, code, deviceId());
+  }
+
+  function yen(n){ return n.toLocaleString('ja-JP'); }
+
+  function showPay(res){
+    if (!res || !res.ok) { askBirth(res ? res.message : 'うまく読めませんでした。'); return; }
+    el('payBox').innerHTML =
+      res.periods.map(function(p){
+        return '<div style="margin-bottom:12px;">' +
+          '<h3>' + p.label + (p.ongoing ? '（いまの分・とちゅう）' : '') + '</h3>' +
+          '<div class="hint">' + p.range + '</div>' +
+          '<div style="margin-top:4px;">出勤 <b>' + p.days + '</b> 日　はたらいた時間 <b>' + p.hours + '</b> 時間</div>' +
+          '<div class="hint">時給 ' + yen(p.wage) + '円 × ' + p.hours + '時間 ＝ ' + yen(p.pay) + '円' +
+          (p.fare ? '　＋ 交通費 ' + yen(p.fare) + '円' : '') + '</div>' +
+          '<div style="margin-top:4px;font-size:16px;">合計 <b>' + yen(p.total) + '</b> 円</div>' +
+          '</div>';
+      }).join('<div class="sep"></div>') +
+      '<div class="hint">※ <b>目安の金額</b>です。店長が出勤を記録したぶんだけ数えています。' +
+      '実際にもらう金額（税金や手当など）とは違うことがあります。</div>';
+  }
+
   function firstMineDay(w){
     for (var d = 0; d < 7; d++) if (mineOf(w, d)) return d;
     return 0;
@@ -280,6 +338,16 @@
         '<div class="t num">' + fmt(nx.p.start) + ' – ' + fmt(nx.p.end) + '</div>' +
         '<div class="b">' + (nx.p.breakStart ? '休憩 ' + fmt(nx.p.breakStart) + ' – ' + fmt(nx.p.breakEnd) : '休憩なし') + '</div>';
     }
+
+    // 名前を変えたら、前の人のお給料は閉じる（他の人に見えないように）
+    if (payShownFor !== state.who) {
+      payShownFor = state.who;
+      el('payBox').hidden = true;
+      el('payBox').innerHTML = '';
+      el('payBtn').textContent = 'はたらいた時間とお給料（目安）を見る';
+    }
+    var isStaff = (DATA.employees || []).indexOf(state.who) === -1;
+    el('payBtn').hidden = !isStaff;          // 店長・社員には出さない
 
     var key = DATA.keys[state.who] || '';
     if (!key) { el('calBox').innerHTML = '<div class="hint">この名前のシフトがまだありません。</div>'; return; }
