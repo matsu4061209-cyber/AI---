@@ -76,14 +76,116 @@ var TEST_BROWSER_MARK = 'HeadlessChrome';
 // 自動確認の記録は、確かめる時間を残して1時間たったら、ふつうの操作のついでに自動で消す
 var TEST_RECORD_KEEP_MINUTES = 60;
 
+// LINEログイン（LIFF）から来ると、「?」のあとの指定が liff.state という1つの箱に
+// まとめられて届くことがある。ほどいて、ふつうの指定と同じように読めるようにする。
+function applyLiffState_(e) {
+  try {
+    if (!e || !e.parameter || !e.parameter['liff.state']) return e;
+    String(e.parameter['liff.state']).replace(/^[?#]/, '').split('&').forEach(function(pair) {
+      if (!pair) return;
+      var cut = pair.indexOf('=');
+      var key = decodeURIComponent(cut < 0 ? pair : pair.slice(0, cut));
+      if (!key || e.parameter[key]) return;                       // もとの指定があればそちらを使う
+      e.parameter[key] = cut < 0 ? '' : decodeURIComponent(pair.slice(cut + 1).replace(/\+/g, ' '));
+    });
+  } catch (err) {}
+  return e;
+}
+
+// ページを開くたびにシフト表を開き直すと、それだけで2〜3秒かかる。
+// 中身は全員に同じもの（募集の期間・名簿・祝日）なので、少しの間だけ覚えておく。
+// 店長が設定を変えても、この秒数がすぎれば新しい内容になる。
+var PAGE_CACHE_SEC = 120;
+
+function pageCache_() {
+  try { return CacheService.getScriptCache(); } catch (err) { return null; }
+}
+
+// key で覚えておく。無ければ build() で作って覚える
+// 募集の設定（全員に同じ内容）。開くたびにシフト表を開き直さない
+function cachedConfig_() {
+  return remember_('CONFIG_V2', function() {
+    return loadConfig_(SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID));
+  });
+}
+
+function remember_(key, build) {
+  var cache = pageCache_();
+  if (cache) {
+    var hit = cache.get(key);
+    if (hit) { try { return JSON.parse(hit); } catch (err) {} }
+  }
+  var made = build();
+  if (cache) { try { cache.put(key, JSON.stringify(made), PAGE_CACHE_SEC); } catch (err) {} }
+  return made;
+}
+
+// LINEログインから戻ってきたとき（?code=…&state=…）、本人のLINEユーザーIDを受け取り、
+// もとの行き先（state）に戻す。うまくいかなければ、今までどおり名前を選んでもらう。
+function applyLineLogin_(e) {
+  if (!e || !e.parameter || !e.parameter.code) return e;
+  var why = '';                               // うまくいかなかった理由（画面に出して手がかりにする）
+  try {
+    var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
+    var id = shiftSetting_(shiftSs, LINE_LOGIN_ID_CELL).replace(/[^0-9]/g, '');   // 桁区切りが付いていても読む
+    var secret = shiftSetting_(shiftSs, LINE_LOGIN_SECRET_CELL);
+    if (!id || !secret) {
+      why = '設定が入っていません（ID' + (id ? '有' : '無') + '／シークレット' + (secret ? '有' : '無') + '）';
+    } else {
+      var got = UrlFetchApp.fetch(LINE_TOKEN_URL, {
+        method: 'post', muteHttpExceptions: true,
+        payload: {
+          grant_type: 'authorization_code',
+          code: String(e.parameter.code),
+          redirect_uri: WEB_APP_URL,
+          client_id: id,
+          client_secret: secret
+        }
+      });
+      var body = JSON.parse(got.getContentText() || '{}');
+      if (!body.access_token) {
+        why = '合い言葉の交換に失敗（' + got.getResponseCode() + '：'
+          + (body.error_description || body.error || '理由なし') + '）';
+      } else {
+        var who = UrlFetchApp.fetch(LINE_PROFILE_URL, {
+          muteHttpExceptions: true, headers: { Authorization: 'Bearer ' + body.access_token }
+        });
+        var prof = JSON.parse(who.getContentText() || '{}');
+        if (prof.userId) e.parameter.lid = String(prof.userId);
+        else why = '名前の取り出しに失敗（' + who.getResponseCode() + '）';
+      }
+    }
+  } catch (err) {
+    why = 'つまずき：' + err.message;
+    console.error('LINEログイン: ' + err.message);
+  }
+  if (why) e.parameter.lerr = why;
+  String(e.parameter.state || '').replace(/^\?/, '').split('&').forEach(function(one) {
+    var at = one.indexOf('=');
+    if (at <= 0) return;
+    var key = decodeURIComponent(one.slice(0, at));
+    if (key === 'lid' || key === 'code' || key === 'state') return;   // 外から入れさせない
+    if (e.parameter[key] === undefined) e.parameter[key] = decodeURIComponent(one.slice(at + 1));
+  });
+  return e;
+}
+
 function doGet(e) {
+  e = applyLiffState_(e);
+  e = applyLineLogin_(e);
+  // 速さの調べ用。スプレッドシートを一切読まずに返す（中身は無い）
+  if (e && e.parameter && e.parameter.ping) return HtmlService.createHtmlOutput('ok');
+  // ?lineowners=1 で、LINEログインの登録が何人ぶん入っているかだけを返す（調査用。名前は返さない）
+  if (e && e.parameter && e.parameter.lineowners) return lineOwnerCount_();
   // カレンダーアプリが読みに来たとき（?cal=その人の鍵）は、その人のシフトだけを返す
   if (e && e.parameter && e.parameter.cal) return calendarFeed_(String(e.parameter.cal));
   // スタッフが「できたシフトを見る」ページ（?shift=週シート名。週の指定が無くてもよい）
   if (e && e.parameter && e.parameter.shift) return shiftPage_(String(e.parameter.shift));
+  // 検体キットを出した人が押すページ（?kit=2026-09）
+  if (e && e.parameter && e.parameter.kit) return kitPage_(String(e.parameter.kit), lineIdOf_(e), lineErrOf_(e));
   var config;
   try {
-    config = loadConfig_(SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID));
+    config = cachedConfig_();
   } catch (e) {
     console.error('設定の読み込みに失敗: ' + e.message);
     config = { closed: true };
@@ -91,6 +193,7 @@ function doGet(e) {
   if (!config.storeName) config.storeName = STORE_NAME;
   var template = HtmlService.createTemplateFromFile('index');
   template.configJson = JSON.stringify(config).replace(/</g, '\u003c');
+  template.lineIdJson = JSON.stringify(lineIdOf_(e));
   var out = template.evaluate()
     .setTitle(linkTitle_(config))
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
@@ -399,6 +502,7 @@ function loadConfig_(shiftSs) {
     pastDeadline: validDeadline && Utilities.parseDate(deadline, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm').getTime() < Date.now(),
     holidays: holidaysInPeriod_(shiftSs, start, weekCount),
     staff: staff,
+    liffId: String(settings.getRange(LIFF_ID_CELL).getDisplayValue()).trim(),
     noteChoices: NOTE_CHOICES,
     startHours: START_HOURS,
     endHours: END_HOURS
@@ -1462,4 +1566,408 @@ function holidayLabels_(shiftSs, weeks) {
     out[ymd] = String(r[1] || '祝日');
   });
   return out;
+}
+
+// ===================== 検体キットの提出チェック（?kit=2026-09） =====================
+// 誰が出した・出していないは健康にかかわること。この画面には自分の分しか出さない。
+// 記録はシフト表の「提出チェック」シート（店長だけが見る）に書く。
+var KIT_SHEET_NAME = '提出チェック';
+var KIT_VIEW_HEADERS = ['番号', '名前', 'LINE登録', '提出不要', '日にち', 'だれが入れたか'];
+var KIT_FIRST_ROW = 3;                      // 1行目＝見出しの帯、2行目＝列の名前、3行目から中身
+var KIT_OLD_HEADERS = ['月', '名前', '提出した日', 'だれが入れたか'];   // 前の形。1回だけの移しかえで読む
+var KIT_OLD_LOG_COL = 7;                    // 前の形でG列に記録を置いていた分
+var KIT_DOW_JP = ['日', '月', '火', '水', '木', '金', '土'];
+var KIT_DUE_DAY_CELL = 'E18';        // シフト希望設定：毎月のおしらせの期日（何日）
+var LIFF_ID_CELL = 'E39';            // シフト希望設定：LINEログイン（LIFF）のID
+var LINE_LOGIN_ID_CELL = 'E40';      // シフト希望設定：LINEログインのチャネルID
+var LINE_LOGIN_SECRET_CELL = 'E41';  // 　　　〃　　　　チャネルシークレット
+var LINE_TOKEN_URL = 'https://api.line.me/oauth2/v2.1/token';
+var LINE_PROFILE_URL = 'https://api.line.me/v2/profile';
+var WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbwFtgsWnq75UnttAODig9q3c89E1Iek0Oow-lV8tHzF_Zp5qBQe2DXPahAeksqkd4i2/exec';
+var LINE_OWNER_SHEET = 'LINEの持ち主';
+var LINE_OWNER_HEADERS = ['LINEユーザーID', '名前', '最初に使った日時', '最後に使った日時', '使った回数'];
+
+// シフト表の設定を1つ読む（無ければ空）
+function shiftSetting_(shiftSs, cell) {
+  try {
+    var sheet = shiftSs.getSheetByName('シフト希望設定');
+    return sheet ? String(sheet.getRange(cell).getDisplayValue()).trim() : '';
+  } catch (err) { return ''; }
+}
+
+// LINEのユーザーIDと名前の対応表（アクセス記録の中。使うときに作る）
+function lineOwnerSheet_() {
+  var ss = getStore_();
+  var sheet = ss.getSheetByName(LINE_OWNER_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(LINE_OWNER_SHEET);
+    sheet.getRange(1, 1, 1, LINE_OWNER_HEADERS.length).setValues([LINE_OWNER_HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+// LINEのユーザーIDから名前を引く
+function lineOwner_(lineId) {
+  var id = String(lineId == null ? '' : lineId).trim();
+  if (!id) return '';
+  try {
+    var sheet = lineOwnerSheet_();
+    var last = sheet.getLastRow();
+    if (last < 2) return '';
+    var rows = sheet.getRange(2, 1, last - 1, 2).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]).trim() === id) return String(rows[i][1]).trim();
+    }
+  } catch (err) {}
+  return '';
+}
+
+// LINEのユーザーIDと名前を結びつける（1回目だけ書き、2回目からは回数と日時を足す）
+function bindLineOwner_(lineId, name) {
+  var id = String(lineId == null ? '' : lineId).trim();
+  var clean = String(name == null ? '' : name).trim();
+  if (!id || !clean) return;
+  try {
+    var sheet = lineOwnerSheet_();
+    var last = sheet.getLastRow();
+    var rows = last >= 2 ? sheet.getRange(2, 1, last - 1, 1).getValues() : [];
+    for (var i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]).trim() === id) {
+        var row = i + 2;
+        sheet.getRange(row, 2).setValue(clean);
+        sheet.getRange(row, 4).setValue(new Date());
+        sheet.getRange(row, 5).setValue(Number(sheet.getRange(row, 5).getValue() || 0) + 1);
+        return;
+      }
+    }
+    sheet.appendRow([id, clean, new Date(), new Date(), 1]);
+  } catch (err) {}
+}
+
+// 置き場所は「シフト希望_アクセス記録」。飯塚店シフトはスタッフ全員が開くので置かない。
+function kitSheet_() {
+  var ss = getStore_();
+  var sheet = ss.getSheetByName(KIT_SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(KIT_SHEET_NAME);
+  kitEnsureLayout_(sheet);
+  return sheet;
+}
+
+// 提出チェックシートは「当月の一覧」だけを持つ。提出の履歴は残さない。
+// 検体の結果は業者から届く書類が証明になるので、ここで見たいのは「全員そろって送れるか」だけ。
+// A1＝この一覧がどの月ぶんか。C列＝LINEログインの登録が済んでいるか（月をまたいで残る）。
+// D列＝提出不要（店長の手入力。実習や長期休みの人。月をまたいで残る）。
+// E列に日にちが入っていれば提出ずみ。F列＝だれが入れたか。
+function kitEnsureLayout_(sheet) {
+  if (String(sheet.getRange(2, 4).getValue()).trim() === KIT_VIEW_HEADERS[3]) return false;
+  var last = sheet.getLastRow();
+  var ym = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM');
+  var keep = [];                              // [名前, 提出不要, 日にち, だれが入れたか]
+  if (last >= 2) {
+    if (String(sheet.getRange(2, 3).getValue()).trim() === KIT_VIEW_HEADERS[2]) {
+      var same = kitYm_(sheet.getRange(1, 1).getValue()) === ym;      // 前の形（提出不要の列が無い一覧）
+      sheet.getRange(KIT_FIRST_ROW, 2, Math.max(last - KIT_FIRST_ROW + 1, 1), 4).getValues().forEach(function(r) {
+        if (String(r[0]).trim()) keep.push([String(r[0]).trim(), '',
+          same ? String(r[2]).trim() : '', same ? String(r[3]).trim() : '']);
+      });
+    } else {
+      var logCol = String(sheet.getRange(2, KIT_OLD_LOG_COL).getValue()).trim() === KIT_OLD_HEADERS[0] ? KIT_OLD_LOG_COL
+        : (String(sheet.getRange(1, 1).getValue()).trim() === KIT_OLD_HEADERS[0] ? 1 : 0);
+      if (logCol) {                           // もっと前の形（記録が並んでいた）。当月ぶんだけ写す
+        var logRow = logCol === 1 ? 2 : KIT_FIRST_ROW;
+        sheet.getRange(logRow, logCol, Math.max(last - logRow + 1, 1), KIT_OLD_HEADERS.length).getValues().forEach(function(r) {
+          if (kitYm_(r[0]) === ym && String(r[1]).trim()) {
+            keep.push([String(r[1]).trim(), '', kitDayLabel_(r[2]), String(r[3] || '')]);
+          }
+        });
+      }
+    }
+  }
+  if (last >= 1) sheet.getRange(1, 1, last, 10).clearContent();
+  sheet.getRange(1, 1).setNumberFormat('@');
+  sheet.getRange(1, 1).setValue(ym);
+  sheet.getRange(2, 1, 1, KIT_VIEW_HEADERS.length).setValues([KIT_VIEW_HEADERS]).setFontWeight('bold');
+  sheet.getRange(2, 4).setNote('実習や長期の休みで、この月は出さなくてよい人に何か書いてください（例：実習）。'
+    + '書いた人は人数から外れます。戻ってきたら消してください。');
+  if (keep.length) {
+    sheet.getRange(KIT_FIRST_ROW, 1, keep.length, KIT_VIEW_HEADERS.length).setValues(keep.map(function(r) {
+      return ['', r[0], '', r[1], r[2], r[3]];
+    }));
+  }
+  sheet.setFrozenRows(2);
+  [46, 130, 90, 90, 96, 150].forEach(function(w, i) { sheet.setColumnWidth(i + 1, w); });
+  return true;
+}
+
+// シートに書いてある月を '2026-09' の形にそろえる（日付で入ってしまった行も読めるように）
+function kitYm_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Tokyo', 'yyyy-MM');
+  var s = String(v == null ? '' : v).trim();
+  if (/^[0-9]{4}-[0-9]{2}/.test(s)) return s.slice(0, 7);
+  var d = new Date(s);                        // 「Tue Sep 01 2026 …」の形で入ってしまった分も読む
+  return isNaN(d.getTime()) ? s.slice(0, 7) : Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM');
+}
+
+// この一覧が持っている月（A1）
+function kitSheetMonth_(sheet) { return kitYm_(sheet.getRange(1, 1).getValue()); }
+
+// 一覧に今書いてある中身 { そろえた名前: {name, exempt, day, by} }。
+// sameMonth が false のときは、日にちとだれが入れたかは持ち越さない（月が変わったら白紙に戻す）
+function kitTableMap_(sheet, sameMonth) {
+  var map = {};
+  var last = sheet.getLastRow();
+  if (last < KIT_FIRST_ROW) return map;
+  sheet.getRange(KIT_FIRST_ROW, 2, last - KIT_FIRST_ROW + 1, 5).getValues().forEach(function(r) {
+    var name = String(r[0]).trim();
+    if (!name) return;
+    map[normalizeName_(name)] = { name: name, exempt: String(r[2]).trim(),
+      day: sameMonth ? String(r[3]).trim() : '', by: sameMonth ? String(r[4]).trim() : '' };
+  });
+  return map;
+}
+
+// その月にもう出した人 { そろえた名前: {name, day, by} }。別の月の一覧なら空
+function kitMonthMap_(ym) {
+  var sheet = kitSheet_();
+  var map = {};
+  if (kitSheetMonth_(sheet) !== String(ym)) return map;
+  var table = kitTableMap_(sheet, true);
+  for (var key in table) if (table[key].day) map[key] = table[key];
+  return map;
+}
+
+// LINEログインの登録が済んでいる人
+function kitLineRegistered_() {
+  var map = {};
+  try {
+    var sheet = getStore_().getSheetByName(LINE_OWNER_SHEET);
+    if (!sheet) return map;
+    var last = sheet.getLastRow();
+    if (last < 2) return map;
+    sheet.getRange(2, 2, last - 1, 1).getValues().forEach(function(r) {
+      if (String(r[0]).trim()) map[normalizeName_(r[0])] = true;
+    });
+  } catch (e) {}
+  return map;
+}
+
+// その月にもう出した人（名前のゆれをそろえた形で持つ）
+function kitDoneMap_(ym) {
+  var hits = kitMonthMap_(ym);
+  var map = {};
+  for (var key in hits) map[key] = hits[key].name;
+  return map;
+}
+
+// いちばん新しい週シートの名簿
+function kitStaffNames_(shiftSs) {
+  var newest = null;                       // 名前がいちばん大きい週シート（＝いちばん新しい週）
+  shiftSs.getSheets().forEach(function(sh) {
+    if (!/^\d{6}$/.test(sh.getName())) return;
+    if (!newest || sh.getName() > newest.getName()) newest = sh;
+  });
+  return newest ? rosterNames_(newest) : [];
+}
+
+// 今月（指定が無い・おかしいときに使う）
+function kitThisMonth_() {
+  return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM');
+}
+
+// 期日の見出し「9月25日(金)」。シフト表の設定にある「毎月この日」を使う
+function kitDueLabel_(shiftSs, ym) {
+  var day = 0;
+  try {
+    var settings = shiftSs.getSheetByName('シフト希望設定');
+    if (settings) day = Number(String(settings.getRange(KIT_DUE_DAY_CELL).getDisplayValue()).trim());
+  } catch (err) {}
+  var p = ym.split('-').map(Number);
+  if (!(day >= 1 && day <= 31)) return p[1] + '月';
+  var last = new Date(p[0], p[1], 0).getDate();
+  var due = new Date(p[0], p[1] - 1, Math.min(day, last));
+  return (due.getMonth() + 1) + '月' + due.getDate() + '日(' + DOW_LABELS[(due.getDay() + 6) % 7] + ')';
+}
+
+// 【1回だけ】GASエディタでこれを実行し、出てくる画面で「許可」を押す。
+// LINEに問い合わせる権限（UrlFetchApp）を承認するためだけの関数。
+// メニューやページからは承認できないので、必ずエディタから実行する。
+function authorizeNow() {
+  var res = UrlFetchApp.fetch(LINE_PROFILE_URL, {
+    muteHttpExceptions: true, headers: { Authorization: "Bearer dummy" }
+  });
+  SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID).getName();
+  getStore_().getName();
+  return "通信の権限OK（LINEの返事：" + res.getResponseCode() + "）。これでLINEログインが使えます。";
+}
+
+// LINEログインで分かったユーザーID（分からなければ空）
+function lineIdOf_(e) {
+  return (e && e.parameter && e.parameter.lid) ? String(e.parameter.lid) : '';
+}
+
+// LINEログインを通ったのにうまくいかなかったときの理由（通っていなければ空）
+function lineErrOf_(e) {
+  return (e && e.parameter && e.parameter.lerr) ? String(e.parameter.lerr) : '';
+}
+
+function kitPage_(param, lineId, lineErr) {
+  var ym = /^\d{4}-\d{2}$/.test(param) ? param : kitThisMonth_();
+  var data = remember_('KIT_PAGE_V1_' + ym, function() {
+    var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
+    var name = STORE_NAME;
+    try { name = loadConfig_(shiftSs).storeName || STORE_NAME; } catch (err) {}
+    return {
+      storeName: name,
+      month: ym,
+      monthLabel: Number(ym.split('-')[1]) + '月',
+      dueLabel: kitDueLabel_(shiftSs, ym),
+      names: kitStaffNames_(shiftSs),
+      liffId: shiftSetting_(shiftSs, LIFF_ID_CELL)
+    };
+  });
+  var storeName = data.storeName;
+  var template = HtmlService.createTemplateFromFile('kit');
+  template.dataJson = JSON.stringify(data).replace(/</g, '\u003c');
+  template.lineIdJson = JSON.stringify(String(lineId || ''));
+  template.lineErrJson = JSON.stringify(String(lineErr || ''));
+  return template.evaluate()
+    .setTitle('検体キットの提出｜' + storeName)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+// 画面から呼ぶ：このスマホの持ち主と、その人がもう出しているか
+function kitWho(ym, deviceId, lineId) {
+  var month = /^\d{4}-\d{2}$/.test(ym) ? ym : kitThisMonth_();
+  // LINEログインで分かった人を先に見る（機種を変えても変わらないため）
+  var fromLine = lineOwner_(lineId);
+  var owner = fromLine || deviceOwner_(deviceId);
+  // LINEを通ってきたのに、まだ名前と結びついていないときは、この場で覚える。
+  // （ボタンを押さずに閉じる人もいるので、開いた時点で結びつけておく）
+  if (lineId && !fromLine && owner) bindLineOwner_(lineId, owner);
+  if (!owner) return { owner: '', done: false, by: '' };
+  return { owner: owner, by: (fromLine || lineId) ? 'LINE' : '端末',
+    done: !!kitDoneMap_(month)[normalizeName_(owner)] };
+}
+
+// 画面から呼ぶ：提出したと記録する
+function kitSubmit(ym, name, deviceId, lineId) {
+  var month = /^\d{4}-\d{2}$/.test(ym) ? ym : kitThisMonth_();
+  var clean = String(name == null ? '' : name).trim();
+  if (!clean) throw new Error('名前を選んでください。');
+  var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
+  var known = kitStaffNames_(shiftSs).filter(function(n) { return normalizeName_(n) === normalizeName_(clean); });
+  if (!known.length) throw new Error('名簿にありません。店長に伝えてください。');
+  bindLineOwner_(lineId, known[0]);            // 次からは名前を選ばなくてよくなる
+  var owner = lineOwner_(lineId) || deviceOwner_(deviceId);
+  var by = lineId ? 'LINEログイン'
+    : (owner && normalizeName_(owner) === normalizeName_(clean) ? '本人' : '本人（名前を選んだ）');
+  var res = kitWriteSummary_(shiftSs, month, { name: known[0], by: by });
+  return { ok: true, already: res.already, name: known[0] };
+}
+
+// 提出した日の見出し「9/25(金)」
+function kitDayLabel_(d) {
+  if (!(d instanceof Date)) return String(d == null ? '' : d);
+  return (d.getMonth() + 1) + '/' + d.getDate() + '(' + KIT_DOW_JP[d.getDay()] + ')';
+}
+
+// 店長が見る一覧を、提出チェックシートに書く。mark を渡すとその人を提出ずみにしてから書く。
+// 名前が出るのはこのシートだけ（店長しか開かない）。LINEには人数しか出さない。
+function kitWriteSummary_(shiftSs, ym, mark) {
+  var sheet = kitSheet_();
+  var table = kitTableMap_(sheet, kitSheetMonth_(sheet) === String(ym));
+  var already = false;
+  if (mark && mark.name) {
+    var markKey = normalizeName_(mark.name);
+    var was = table[markKey];
+    already = !!(was && was.day);
+    if (!already) {
+      table[markKey] = { name: String(mark.name).trim(), exempt: was ? was.exempt : '',
+        day: kitDayLabel_(new Date()), by: String(mark.by || '本人') };
+    }
+  }
+  var names = kitStaffNames_(shiftSs);
+  var line = kitLineRegistered_();
+  var rows = [];
+  var exemptRows = [];
+  var target = 0;
+  var done = 0;
+  var lineDone = 0;
+  var offCount = 0;
+  for (var i = 0; i < names.length; i++) {
+    var key = normalizeName_(names[i]);
+    var hit = table[key] || {};
+    if (line[key]) lineDone++;
+    if (hit.exempt) { offCount++; exemptRows.push(KIT_FIRST_ROW + i); }
+    else { target++; if (hit.day) done++; }
+    rows.push([i + 1, names[i], line[key] ? '○' : '', hit.exempt || '', hit.day || '', hit.by || '']);
+  }
+  sheet.getRange(1, 1).setNumberFormat('@');
+  sheet.getRange(1, 1, 1, KIT_VIEW_HEADERS.length).setValues([[
+    String(ym),
+    '期日 ' + kitDueLabel_(shiftSs, ym),
+    'LINE登録 ' + lineDone + '人',
+    offCount ? '提出不要 ' + offCount + '人' : '',
+    target + '人中 ' + done + '人が提出',
+    '未提出 ' + (target - done) + '人'
+  ]]);
+  sheet.getRange(2, 1, 1, KIT_VIEW_HEADERS.length).setValues([KIT_VIEW_HEADERS]);
+  if (rows.length) {
+    sheet.getRange(KIT_FIRST_ROW, 1, rows.length, KIT_VIEW_HEADERS.length).setValues(rows).setFontColor('#000000');
+    exemptRows.forEach(function(r) { sheet.getRange(r, 1, 1, KIT_VIEW_HEADERS.length).setFontColor('#999999'); });
+    sheet.getRange(KIT_FIRST_ROW, 3, rows.length, 1).setHorizontalAlignment('center');
+  }
+  var below = KIT_FIRST_ROW + rows.length;              // 名簿が減ったときの余りを消す
+  var last = sheet.getLastRow();
+  if (last >= below) sheet.getRange(below, 1, last - below + 1, KIT_VIEW_HEADERS.length).clearContent();
+  sheet.getRange(1, 1, 2, KIT_VIEW_HEADERS.length).setFontWeight('bold');
+  sheet.getRange(1, 6).setFontColor(target - done > 0 ? '#C0392B' : '#1E8449');
+  return { total: target, done: done, left: target - done, off: offCount, already: already };
+}
+
+// ===================== LINEログインで本人を確かめる（シフト希望ページ用） =====================
+// LINEのユーザーIDは機種を変えても同じなので、端末IDのように消えない。
+// 分からないとき（LINE以外から開いた・まだ結びついていない）は空を返し、今までどおり名前を選んでもらう。
+function whoAmI(lineId) {
+  var name = lineOwner_(lineId);
+  return { name: name || '', by: name ? 'LINE' : '' };
+}
+
+// LINEログインの登録が何人ぶんあるかを返す（人数と日付だけ。名前は出さない）
+function lineOwnerCount_() {
+  var out = { sheet: false, count: 0, first: '', last: '' };
+  try {
+    var sheet = getStore_().getSheetByName(LINE_OWNER_SHEET);
+    if (sheet) {
+      out.sheet = true;
+      var last = sheet.getLastRow();
+      if (last >= 2) {
+        var rows = sheet.getRange(2, 1, last - 1, LINE_OWNER_HEADERS.length).getValues()
+          .filter(function(r) { return String(r[0]).trim() !== ''; });
+        out.count = rows.length;
+        rows.forEach(function(r) {
+          var f = r[2] instanceof Date ? Utilities.formatDate(r[2], 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') : '';
+          var l = r[3] instanceof Date ? Utilities.formatDate(r[3], 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') : '';
+          if (f && (!out.first || f < out.first)) out.first = f;
+          if (l && l > out.last) out.last = l;
+        });
+      }
+    }
+  } catch (err) { out.error = err.message; }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// 名前を選んだときに、LINEのユーザーIDと結びつける（次からは選ばなくてよくなる）
+function bindMe(lineId, name) {
+  var id = String(lineId == null ? '' : lineId).trim();
+  var clean = String(name == null ? '' : name).trim();
+  if (!id || !clean) return false;
+  var staff = [];
+  try { staff = cachedConfig_().staff || []; } catch (err) { return false; }
+  var known = staff.filter(function(n) { return normalizeName_(n) === normalizeName_(clean); });
+  if (!known.length) return false;                     // 名簿にない名前は結びつけない
+  bindLineOwner_(id, known[0]);
+  return true;
 }

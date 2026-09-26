@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  :root{
+    --bg:#F4F5F3; --surface:#FFFFFF; --surface-2:#F7F6F3;
+    --text:#23211E; --text-muted:#726E67; --line:#DDD9D2;
+    --accent:#E8501C; --accent-ink:#FFFFFF; --accent-tint:#FBE4D8;
+    --ok:#2F6B4F;
+    --shadow:0 1px 2px rgba(35,33,30,0.06), 0 4px 14px rgba(35,33,30,0.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#181715; --surface:#221F1C; --surface-2:#2A2723;
+      --text:#F3F1EC; --text-muted:#A8A39A; --line:#3A362F;
+      --accent:#FF7043; --accent-ink:#1A0E08; --accent-tint:#3A2418;
+      --ok:#63B48C;
+      --shadow:0 1px 2px rgba(0,0,0,0.3), 0 6px 20px rgba(0,0,0,0.35);
+    }
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; padding:18px 16px 40px; background:var(--bg); color:var(--text);
+    font-family:"Noto Sans JP","Hiragino Sans","Hiragino Kaku Gothic ProN",Meiryo,sans-serif;
+    font-size:14px; -webkit-text-size-adjust:100%;
+  }
+  .wrap{ max-width:480px; margin:0 auto; display:flex; flex-direction:column; gap:14px; }
+  button{ font-family:inherit; cursor:pointer; }
+  button:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+  [hidden]{ display:none !important; }
+
+  h1{ margin:0 0 3px; font-size:19px; font-weight:700; }
+  .sub{ margin:0; font-size:13px; color:var(--text-muted); }
+
+  .card{
+    background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:16px 14px; box-shadow:var(--shadow);
+  }
+  .me{ font-size:18px; font-weight:700; }
+  .me span{ display:block; font-size:12px; font-weight:400; color:var(--text-muted); margin-top:3px; }
+
+  .names{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .names button{
+    font-size:15px; color:var(--text); background:var(--surface); border:1px solid var(--line);
+    border-radius:11px; padding:13px 8px; box-shadow:var(--shadow);
+  }
+  .names button[aria-pressed="true"]{ background:var(--accent-tint); border-color:var(--accent); color:var(--accent); font-weight:700; }
+
+  .send{
+    width:100%; border:0; border-radius:11px; padding:15px; font-size:16px; font-weight:700;
+    background:var(--accent); color:var(--accent-ink);
+  }
+  .send:disabled{ opacity:.45; cursor:default; }
+  .change{ font-size:12.5px; color:var(--accent); background:none; border:0; padding:6px; text-decoration:underline; }
+
+  .done{ text-align:center; }
+  .done .mark{
+    width:56px; height:56px; border-radius:50%; background:var(--ok); color:#FFF;
+    display:grid; place-items:center; font-size:30px; font-weight:700; margin:0 auto 10px;
+  }
+  .done h2{ margin:0 0 6px; font-size:18px; }
+  .note{ margin:0; font-size:12.5px; color:var(--text-muted); line-height:1.7; }
+  .err{ margin:0; font-size:13px; color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>検体キットを出しました</h1>
+    <p class="sub" id="due"></p>
+  </div>
+
+  <div class="card" id="loading">
+    <p class="note">読み込んでいます…</p>
+  </div>
+
+  <div class="card" id="askBox" hidden>
+    <div class="me" id="meBox" hidden></div>
+    <div id="pickBox" hidden>
+      <p class="note" style="margin-bottom:10px;">自分の名前を選んでください。</p>
+      <div class="names" id="names"></div>
+    </div>
+    <p class="err" id="err" hidden></p>
+  </div>
+
+  <button class="send" id="sendBtn" hidden>提出したと記録する</button>
+  <button class="change" id="changeBtn" hidden>ちがう名前を選ぶ</button>
+
+  <div class="card done" id="doneBox" hidden>
+    <div class="mark">✓</div>
+    <h2 id="doneName">受け付けました</h2>
+    <p class="note" id="doneNote"></p>
+  </div>
+
+  <p class="note">この画面はあなたにしか出ません。誰が出したかを他の人に知らせることはありません。</p>
+  <p class="note" id="lineErr" hidden></p>
+</div>
+
+<script>
+  var DATA = <?!= dataJson ?>;
+  var picked = '';
+  // LINEログインを通ってきたときは、サーバーが本人を知っている（枠の中でも確かめられる）
+  var lineId = <?!= lineIdJson ?>;
+  var lineErr = <?!= lineErrJson ?>;          // LINEログインを通ったのに失敗したときだけ中身が入る
+
+  function el(id){ return document.getElementById(id); }
+  function deviceId(){
+    try { return localStorage.getItem('shiftRequestDeviceId') || ''; } catch (e) { return ''; }
+  }
+  function show(id, on){ el(id).hidden = !on; }
+
+  el('due').textContent = DATA.dueLabel + 'が期日の分（' + DATA.monthLabel + '）';
+
+  function drawNames(){
+    var wrap = el('names');
+    wrap.innerHTML = '';
+    (DATA.names || []).forEach(function(name){
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = name;
+      b.setAttribute('aria-pressed', picked === name ? 'true' : 'false');
+      b.addEventListener('click', function(){
+        picked = name;
+        drawNames();
+        el('sendBtn').disabled = false;
+      });
+      wrap.appendChild(b);
+    });
+  }
+
+  function askPick(){
+    picked = '';
+    show('meBox', false);
+    show('pickBox', true);
+    show('changeBtn', false);
+    el('sendBtn').disabled = true;
+    show('sendBtn', true);
+    drawNames();
+  }
+
+  function showOwner(name, by){
+    picked = name;
+    el('meBox').innerHTML = '';
+    el('meBox').appendChild(document.createTextNode(name));
+    var s = document.createElement('span');
+    s.textContent = by === 'LINE' ? 'LINEのアカウントで分かりました'
+      : 'このスマホの持ち主として登録されています';
+    el('meBox').appendChild(s);
+    show('meBox', true);
+    show('pickBox', false);
+    el('sendBtn').disabled = false;
+    show('sendBtn', true);
+    show('changeBtn', true);
+  }
+
+  function showDone(name, already, by){
+    show('askBox', false);
+    show('sendBtn', false);
+    show('changeBtn', false);
+    el('doneName').textContent = name + 'さん、ありがとうございます';
+    var how = by === 'LINE' ? '（LINEのアカウントで分かりました）'
+      : by === '端末' ? '（このスマホの持ち主として分かりました）' : '';
+    el('doneNote').textContent = (already
+      ? DATA.monthLabel + '分は、すでに受け付けています。'
+      : DATA.monthLabel + '分（' + DATA.dueLabel + 'まで）の提出として記録しました。') + how;
+    show('doneBox', true);
+  }
+
+  el('sendBtn').addEventListener('click', function(){
+    if (!picked) return;
+    el('sendBtn').disabled = true;
+    el('sendBtn').textContent = '記録しています…';
+    google.script.run
+      .withSuccessHandler(function(res){
+        el('sendBtn').textContent = '提出したと記録する';
+        showDone(res.name || picked, res.already);
+      })
+      .withFailureHandler(function(e){
+        el('sendBtn').textContent = '提出したと記録する';
+        el('sendBtn').disabled = false;
+        el('err').textContent = e.message;
+        show('err', true);
+      })
+      .kitSubmit(DATA.month, picked, deviceId(), lineId);
+  });
+
+  el('changeBtn').addEventListener('click', askPick);
+
+  function start(){
+    google.script.run
+      .withSuccessHandler(function(res){
+        show('loading', false);
+        show('askBox', true);
+        if (res && res.owner && res.done) { showDone(res.owner, true, res.by); return; }
+        if (res && res.owner) { showOwner(res.owner, res.by); return; }
+        askPick();
+      })
+      .withFailureHandler(function(){
+        show('loading', false);
+        show('askBox', true);
+        askPick();
+      })
+      .kitWho(DATA.month, deviceId(), lineId);
+  }
+
+  // LINEの中で開いたときは、LINEに「この人は誰か」を教えてもらう。
+  // 使えないとき（パソコン・設定前・読み込み失敗）は、今までどおり端末の記録で進む。
+  // LIFF（LINEの中だけで動く仕組み）は使わない。
+  // GASのページは枠（iframe）の中に出るので、liff.init() が返事を返さず12秒待たされる。
+  // 2026-09-26に実測で確認：「②LINEに聞いています（init）／12秒／枠の中」。
+  // 本人の確認はLINEログインを通ってサーバー側で済ませ、この画面はすぐ出す。
+  if (lineErr) {
+    el('lineErr').textContent = 'LINEログイン：' + lineErr;
+    el('lineErr').hidden = false;
+  }
+  start();
+</script>
+</body>
+</html>

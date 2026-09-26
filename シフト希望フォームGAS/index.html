@@ -527,21 +527,67 @@
   }
 
   /* ---- screen 1 ---- */
+  // LINEログインを通ってきたときは、サーバーが本人を知っている（枠の中でも確かめられる）
+  var LINE_ID = <?!= lineIdJson ?>;
+  var chosenName = '';              // この画面で選んだ名前
+
+  // LINEのIDと名前が両方そろったら結びつける。
+  // どちらが先でもよい（名前を先に選んでも、LINEの返事が先でも働く）
+  function bindIfPossible(){
+    if (!LINE_ID || !chosenName) return;
+    try {
+      google.script.run
+        .withSuccessHandler(function(ok){ lineState(ok ? '覚えました（' + chosenName + '）' : '覚えられませんでした'); })
+        .withFailureHandler(function(e){ lineState('覚えられませんでした：' + (e && e.message)); })
+        .bindMe(LINE_ID, chosenName);
+    } catch (e) { lineState('覚えられませんでした'); }
+  }
+
+  // LINEログインがどこまで進んだかの記録。画面には出さず、開発者画面にだけ残す
+  function lineState(text){
+    try { console.log('LINE: ' + text); } catch (e) {}
+  }
   var nameSelect = document.getElementById('nameSelect');
   STAFF.forEach(function(n){ var o = document.createElement('option'); o.textContent = n; nameSelect.appendChild(o); });
 
-  nameSelect.addEventListener('change', function(){
-    if (!nameSelect.value) return;
-    var selectedName = nameSelect.value;
+  function goToGrid(selectedName){
     document.getElementById('staffNameDisplay').textContent = selectedName;
     logEvent('select', selectedName);
     document.getElementById('screenName').hidden = true;
     document.getElementById('screenGrid').hidden = false;
     window.scrollTo(0, 0);
     loadRequests(selectedName);
+  }
+
+  nameSelect.addEventListener('change', function(){
+    if (!nameSelect.value) return;
+    var selectedName = nameSelect.value;
+    chosenName = selectedName;
+    bindIfPossible();                 // LINEの返事がまだなら、返事が来たときに結びつける
+    goToGrid(selectedName);
   });
+
+  // LIFF（LINEの中だけで動く仕組み）は使わない。GASのページは枠（iframe）の中に出るため
+  // liff.init() が返事を返さない（2026-09-26に実測）。本人はLINEログインでサーバーが確かめる。
+  (function(){
+    if (!LINE_ID) return;
+    if (chosenName) { bindIfPossible(); return; }   // 先に名前を選んでいたら、それを覚える
+    google.script.run
+      .withSuccessHandler(function(res){
+        if (!res || !res.name) { lineState('分かりました（まだ名前と結びついていません）'); return; }
+        lineState('あなたは ' + res.name + ' さんです');
+        if (nameSelect.value) return;                 // 先に自分で選んでいたら、そちらを優先
+        if (STAFF.indexOf(res.name) === -1) return;   // 名簿から外れた人は今までどおり
+        nameSelect.value = res.name;
+        chosenName = res.name;
+        goToGrid(res.name);
+      })
+      .withFailureHandler(function(){})
+      .whoAmI(LINE_ID);
+  })();
   document.getElementById('changeNameBtn').addEventListener('click', function(){
     logEvent('change', document.getElementById('staffNameDisplay').textContent);
+    chosenName = '';                  // 選び直すと、新しい名前で結びつけ直す
     loadedName = '';
     resetForm();
     nameSelect.value = '';

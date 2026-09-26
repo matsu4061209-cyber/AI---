@@ -1055,18 +1055,28 @@ function checkUnregisteredMenus_() {
   const normName_ = s => String(s === null || s === undefined ? '' : s).replace(/[\s　]/g, '').toUpperCase();
 
   // ── 商品マスタの登録済みコードと「商品名→コード」対応を取得 ───────────
+  //   ★誤通知の根本対策：取込直後に読むと、登録済みでも一瞬だけ抜けて未登録と誤判定することがある。
+  //     ①SpreadsheetApp.flush()で書き込みを確定させてから読む。
+  //     ②getLastRow()でなくgetMaxRows()の全域を読む（getLastRowが一瞬縮んでも新規登録の下端行を取りこぼさない。空行はスキップ）。
+  //   同じ読み取りを送信直前にもう一度使う（fresh再読で最終ガード）ため関数化。
   const menuSheet = ss.getSheetByName('商品マスタ');
-  const registeredCodes = new Set();
-  const regNameToCode = {};   // 正規化した商品名 → 登録済みコード（コード切替のヒント用）
-  if (menuSheet && menuSheet.getLastRow() > 1) {
-    menuSheet.getRange(2, 1, menuSheet.getLastRow() - 1, 2).getValues().forEach(r => {
-      const c = normalizeCode_(r[0]);
-      if (!c) return;
-      registeredCodes.add(c);
-      const nk = normName_(r[1]);
-      if (nk && !regNameToCode[nk]) regNameToCode[nk] = c;
-    });
-  }
+  const readMaster_ = () => {
+    const set = new Set(); const nameMap = {};
+    if (menuSheet && menuSheet.getMaxRows() > 1) {
+      try { SpreadsheetApp.flush(); } catch (e) {}
+      menuSheet.getRange(2, 1, menuSheet.getMaxRows() - 1, 2).getValues().forEach(r => {
+        const c = normalizeCode_(r[0]);
+        if (!c) return;
+        set.add(c);
+        const nk = normName_(r[1]);
+        if (nk && !nameMap[nk]) nameMap[nk] = c;
+      });
+    }
+    return { set, nameMap };
+  };
+  const m0 = readMaster_();
+  const registeredCodes = m0.set;
+  const regNameToCode = m0.nameMap;   // 正規化した商品名 → 登録済みコード（コード切替のヒント用）
 
   // 安全装置：商品マスタが読めていない（極端に少ない）ときは誤通知を防ぐため中止
   if (registeredCodes.size < 50) {
@@ -1128,11 +1138,30 @@ function checkUnregisteredMenus_() {
     }
   });
 
+  // ★送信直前に商品マスタを「新しく読み直し」、登録済みなら絶対に通知しない（取込中の読みブレ最終防御）。
+  //   登録済み商品は新しく読めば必ず見つかるので、これで「登録済みなのに繰り返し届く」を根絶する。
+  const fresh = readMaster_().set;
+  if (fresh.size >= 50) {                              // fresh読みが健全なときだけ最終ガードに使う
+    fresh.forEach(c => registeredCodes.add(c));        // 判定・監視除去にも反映
+    try { propsReg.setProperty('knownRegisteredCodes', JSON.stringify([...registeredCodes])); } catch (e) {}
+    Object.keys(watch).forEach(code => {               // 登録済みになったコードを監視リストからも除去
+      if (fresh.has(code) || fresh.has(normalizeCode_(code))) delete watch[code];
+    });
+  }
+
   // ── 2日以上連続で未登録＝本物、かつ未通知のものだけをメール ─────────────
   const toNotify = Object.keys(watch)
     .filter(code => (watch[code].dayCount || 0) >= 2 && !watch[code].notified
-                    && !registeredCodes.has(code) && !registeredCodes.has(normalizeCode_(code)))  // 送信直前にも登録済みを最終除外（二重の安全）
+                    && !registeredCodes.has(code) && !registeredCodes.has(normalizeCode_(code))  // 送信直前にも登録済みを最終除外
+                    && !(fresh.size >= 50 && (fresh.has(code) || fresh.has(normalizeCode_(code)))))  // fresh再読でも登録済みなら除外
     .sort((a, b) => (watch[b].qty || 0) - (watch[a].qty || 0));
+
+  // 誤検知しかけたが最終ガードで除外したコードをログに残す（後から原因確認できるように）
+  Object.keys(watch).forEach(code => {
+    if ((watch[code].dayCount || 0) >= 2 && fresh.size >= 50 && (fresh.has(code) || fresh.has(normalizeCode_(code)))) {
+      console.log('未登録誤検知を最終ガードで除外（登録済み）: code=' + code + ' ' + (watch[code].name || ''));
+    }
+  });
 
   if (toNotify.length > 0) {
     const lines = toNotify.map(code => {
@@ -3033,8 +3062,16 @@ function buildSalesForecast() {
       const filtered = actualRates.filter(r => r >= q1 - iqr * 1.5 && r <= q3 + iqr * 1.5);
       const use = filtered.length >= 2 ? filtered : actualRates;
       adoptedRate = Math.round(use.reduce((a, b) => a + b, 0) / use.length * 1000) / 1000;
+    } else if (actualRates.length === 1) {
+      // ★実績1件でも実測を採用する（年1回イベント＝花火/祭り等はサンプルが毎年1件ずつしか貯まらない）。
+      //   旧実装は設定倍率(ev.rate)をそのまま使い実測を無視していたため、花火が2.6倍でも登録1.7のまま張り付いていた。
+      //   設定倍率があれば「実測0.8＋設定0.2」で軽く正則化（1件のノイズに引きずられ過ぎない）、無ければ実測そのまま。
+      //   eventActualRatesの1件時と同じ思想。2件目以降は上のIQR平均＝純実測へ自動移行。
+      adoptedRate = (ev.rate > 0)
+        ? Math.round((actualRates[0] * 0.8 + ev.rate * 0.2) * 1000) / 1000
+        : Math.round(actualRates[0] * 1000) / 1000;
     } else if (ev.rate > 0) {
-      adoptedRate = ev.rate;
+      adoptedRate = ev.rate;                    // 実績まだ無し → 設定倍率で動く（コールドスタート）
     } else {
       adoptedRate = 1.0;
     }
@@ -3080,7 +3117,7 @@ function buildSalesForecast() {
       const use = filtered.length >= 2 ? filtered : actualRates;
       adoptedRate = Math.round(use.reduce((a,b) => a + b, 0) / use.length * 1000) / 1000;
     } else if (actualRates.length === 1 && setRate > 0) {
-      adoptedRate = Math.round((actualRates[0] + setRate) / 2 * 1000) / 1000; // 実績1件＋設定倍率 → 平均で少し実績を反映
+      adoptedRate = Math.round((actualRates[0] * 0.8 + setRate * 0.2) * 1000) / 1000; // 実績1件＝実測を主に採用(0.8)＋設定で軽く正則化(0.2)。設定は手打ちの推測なので実測を優先。repeat/eventActualRatesと統一
     } else if (actualRates.length === 1) {
       adoptedRate = Math.round(actualRates[0] * 1000) / 1000;
     } else if (setRate > 0) {
@@ -7185,22 +7222,51 @@ function buildHolidayMultByDate_(ss) {
   const isRealHol = ds => (holidayOffSet[ds] === true) || (eventSpecialSet[ds] === true);   // 実際の休みの祝日＋単発イベント。飛び石平日は対象外
   const winFrom = new Date(todayO); winFrom.setDate(todayO.getDate() - 28);
   const winTo   = new Date(todayO); winTo.setDate(todayO.getDate() + 28);
-  const dowSum = {}, dowCnt = {};
+  // ★客数ベース＋祝日+7%（MARKER_ORDER_CUSTOMER_BASE）。2026-09-25：店長要望＋実測検証（過去15祝日）で確定。
+  //   実測：食材使用量は「客数」にほぼ比例（1客あたり バラ 平日41.7g・週末41.9g・祝日44.7g＝ほぼ一定、祝日のみ+7%）。
+  //   よって各日の倍率＝「その日の予測客数 ÷ その曜日の通常平均客数」×(祝日は1.072)。売上でなく“客数”連動＝混雑日ほど仕込み多。
+  //   ・客数＝予測売上(I列)÷客単価(日種別)。客単価は日次売上実績から平日/週末/祝日別に算出。
+  //   ・食材ごとの曜日のクセ(もやし等平日主体)は「トレンド履歴の曜日ブレンド」が保持＝ここは日ごとの水準合わせだけ担う（役割分担）。
+  //   ・通常日で予測≒その曜日平均なら倍率≒1（従来の平日/週末はほぼ不変）。祝日は同曜日通常より客数が多いぶん自動で増える。
+  //   これで「火(祝日)＞土(週末)なのに売上は火＜土」という逆転（＝旧・売上倍率を低い曜日基準に掛けて過大化）を解消する。
+  const KT = { '平日':[0,0], '週末':[0,0], '祝日':[0,0] };   // [売上計, 客数計]
+  const dsHist = ss.getSheetByName('日次売上実績');
+  if (dsHist && dsHist.getLastRow() > 1) {
+    const kFrom = new Date(todayO); kFrom.setDate(todayO.getDate() - 120);
+    dsHist.getRange(2, 1, dsHist.getLastRow() - 1, 5).getValues().forEach(r => {
+      if (!r[0]) return;
+      const d = r[0] instanceof Date ? r[0] : new Date(r[0]); if (isNaN(d.getTime())) return;
+      if (d < kFrom) return;
+      const ds = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy/MM/dd');
+      const sales = Number(r[3]) || 0, cust = Number(r[4]) || 0;
+      if (!(sales > 0) || !(cust > 0)) return;
+      const wd = d.getDay();
+      const type = isRealHol(ds) ? '祝日' : ((wd === 0 || wd === 6) ? '週末' : '平日');
+      KT[type][0] += sales; KT[type][1] += cust;
+    });
+  }
+  const ktAll = (KT['平日'][0]+KT['週末'][0]+KT['祝日'][0]) / Math.max(1, KT['平日'][1]+KT['週末'][1]+KT['祝日'][1]);
+  const ktOf = type => { const k = KT[type][1] > 0 ? KT[type][0]/KT[type][1] : 0; return k > 0 ? k : (ktAll > 0 ? ktAll : 1); };
+  const dayTypeOf = ds => { const wd = dowOfDate[ds]; return isRealHol(ds) ? '祝日' : ((wd === 0 || wd === 6) ? '週末' : '平日'); };
+  const custOf = ds => fcByDate[ds] / ktOf(dayTypeOf(ds));   // その日の予測客数
+  const HOLIDAY_FOOD_PREMIUM = 1.072;                        // 祝日は1客あたり食材+7%（実測：バラ 平日41.7→祝日44.7g）
+  // その曜日の通常日(祝日・イベント除く)の平均予測客数を基準にする
+  const custDowSum = {}, custDowCnt = {};
   Object.keys(fcByDate).forEach(ds => {
     const d = new Date(ds); d.setHours(0,0,0,0);
     if (d < winFrom || d > winTo) return;
-    if (isRealHol(ds)) return;             // 通常日(土日含む)だけで同曜日の基準を作る
+    if (isRealHol(ds)) return;
     const w = dowOfDate[ds];
-    dowSum[w] = (dowSum[w]||0) + fcByDate[ds];
-    dowCnt[w] = (dowCnt[w]||0) + 1;
+    custDowSum[w] = (custDowSum[w]||0) + custOf(ds);
+    custDowCnt[w] = (custDowCnt[w]||0) + 1;
   });
   Object.keys(fcByDate).forEach(ds => {
-    if (!isRealHol(ds)) { map[ds] = 1.0; return; }
     const w = dowOfDate[ds];
-    const base = dowCnt[w] ? dowSum[w]/dowCnt[w] : 0;
-    let m = base > 0 ? fcByDate[ds]/base : 1.0;
-    if (m < 0.5) m = 0.5;
-    if (m > 3.0) m = 3.0;
+    const base = custDowCnt[w] ? custDowSum[w]/custDowCnt[w] : 0;
+    let m = base > 0 ? custOf(ds)/base : 1.0;
+    if (isRealHol(ds)) m *= HOLIDAY_FOOD_PREMIUM;
+    if (m < 0.3) m = 0.3;
+    if (m > 3.2) m = 3.2;
     map[ds] = m;
   });
   // ★イベント日は登録倍率で確定的に上書き（予測比でなく登録倍率＝花火1.7を確実に発注・仕込みへ反映）。予測シートに無い日でも効く。MARKER_ORDER_EVENT_MULT
@@ -7213,6 +7279,153 @@ function buildHolidayMultByDate_(ss) {
   const shown = Object.keys(map).filter(k => map[k] !== 1.0).sort().map(k => k + '=' + map[k].toFixed(2)).slice(0, 14);
   console.log('祝日・イベント倍率(' + shown.length + '件): ' + shown.join(', '));
   return map;
+}
+
+// 【イベント日の食材別“構成”係数】MARKER_EVENT_ING_MIX
+//   狙い：花火など屋台イベント日は「1人あたりの品数は控えめ・でもペッパーライス系(バラ)の割合が高い」等、
+//         同じ客数でもメニュー構成が偏る。日倍率(buildHolidayMultByDate_)は“量(客数)”を担うが構成の偏りは拾えない。
+//         そこで「そのイベント自身の過去実績」から食材ごとの1客あたり使用量を測り、通常日の1客あたりと比べた比を係数にする。
+//   二重計上しない：日倍率＝量（客数連動）／この係数＝1客あたりの構成（量に中立）。掛け合わせて食材別の正しい総量になる。
+//   統計の安全弁：サンプル(過去開催日数n)が少ないうちは 1.0 へ強く寄せる（w=n/(n+K)）＝1日の偶然を一般化して外さない。
+//                 回を重ねるほど自動で実績に寄る。係数は[0.6,1.8]にクランプ。データが無い食材/日は1.0＝無影響。
+//   戻り値：{ 'yyyy/MM/dd'(未来のイベント日) : { 食材コード(str): 係数 } }
+function buildEventIngMixByDate_(ss) {
+  const out = {};
+  try {
+    const SHRINK_K = 2;          // 信頼度加重の強さ（n/(n+K)）。n=1→0.33, n=2→0.5, n=4→0.67
+    const CLAMP_LO = 0.6, CLAMP_HI = 1.8;
+    const MIN_EV_CUST = 30;      // イベント側の総客数がこれ未満なら信頼せず不適用（ノイズ防止）
+    const MIN_ING_G   = 200;     // イベント側・通常側とも累計これ未満の微量食材は不適用（1食単位の丸め誤差回避）
+    const todayO = new Date(); todayO.setHours(0,0,0,0);
+
+    // 1) レシピ：メニューコード → [{ing, g/1食}]（商品マスタ col0=メニュー, col4=食材, col12=単位使用量g）
+    const pm = ss.getSheetByName('商品マスタ');
+    if (!pm || pm.getMaxRows() < 2 || pm.getMaxColumns() < 13) return out;
+    const recipe = {};
+    pm.getRange(2, 1, pm.getMaxRows() - 1, 13).getValues().forEach(r => {
+      const menu = normalizeCode_(r[0]), ing = normalizeCode_(r[4]), g = Number(r[12]) || 0;
+      if (!menu || !ing || !(g > 0)) return;
+      (recipe[menu] = recipe[menu] || []).push({ ing, g });
+    });
+
+    // 2) 実績：日付 → 総客数 / 日付 → {食材: 使用量g}（実績データ col0=日付, col3=総客数, col4=メニュー, col6=出食数）
+    const js = ss.getSheetByName('実績データ');
+    if (!js || js.getLastRow() < 2) return out;
+    const custByDate = {}, ingByDate = {};
+    js.getRange(2, 1, js.getLastRow() - 1, 7).getValues().forEach(r => {
+      if (!r[0] || !r[4]) return;
+      const ds = toDateStr_(r[0]);
+      const c = Number(r[3]) || 0; if (c > 0) custByDate[ds] = c;
+      const rec = recipe[normalizeCode_(r[4])]; const q = Number(r[6]) || 0;
+      if (!rec || !(q > 0)) return;
+      const bag = ingByDate[ds] = ingByDate[ds] || {};
+      rec.forEach(x => { bag[x.ing] = (bag[x.ing] || 0) + q * x.g; });
+    });
+
+    // 3) 真の祝日Set（通常日ベースラインから除外。土日は通常扱い＝除外しない）
+    const holSet = {};
+    const hm = ss.getSheetByName('祝日マスタ');
+    if (hm && hm.getLastRow() > 1) {
+      hm.getRange(2, 1, hm.getLastRow() - 1, 7).getValues().forEach(row => {
+        if (!row[0] || row[2] !== true) return;
+        const tag = (row[6] || '').toString().trim();
+        if (tag === '土曜' || tag === '日曜' || tag === '通常営業' || !tag) return;
+        holSet[row[0] instanceof Date ? Utilities.formatDate(row[0], 'Asia/Tokyo', 'yyyy/MM/dd') : row[0].toString()] = true;
+      });
+    }
+
+    // 4) イベント登録を走査 → 各イベントの「過去開催日(学習用)」「未来開催日(適用先)」を集める
+    const ev = ss.getSheetByName('イベント登録');
+    if (!ev || ev.getLastRow() < 2) return out;
+    const ec = Math.max(14, ev.getLastColumn());
+    const winTo = new Date(todayO); winTo.setDate(todayO.getDate() + 60);
+    const events = [];         // { name, pastMatch(ds)->bool, futureDates:[ds], rate }
+    const allEventPast = {};   // 全イベントの過去開催日Set（通常日ベースラインから除外）
+    ev.getRange(2, 1, ev.getLastRow() - 1, ec).getValues().forEach(row => {
+      if (!row[0]) return;
+      if ((row[4] || '').toString().trim() === '除外') return;
+      const name = row[0].toString().trim();
+      const repeatPat = (ec >= 11 ? (row[10] || '') : '').toString().trim();
+      let pastMatch = null; const futureDates = [];
+      if (repeatPat) {
+        const mAnn = repeatPat.match(/毎年(\d+)月(\d+)日/);
+        const mMon = !mAnn && repeatPat.match(/毎月(\d+)/);
+        if (mAnn) pastMatch = ds => { const d = new Date(ds); return d.getMonth() === Number(mAnn[1]) - 1 && d.getDate() === Number(mAnn[2]); };
+        else if (mMon) pastMatch = ds => new Date(ds).getDate() === Number(mMon[1]);
+        // 未来開催日：短期(≤7日)の回だけ適用先に
+        expandEventRepeat_(repeatPat, todayO, winTo).forEach(o => {
+          if (Math.round((o.end - o.start) / 86400000) + 1 > 7) return;
+          for (let t = o.start.getTime(); t <= o.end.getTime() + 1000; t += 86400000) {
+            const ds = Utilities.formatDate(new Date(t), 'Asia/Tokyo', 'yyyy/MM/dd');
+            if (new Date(ds) >= todayO) futureDates.push(ds);
+          }
+        });
+      } else {
+        const rs = row[1], re = row[2]; if (!rs || !re) return;
+        const s0 = rs instanceof Date ? rs : new Date(rs), e0 = re instanceof Date ? re : new Date(re);
+        if (isNaN(s0.getTime()) || isNaN(e0.getTime())) return;
+        if (Math.round((e0 - s0) / 86400000) + 1 > 7) return;  // 短期のみ
+        const sStr = Utilities.formatDate(s0, 'Asia/Tokyo', 'yyyy/MM/dd'), eStr = Utilities.formatDate(e0, 'Asia/Tokyo', 'yyyy/MM/dd');
+        pastMatch = ds => ds >= sStr && ds <= eStr && new Date(ds) < todayO;
+        for (let t = s0.getTime(); t <= e0.getTime() + 1000; t += 86400000) {
+          const ds = Utilities.formatDate(new Date(t), 'Asia/Tokyo', 'yyyy/MM/dd');
+          if (new Date(ds) >= todayO) futureDates.push(ds);
+        }
+      }
+      if (!pastMatch || !futureDates.length) return;   // 学習の当てが無い/未来の適用先が無い → 対象外
+      events.push({ name, pastMatch, futureDates });
+      Object.keys(ingByDate).forEach(ds => { if (new Date(ds) < todayO && pastMatch(ds)) allEventPast[ds] = true; });
+    });
+    if (!events.length) return out;
+
+    // 5) 通常日ベースライン：直近150日の「非イベント・非祝日」日で、食材ごと Σ使用量 / Σ客数
+    const baseFrom = new Date(todayO); baseFrom.setDate(todayO.getDate() - 150);
+    const baseIngG = {}, baseCust = { v: 0 };
+    Object.keys(ingByDate).forEach(ds => {
+      const d = new Date(ds); if (d < baseFrom || d >= todayO) return;
+      if (allEventPast[ds] || holSet[ds]) return;
+      const c = custByDate[ds]; if (!(c > 0)) return;
+      baseCust.v += c;
+      const bag = ingByDate[ds];
+      Object.keys(bag).forEach(ing => { baseIngG[ing] = (baseIngG[ing] || 0) + bag[ing]; });
+    });
+    if (!(baseCust.v > 0)) return out;
+    const basePerCust = {};
+    Object.keys(baseIngG).forEach(ing => { basePerCust[ing] = baseIngG[ing] / baseCust.v; });
+
+    // 6) イベントごとに食材別係数を算出 → 未来開催日へ割り当て
+    events.forEach(ev2 => {
+      const pastDs = Object.keys(ingByDate).filter(ds => new Date(ds) < todayO && ev2.pastMatch(ds) && custByDate[ds] > 0);
+      const n = pastDs.length; if (n < 1) return;
+      let evCust = 0; const evIngG = {};
+      pastDs.forEach(ds => { evCust += custByDate[ds]; const bag = ingByDate[ds]; Object.keys(bag).forEach(ing => { evIngG[ing] = (evIngG[ing] || 0) + bag[ing]; }); });
+      if (evCust < MIN_EV_CUST) return;
+      const w = n / (n + SHRINK_K);              // 信頼度加重（少数サンプルは1.0へ寄せる）
+      const factor = {};
+      Object.keys(evIngG).forEach(ing => {
+        const evG = evIngG[ing], baG = baseIngG[ing];
+        if (!(evG >= MIN_ING_G) || !(baG >= MIN_ING_G)) return;   // 微量食材は不適用
+        if (!(basePerCust[ing] > 0)) return;
+        const evPerCust = evG / evCust;
+        let raw = evPerCust / basePerCust[ing];
+        let f = 1 + (raw - 1) * w;                                // 信頼度で1.0へシュリンク
+        if (f < CLAMP_LO) f = CLAMP_LO; if (f > CLAMP_HI) f = CLAMP_HI;
+        factor[ing] = Math.round(f * 1000) / 1000;
+      });
+      const nonTrivial = Object.keys(factor).filter(k => Math.abs(factor[k] - 1) > 0.02);
+      if (!nonTrivial.length) return;
+      ev2.futureDates.forEach(fds => {
+        const bag = out[fds] = out[fds] || {};
+        Object.keys(factor).forEach(ing => { bag[ing] = (bag[ing] || 1) * factor[ing]; });  // 同日複数イベントは掛け合わせ
+      });
+      const top = nonTrivial.sort((a, b) => Math.abs(factor[b] - 1) - Math.abs(factor[a] - 1)).slice(0, 6)
+        .map(k => k + '=' + factor[k].toFixed(2)).join(', ');
+      console.log('イベント食材構成係数 [' + ev2.name + '] n=' + n + ' w=' + w.toFixed(2) + ' 客' + evCust + ' → ' + top);
+    });
+  } catch (e) {
+    console.log('buildEventIngMixByDate_ skip: ' + e.message);
+  }
+  return out;
 }
 
 const SOLDOUT_PROP_ = 'soldOutCodes';   // 売り切れ登録（旧・手動トグルの保存場所。互換のため残置。現行は売切ログの日付イベントで自動学習）
@@ -7994,6 +8207,7 @@ const todayO = new Date(); todayO.setHours(0, 0, 0, 0);
 
   // ── C案：祝日は「その日の売上予測の水準」に食材を合わせる（発注・仕込みで共通）。MARKER_HOLIDAY_FORECAST_MULT
   const holidayMultByDate = buildHolidayMultByDate_(ss);
+  const eventIngMix = buildEventIngMixByDate_(ss);   // イベント日の食材別“構成”係数（花火＝バラ多め等）。MARKER_EVENT_ING_MIX
 
   // ②確率＋⑥在庫理論：SLを設定した食材だけ「統計の安全在庫(Z×σ×√日数)」で発注（未設定は従来の安全係数）。MARKER_SERVICE_LEVEL
   const slMap = readServiceLevelMap_();                        // {code:'p90'|'p95'|'p99'}
@@ -8086,7 +8300,9 @@ let baseTotal = 0; const dayVals = [];   // dayVals=カバー各日の曜日別�
     const coverDateStr = Utilities.formatDate(coverDate, 'Asia/Tokyo', 'yyyy/MM/dd');
     // C案：祝日はその日の売上予測の水準（予測比）で食材を増減する。MARKER_HOLIDAY_FORECAST_MULT
     const holidayRate = (holidayMultByDate[coverDateStr] !== undefined) ? holidayMultByDate[coverDateStr] : 1.0;
-    const dv = dayAvg * holidayRate; baseTotal += dv; dayVals.push(dv);
+    // イベント日の食材別“構成”係数（例：花火＝バラ多め/ステーキ少なめ）。量は上のholidayRate、構成はここ＝二重計上なし。既定1.0で無影響。MARKER_EVENT_ING_MIX
+    const mixRate = (eventIngMix[coverDateStr] && eventIngMix[coverDateStr][String(Number(code))] !== undefined) ? eventIngMix[coverDateStr][String(Number(code))] : 1.0;
+    const dv = dayAvg * holidayRate * mixRate; baseTotal += dv; dayVals.push(dv);
   });
     if (baseTotal===0) return [0];
 
@@ -8631,15 +8847,26 @@ function buildPrepThawSheet_(weekOffset) {
   const pauseWindowsPrep = pauseData.windows, pauseFracPrep = pauseData.subFrac || {}, pauseExclPrep = pauseData.exclusive || new Set();
   // 祝日補正（C案・発注と共通）：各日を売上予測の水準で増減。日付ごとの倍率を先に出す。MARKER_PREP_HOLIDAY_MULT
   const holidayMultByDate = buildHolidayMultByDate_(ss);
+  const eventIngMixPrep = buildEventIngMixByDate_(ss);   // イベント日の食材別“構成”係数（花火＝バラ多め等）。MARKER_EVENT_ING_MIX
   const today0 = new Date(); today0.setHours(0,0,0,0);
   const monday0 = new Date(today0); monday0.setDate(today0.getDate() - ((today0.getDay()+6)%7));  // 今週の月曜
-  const holMultDi = [], holMultTomDi = [];
+  const holMultDi = [], holMultTomDi = [], dsDi = [], dsTomDi = [];
   for (let hi = 0; hi < 7; hi++) {
     const d0 = new Date(monday0); d0.setDate(monday0.getDate() + weekOffset + hi);
     const d1 = new Date(d0);      d1.setDate(d0.getDate() + 1);
-    holMultDi.push(holidayMultByDate[Utilities.formatDate(d0,'Asia/Tokyo','yyyy/MM/dd')] || 1);
-    holMultTomDi.push(holidayMultByDate[Utilities.formatDate(d1,'Asia/Tokyo','yyyy/MM/dd')] || 1);
+    const ds0 = Utilities.formatDate(d0,'Asia/Tokyo','yyyy/MM/dd'), ds1 = Utilities.formatDate(d1,'Asia/Tokyo','yyyy/MM/dd');
+    dsDi.push(ds0); dsTomDi.push(ds1);
+    holMultDi.push(holidayMultByDate[ds0] || 1);
+    holMultTomDi.push(holidayMultByDate[ds1] || 1);
   }
+  // 仕込み品目(単一/合算パーツ)のコード群からイベント構成係数を引く。合算品は各パーツの平均、既定1.0。MARKER_EVENT_ING_MIX
+  const eventMixOf_ = (ds, it) => {
+    const bag = eventIngMixPrep[ds]; if (!bag) return 1;
+    const codes = it.partsCodes ? it.partsCodes : [it.code];
+    let sum = 0, cnt = 0;
+    codes.forEach(c => { const f = bag[String(Number(c))]; if (f !== undefined) { sum += f; cnt++; } else { sum += 1; cnt++; } });
+    return cnt ? sum / cnt : 1;
+  };
   // CP増量：休止でない進行中CP（例 肉の日WEEK）の期間だけ、その商品が使う食材を「ピーク倍率」で増やす。MARKER_PREP_CP_BOOST
   //   ★食材ごとに「その食材を実際に使うCPの期間だけ」効かせる（他CPの期間には効かせない）。中/下限のままだと肉の日WEEK等で解凍不足になるため、CP日だけ上限相当(p85/平均)へ引き上げる（通常日は据え置き＝廃棄を増やさない）。
   const cpFoodWindows = {};   // 食材コード -> [{start,end}]（その食材を使うCPの窓だけ）
@@ -8786,7 +9013,9 @@ function buildPrepThawSheet_(weekOffset) {
       const asymLit = asymLitPrep_(itVeg, dcAbs);   // 非対称ゆらぎ：上振れ日は厚く(B)／通常日の野菜は薄く(C)。MARKER_ASYM_FLUCT
       const dcTom = "(" + dcAbs + "+1)";                       // 翌日の日付（休止判定用）
       const dowToday = dowNumByDi[di], dowTom = dowNumByDi[(di + 1) % 7];
-      const mT = (holMultDi[di] || 1).toFixed(4), mN = (holMultTomDi[di] || 1).toFixed(4);   // 祝日倍率：当日・翌日
+      // 祝日/イベント量倍率(mT/mN)にイベント食材構成係数を折り込む（当日・翌日／品目ごと）。既定1.0で無影響。MARKER_EVENT_ING_MIX
+      const mixT = eventMixOf_(dsDi[di], it), mixN = eventMixOf_(dsTomDi[di], it);
+      const mT = ((holMultDi[di] || 1) * mixT).toFixed(4), mN = ((holMultTomDi[di] || 1) * mixN).toFixed(4);   // 祝日倍率×構成係数：当日・翌日
       const adj = "+SUMIFS('仕込み調整'!$C:$C,'仕込み調整'!$B:$B,$A" + top + ",'仕込み調整'!$A:$A," + dcAbs + ")";
       // 【正式定義・むやみに変更しない】ランチ＝(当日 + 翌日÷2) × 祝日倍率 を土台に、予測値で段階調整。MARKER_PREP_LDDEF
       //   ・中　＝(当日 + 翌日÷2)　＝約1.5日分（前夜に翌日分を冷蔵解凍する運用）。祝日は当日mT・翌日mNを各々適用。
