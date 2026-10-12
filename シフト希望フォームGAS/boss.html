@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  :root{
+    --bg:#F4F5F3; --surface:#FFFFFF; --surface-2:#F7F6F3;
+    --text:#23211E; --text-muted:#726E67; --line:#DDD9D2;
+    --accent:#E8501C; --accent-ink:#FFFFFF; --accent-tint:#FBE4D8;
+    --fixed:#2A6FB0; --fixed-tint:#E4EEF7;
+    --shadow:0 1px 2px rgba(35,33,30,0.06), 0 4px 14px rgba(35,33,30,0.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#181715; --surface:#221F1C; --surface-2:#2A2723;
+      --text:#F3F1EC; --text-muted:#A8A39A; --line:#3A362F;
+      --accent:#FF7043; --accent-ink:#1A0E08; --accent-tint:#3A2418;
+      --fixed:#6FA3D8; --fixed-tint:#1E2A35;
+      --shadow:0 1px 2px rgba(0,0,0,0.3), 0 6px 20px rgba(0,0,0,0.35);
+    }
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; padding:18px 16px 40px; background:var(--bg); color:var(--text);
+    font-family:"Noto Sans JP","Hiragino Sans","Hiragino Kaku Gothic ProN",Meiryo,sans-serif;
+    font-size:14px; -webkit-text-size-adjust:100%;
+  }
+  .wrap{ max-width:480px; margin:0 auto; display:flex; flex-direction:column; gap:12px; }
+  button{ font-family:inherit; cursor:pointer; }
+  button:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+  .num{ font-variant-numeric:tabular-nums; }
+  [hidden]{ display:none !important; }
+
+  header h1{ margin:0; font-size:19px; font-weight:700; }
+  header p{ margin:3px 0 0; font-size:12.5px; color:var(--text-muted); }
+
+  .months{ display:flex; align-items:center; gap:8px; }
+  .months button{
+    background:var(--surface); border:1px solid var(--line); border-radius:10px;
+    color:var(--text); font-size:15px; font-weight:700; padding:8px 14px;
+  }
+  .months .now{ flex:1; text-align:center; font-size:15px; font-weight:700; }
+  .months .now small{ display:block; font-size:11.5px; font-weight:500; color:var(--text-muted); }
+
+  .card{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:12px 14px; box-shadow:var(--shadow); }
+  .sum-total{ display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+  .sum-total span{ font-size:12.5px; color:var(--text-muted); }
+  .sum-total b{ font-size:26px; font-weight:700; }
+  .sum-rows{ margin-top:8px; display:flex; flex-direction:column; gap:4px; font-size:12.5px; color:var(--text-muted); }
+  .sum-row{ display:flex; justify-content:space-between; gap:10px; }
+  .sum-row b{ color:var(--text); font-weight:600; }
+
+  .tag{ display:inline-block; font-size:10.5px; font-weight:700; border-radius:999px; padding:1px 7px; vertical-align:1px; }
+  .tag.fx{ background:var(--fixed-tint); color:var(--fixed); }
+  .tag.dr{ background:var(--accent-tint); color:var(--accent); }
+
+  .person{ background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  .person + .person{ margin-top:-4px; }
+  .phead{
+    width:100%; background:none; border:0; padding:11px 13px; text-align:left; color:var(--text);
+    display:flex; align-items:center; gap:10px;
+  }
+  .pname{ flex:1; min-width:0; }
+  .pname b{ font-size:14.5px; font-weight:700; }
+  .pname div{ font-size:11.5px; color:var(--text-muted); margin-top:2px; }
+  .pmoney{ text-align:right; white-space:nowrap; }
+  .pmoney b{ font-size:16px; font-weight:700; }
+  .pmoney div{ font-size:11px; color:var(--text-muted); margin-top:2px; }
+  .caret{ color:var(--text-muted); font-size:11px; }
+  .pbody{ border-top:1px solid var(--line); padding:10px 13px 12px; background:var(--surface-2); }
+  .bk{ display:flex; justify-content:space-between; gap:10px; font-size:12.5px; padding:2px 0; }
+  .bk b{ font-weight:600; }
+  .bk.tot{ border-top:1px solid var(--line); margin-top:6px; padding-top:6px; font-size:13.5px; }
+  .daylist{ margin-top:8px; border-top:1px solid var(--line); padding-top:8px; display:flex; flex-direction:column; gap:5px; }
+  .day{ display:flex; align-items:baseline; gap:8px; font-size:12px; }
+  .day .d{ width:62px; color:var(--text-muted); flex:none; }
+  .day .t{ flex:1; }
+  .day .h{ width:46px; text-align:right; color:var(--text-muted); flex:none; }
+  .day .y{ width:62px; text-align:right; flex:none; }
+  .day.draft .y{ color:var(--accent); }
+  .empty{ color:var(--text-muted); font-size:12.5px; }
+  .note{ font-size:11.5px; color:var(--text-muted); line-height:1.6; }
+  .deny{ text-align:center; padding:28px 14px; }
+  .deny h2{ margin:0 0 6px; font-size:16px; }
+  .deny p{ margin:0; font-size:13px; color:var(--text-muted); line-height:1.7; }
+  .loading{ opacity:.45; pointer-events:none; }
+
+  /* 上のタブ（人件費／募集） */
+  .tabs{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .tabs button{
+    font-family:inherit; font-size:13.5px; font-weight:600; color:var(--text); cursor:pointer;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:10px; padding:9px 8px;
+  }
+  .tabs button[aria-pressed="true"]{ background:var(--accent-tint); border-color:var(--accent); color:var(--accent); }
+  .tabs .badge{
+    display:inline-block; min-width:18px; margin-left:5px; padding:0 5px; border-radius:999px;
+    background:var(--accent); color:var(--accent-ink); font-size:11px; font-weight:700;
+  }
+  .slot{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:11px 13px; margin-bottom:8px; }
+  .slot h3{ margin:0 0 2px; font-size:14.5px; }
+  .slot .sub{ font-size:11.5px; color:var(--text-muted); margin-bottom:8px; }
+  .appl{ display:flex; align-items:center; gap:8px; padding:5px 0; border-top:1px solid var(--line); }
+  .appl .n{ flex:1; min-width:0; font-size:13px; }
+  .appl .n small{ display:block; font-size:11px; color:var(--text-muted); }
+  .appl button{
+    font-family:inherit; font-size:12.5px; font-weight:600; color:var(--accent-ink);
+    background:var(--accent); border:0; border-radius:9px; padding:7px 13px; cursor:pointer;
+  }
+  .appl button:disabled{ background:var(--surface-2); color:var(--text-muted); }
+  .slot .stop{
+    font-family:inherit; font-size:11.5px; color:var(--text-muted); background:none; border:0;
+    padding:6px 0 0; cursor:pointer; text-decoration:underline;
+  }
+  .slot .done{ font-size:12px; color:var(--fixed); margin-top:4px; }
+  .slot .kind{
+    display:inline-block; margin-left:6px; padding:1px 7px; border-radius:999px; vertical-align:middle;
+    background:var(--accent-tint); color:var(--accent); font-size:10.5px; font-weight:700;
+  }
+  .appl .n b{ color:var(--accent); font-weight:700; }
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap">
+  <div class="card deny" id="deny" hidden>
+    <h2>この画面は店長だけが見られます</h2>
+    <p>LINEから開いてください。<br>それでも出ないときは、「LINEの持ち主」の登録を確かめてください。</p>
+  </div>
+
+  <div id="main" hidden>
+    <header>
+      <h1 id="pageTitle">人件費の概算</h1>
+      <p id="storeName"></p>
+    </header>
+
+    <div class="tabs">
+      <button type="button" id="tabPay" aria-pressed="true">人件費</button>
+      <button type="button" id="tabRec" aria-pressed="false">募集<span class="badge" id="recBadge" hidden></span></button>
+    </div>
+
+    <div id="recPane" hidden>
+      <div id="recList"></div>
+      <div class="note">「入れる」を押すと、その人が選んだ時間で、左のシフト時間入力表と右のシフト表の両方に入ります。
+        もう一度転写しても消えません。</div>
+    </div>
+
+    <div id="payPane">
+    <div class="months">
+      <button type="button" id="prev">◀</button>
+      <div class="now"><span id="ymLabel"></span><small id="rangeLabel"></small></div>
+      <button type="button" id="next">▶</button>
+    </div>
+
+    <div class="card">
+      <div class="sum-total"><span>合計（見込み）</span><b class="num" id="sumTotal">—</b></div>
+      <div class="sum-rows" id="sumRows"></div>
+    </div>
+
+    <div id="people"></div>
+
+    <div class="note" id="foot"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  var LINE_ID = <?!= lineIdJson ?>;
+  var DATA = <?!= dataJson ?>;
+  var REC = <?!= recruitJson ?>;
+  function el(id){ return document.getElementById(id); }
+  function yen(n){ return String(Math.round(n||0)).replace(/\B(?=(\d{3})+(?!\d))/g,','); }
+  function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  var open = {};                    // 内訳を開いている人
+
+  function render(){
+    if (!DATA || !DATA.ok){ el('deny').hidden = false; el('main').hidden = true; return; }
+    el('deny').hidden = true;
+    el('main').hidden = false;
+    el('storeName').textContent = DATA.storeName;
+    var y = DATA.ym.slice(0,4), m = Number(DATA.ym.slice(5,7));
+    el('ymLabel').textContent = y + '年' + m + '月〆';
+    el('rangeLabel').textContent = '社員 ' + DATA.closing.employee + '日締め／キャスト ' + DATA.closing.cast + '日締め';
+
+    var s = DATA.sum;
+    el('sumTotal').textContent = '¥' + yen(s.total);
+    el('sumRows').innerHTML =
+      row('<span class="tag fx">確定</span> ' + s.fixedDays + '日・' + s.fixedHours + '時間', '¥' + yen(s.fixedPay)) +
+      row('<span class="tag dr">作成中</span> ' + s.draftDays + '日・' + s.draftHours + '時間', '¥' + yen(s.draftPay)) +
+      (DATA.fareKind && DATA.fareKind !== 'なし' ? row('交通費（見込み）', '¥' + yen(s.fareAll)) : '') +
+      row('出勤のある人', s.people + '人');
+
+    el('people').innerHTML = DATA.people.map(personHtml).join('');
+    el('foot').innerHTML =
+      '休憩を引いた実働時間で計算しています。<br>' +
+      '<span class="tag fx">確定</span>＝公開ずみの週／<span class="tag dr">作成中</span>＝まだ公開していない週。<br>' +
+      (DATA.fareKind && DATA.fareKind !== 'なし'
+        ? '交通費は「' + esc(DATA.fareKind) + '」の決まりで、確定した出勤日数で付けています（合計は作成中まで入れた見込み）。<br>'
+        : '交通費は「なし」の設定です。<br>') +
+      '店長・社員は月給のため、交通費は入りません。<br>' +
+      'スタッフ区分シートに載っていない人は出しません。' +
+      ((DATA.unknown && DATA.unknown.length)
+        ? '<br><b>※出勤があるのに載っていない人が' + DATA.unknown.length + '人います（' +
+          DATA.unknown.map(function(u){ return esc(u.name) + ' ' + u.days + '日'; }).join('、') +
+          '）。時給が分からないので計算に入れていません。</b>'
+        : '');
+    bind();
+  }
+  function row(l, r){ return '<div class="sum-row"><span>' + l + '</span><b class="num">' + r + '</b></div>'; }
+
+  function personHtml(p, i){
+    var days = p.fixedDays + p.draftDays;
+    var sub = p.role + '　' + (p.wage ? '時給' + yen(p.wage) + '円' : '時給なし') +
+      '　' + days + '日・' + (Math.round((p.fixedHours + p.draftHours) * 10) / 10) + '時間';
+    var isOpen = !!open[p.name];
+    return '<div class="person">' +
+      '<button type="button" class="phead" data-i="' + i + '">' +
+      '<span class="pname"><b>' + esc(p.name) + '</b>' +
+      (p.draftDays ? ' <span class="tag dr">作成中あり</span>' : '') +
+      '<div>' + esc(sub) + '</div></span>' +
+      '<span class="pmoney"><b class="num">¥' + yen(p.total) + '</b>' +
+      '<div class="num">確定 ¥' + yen(p.fixedPay + p.fare) + '</div></span>' +
+      '<span class="caret">' + (isOpen ? '▲' : '▼') + '</span>' +
+      '</button>' +
+      (isOpen ? bodyHtml(p) : '') + '</div>';
+  }
+
+  function bodyHtml(p){
+    var h = '<div class="pbody">' +
+      '<div class="bk"><span>締め期間</span><b>' + esc(p.range) + '</b></div>' +
+      '<div class="bk"><span><span class="tag fx">確定</span> ' + p.fixedDays + '日・' + p.fixedHours + '時間</span>' +
+      '<b class="num">¥' + yen(p.fixedPay) + '</b></div>' +
+      (p.draftDays ? '<div class="bk"><span><span class="tag dr">作成中</span> ' + p.draftDays + '日・' + p.draftHours + '時間</span>' +
+        '<b class="num">¥' + yen(p.draftPay) + '</b></div>' : '') +
+      (p.employee ? '' :
+        '<div class="bk"><span>交通費（確定ぶん ' + p.fixedDays + '日）</span><b class="num">¥' + yen(p.fare) + '</b></div>' +
+        (p.fareAll !== p.fare ? '<div class="bk"><span>交通費（作成中まで入れると）</span><b class="num">¥' + yen(p.fareAll) + '</b></div>' : '')) +
+      '<div class="bk tot"><span>合計（見込み）</span><b class="num">¥' + yen(p.total) + '</b></div>';
+
+    if (!p.rows.length) return h + '<div class="daylist"><div class="empty">この期間の出勤はまだありません。</div></div></div>';
+    h += '<div class="daylist">' + p.rows.map(function(d){
+      var t = d.start && d.end ? d.start + '–' + d.end : '';
+      if (d.breakStart && d.breakEnd) t += '（休 ' + d.breakStart + '–' + d.breakEnd + '）';
+      return '<div class="day' + (d.fixed ? '' : ' draft') + '">' +
+        '<span class="d num">' + esc(d.label) + '(' + esc(d.dow) + ')</span>' +
+        '<span class="t num">' + esc(t) + '</span>' +
+        '<span class="h num">' + d.hours + 'h</span>' +
+        '<span class="y num">¥' + yen(d.pay) + '</span></div>';
+    }).join('') + '</div>';
+    return h + '</div>';
+  }
+
+  function bind(){
+    Array.prototype.forEach.call(document.querySelectorAll('.phead'), function(b){
+      b.addEventListener('click', function(){
+        var p = DATA.people[Number(b.getAttribute('data-i'))];
+        open[p.name] = !open[p.name];
+        el('people').innerHTML = DATA.people.map(personHtml).join('');
+        bind();
+      });
+    });
+  }
+
+  function load(ym){
+    el('wrap').className = 'wrap loading';
+    google.script.run
+      .withSuccessHandler(function(res){
+        el('wrap').className = 'wrap';
+        if (res && res.ok) { DATA = res; open = {}; render(); }
+      })
+      .withFailureHandler(function(){ el('wrap').className = 'wrap'; })
+      .bossPay(LINE_ID, ym);
+  }
+  function shiftMonth(step){
+    var y = Number(DATA.ym.slice(0,4)), m = Number(DATA.ym.slice(5,7)) + step;
+    if (m < 1) { m = 12; y--; }
+    if (m > 12) { m = 1; y++; }
+    load(y + '-' + ('0' + m).slice(-2));
+  }
+  /* ---- 募集と応募 ---- */
+  function waiting(){
+    return (REC && REC.slots ? REC.slots : []).reduce(function(n, s){ return n + s.applied.length; }, 0);
+  }
+  function drawRec(){
+    var slots = (REC && REC.slots) ? REC.slots : [];
+    var n = waiting();
+    el('recBadge').hidden = !n;
+    el('recBadge').textContent = n;
+    if (!slots.length) {
+      el('recList').innerHTML = '<div class="card"><div class="empty">いま募集している枠はありません。' +
+        '週シートの「足りないところを募集する」から出せます。</div></div>';
+      return;
+    }
+    el('recList').innerHTML = slots.map(function(s, i){
+      var list = (s.choices && s.choices.length) ? s.choices : [{ from: s.from, to: s.to }];
+      var times = list.map(function(c){ return esc(c.from) + '〜' + esc(c.to); }).join(' か ');
+      var head = '<div class="slot"><h3>' + esc(s.label) + '(' + esc(s.dow) + ') ' + times +
+        (s.stretch ? '<span class="kind">今いる人に頼む</span>' : '') + '</h3>' +
+        '<div class="sub">あと' + s.left + '人（' + s.people + '人のうち' + s.filled.length + '人決まり）' +
+        (s.stretch && s.targets.length ? '／声をかけた人：' + esc(s.targets.join('、')) : '') + '</div>';
+      var body = s.applied.length
+        ? s.applied.map(function(a, j){
+            return '<div class="appl"><span class="n">' + esc(a.name) +
+              (a.time ? ' <b>' + esc(a.time) + '</b>' : '') +
+              '<small>' + esc(a.at) + ' に「入れます」</small></span>' +
+              '<button type="button" data-i="' + i + '" data-j="' + j + '">入れる</button></div>';
+          }).join('')
+        : '<div class="appl"><span class="n" style="color:var(--text-muted);">まだ応募はありません</span></div>';
+      var done = s.filled.length ? '<div class="done">決まった人：' + esc(s.filled.join('、')) + '</div>' : '';
+      return head + body + done +
+        '<button type="button" class="stop" data-stop="' + i + '">この枠の募集をやめる</button></div>';
+    }).join('');
+    Array.prototype.forEach.call(el('recList').querySelectorAll('.appl button'), function(b){
+      b.addEventListener('click', function(){
+        var s = slots[Number(b.getAttribute('data-i'))];
+        var a = s.applied[Number(b.getAttribute('data-j'))];
+        b.disabled = true; b.textContent = '入れています…';
+        google.script.run
+          .withSuccessHandler(function(res){
+            if (res && res.ok) { reloadRec(); } else { b.disabled = false; b.textContent = '入れる'; alert(res && res.message); }
+          })
+          .withFailureHandler(function(e){ b.disabled = false; b.textContent = '入れる'; alert(e && e.message); })
+          .fillRecruit(LINE_ID, s.id, a.name, a.choice || '');
+      });
+    });
+    Array.prototype.forEach.call(el('recList').querySelectorAll('.stop'), function(b){
+      b.addEventListener('click', function(){
+        var s = slots[Number(b.getAttribute('data-stop'))];
+        b.disabled = true;
+        google.script.run
+          .withSuccessHandler(function(){ reloadRec(); })
+          .withFailureHandler(function(e){ b.disabled = false; alert(e && e.message); })
+          .closeRecruit(LINE_ID, s.id);
+      });
+    });
+  }
+  function reloadRec(){
+    google.script.run
+      .withSuccessHandler(function(res){ if (res && res.ok) { REC = res; drawRec(); } })
+      .withFailureHandler(function(){})
+      .bossRecruits(LINE_ID);
+  }
+  function showTab(which){
+    var rec = which === 'rec';
+    el('tabPay').setAttribute('aria-pressed', rec ? 'false' : 'true');
+    el('tabRec').setAttribute('aria-pressed', rec ? 'true' : 'false');
+    el('payPane').hidden = rec;
+    el('recPane').hidden = !rec;
+    el('pageTitle').textContent = rec ? '足りないところの募集' : '人件費の概算';
+  }
+  el('tabPay').addEventListener('click', function(){ showTab('pay'); });
+  el('tabRec').addEventListener('click', function(){ showTab('rec'); });
+
+  el('prev').addEventListener('click', function(){ shiftMonth(-1); });
+  el('next').addEventListener('click', function(){ shiftMonth(1); });
+  render();
+  drawRec();
+</script>
+</body>
+</html>

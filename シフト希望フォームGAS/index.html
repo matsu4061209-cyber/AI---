@@ -15,6 +15,7 @@
     --accent:#E8501C;
     --accent-ink:#FFFFFF;
     --accent-tint:#FBE4D8;
+    --want:#D93025; --want-tint:#FDECEA; --want-text:#A0231A;
     --ok:#2F7D5E;
     --ok-bg:#E4F1EA;
     --sun-holiday:#C8333F;
@@ -29,6 +30,7 @@
       --bg:#181715; --surface:#221F1C; --surface-2:#2A2723;
       --text:#F3F1EC; --text-muted:#A8A39A; --line:#3A362F;
       --accent:#FF7043; --accent-ink:#1A0E08; --accent-tint:#3A2418;
+      --want:#F2544B; --want-tint:#3A1D1A; --want-text:#FFB4AE;
       --ok:#57BB8E; --ok-bg:#1E3128;
       --sun-holiday:#E5707A; --sat:#6FA3D8;
       --clear-bg:#3A2420; --clear-border:#6B392E; --clear-text:#E5897A;
@@ -115,6 +117,7 @@
   .grid-table th.dow-sat{ color:var(--sat); }
   .grid-table th.dow-sun{ color:var(--sun-holiday); }
   .grid-cell{
+    position:relative;
     width:100%; min-height:44px; border-radius:7px; border:1px solid var(--line);
     background:var(--surface); cursor:pointer; padding:3px 1px;
     display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px;
@@ -144,6 +147,21 @@
   .totals-main b small{ font-family:"Noto Sans JP",sans-serif; font-size:12px; font-weight:500; margin-left:2px; color:var(--text-muted); }
   .totals-periods{ display:flex; align-items:baseline; gap:6px 16px; flex-wrap:wrap; justify-content:flex-end; }
   .totals-period{ font-size:13px; color:var(--text-muted); white-space:nowrap; }
+  /* 合計の下に出す、希望ぶんの金額の目安 */
+  .totals-pay{ display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .totals-pay .t-label{ font-size:12.5px; color:var(--text-muted); margin-right:auto; }
+  .totals-pay .totals-period b{
+    font-family:"Barlow Condensed","Noto Sans JP",sans-serif; font-weight:700; font-size:15px;
+    font-variant-numeric:tabular-nums; color:var(--text);
+  }
+  .totals-note{ font-size:11.5px; color:var(--text-muted); margin-top:-2px; line-height:1.5; }
+  /* 「目安金額を見る」の小さなボタン。ふだんは金額を出さない（人に画面を見せる時に気まずくないように） */
+  .pay-toggle{
+    font-family:inherit; font-size:12px; color:var(--text-muted); cursor:pointer;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:999px;
+    padding:4px 10px; align-self:flex-start;
+  }
+  .pay-toggle[aria-pressed="true"]{ background:var(--accent-tint); border-color:var(--accent); color:var(--accent); }
   .confirm-total .totals-periods{ justify-content:center; margin-top:4px; }
   .confirm-total .totals-period b small{ display:inline; font-size:12px; margin:0 0 0 1px; }
 
@@ -168,7 +186,14 @@
     background:var(--clear-bg); border-color:var(--clear-border); color:var(--clear-text);
   }
 
-  .week-notes{ display:flex; flex-direction:column; gap:10px; margin-block-start:20px; }
+  .week-notes{ display:flex; flex-direction:column; gap:10px; margin-block-start:26px; }
+  /* 上の時間の欄と地続きに見えると「時間の続き」と間違えるので、線と見出しで区切る */
+  .notes-sep{ display:flex; align-items:center; gap:10px; margin-block-end:2px; }
+  .notes-sep::before, .notes-sep::after{ content:''; flex:1; height:1px; background:var(--line); }
+  .notes-sep span{
+    font-size:13px; font-weight:600; color:var(--text); white-space:nowrap;
+    background:var(--accent-tint); border-radius:999px; padding:4px 12px;
+  }
   .week-note-row{ display:flex; flex-direction:column; gap:6px; }
   .week-note-row[hidden]{ display:none; }
   .week-note-row label{ font-size:12.5px; color:var(--text-muted); }
@@ -210,6 +235,45 @@
 
   .submit-bar{ padding-block:16px 4px; margin-block-start:22px; display:flex; flex-direction:column; gap:10px; }
   .is-loading{ opacity:.45; pointer-events:none; }
+  /* 足りないところの募集。自分の希望の上に赤い帯を重ねる */
+  .grid-cell .want{
+    position:absolute; left:3px; right:3px; bottom:2px; height:5px; border-radius:3px;
+    background:var(--want);
+  }
+  .want-box{
+    background:var(--want-tint); border:1px solid var(--want); border-radius:11px;
+    padding:11px 13px; margin-block-start:14px; display:flex; flex-direction:column; gap:8px;
+  }
+  .want-box h3{ margin:0; font-size:13.5px; color:var(--want-text); }
+  .want-row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .want-row .w{ flex:1; min-width:0; font-size:13px; }
+  .want-row .w small{ display:block; font-size:11.5px; color:var(--text-muted); }
+  .want-row button{
+    font-family:inherit; font-size:12.5px; font-weight:600; color:var(--accent-ink);
+    background:var(--want); border:0; border-radius:9px; padding:8px 14px; cursor:pointer;
+  }
+  .want-row button:disabled{ background:var(--surface-2); color:var(--text-muted); cursor:default; }
+  /* 1つの枠（時間の候補がいくつか並ぶことがある） */
+  .want-item{ border-top:1px solid var(--want); padding-top:9px; }
+  .want-item:first-child{ border-top:0; padding-top:0; }
+  .want-item .w{ font-size:13px; font-weight:600; }
+  .want-item .w small{ display:block; font-weight:400; font-size:11.5px; color:var(--text-muted); }
+  .want-picks{ display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+  .want-picks button{
+    font-family:inherit; font-size:12.5px; font-weight:600; color:var(--accent-ink);
+    background:var(--want); border:0; border-radius:9px; padding:8px 13px; cursor:pointer;
+  }
+  .want-picks button:disabled{ background:var(--surface-2); color:var(--text-muted); cursor:default; }
+  .want-item .mine{ margin-top:7px; font-size:12.5px; font-weight:600; color:var(--want-text); }
+
+  /* 締切後の「見るだけ」。自分の希望は見えるが、触れない */
+  body.readonly .grid-table, body.readonly .time-panel,
+  body.readonly .note-chips, body.readonly .week-note-row textarea{ pointer-events:none; opacity:.72; }
+  body.readonly .grid-cell{ cursor:default; }
+  .readonly-note{
+    background:var(--clear-bg); border:1px solid var(--clear-border); color:var(--clear-text);
+    border-radius:10px; padding:10px 12px; font-size:13px; line-height:1.6; margin-block-start:8px;
+  }
   .deadline.past b{ color:var(--clear-text); }
   .send-error{
     background:var(--clear-bg); border:1px solid var(--clear-border); color:var(--clear-text);
@@ -294,6 +358,22 @@
         <span class="t-label" id="totalsLabel">合計（参考）</span>
         <b id="totalDays">0<small>日</small></b>
         <span class="totals-periods" id="totalsPeriods" hidden></span>
+      </div>
+      <button type="button" class="pay-toggle" id="payToggle" aria-pressed="false" hidden>目安金額を見る</button>
+      <div class="totals-pay" id="totalsPay" hidden>
+        <span class="t-label">希望ぶんの目安</span>
+        <span class="totals-periods" id="totalsPayPeriods"></span>
+      </div>
+      <div class="totals-note" id="totalsNote" hidden></div>
+    </div>
+
+    <div class="readonly-note" id="readonlyNote" hidden></div>
+
+    <div class="want-box" id="wantBox" hidden>
+      <h3 id="wantTitle">人が足りない時間です。入れそうならお願いします</h3>
+      <div id="wantList"></div>
+      <div class="note" id="wantNote" style="font-size:11.5px;color:var(--text-muted);">
+        押しても、その場では決まりません。店長が見て決めます。
       </div>
     </div>
 
@@ -443,22 +523,29 @@
     return out;
   }
 
-  // 時と分(00/30)を分けて選ぶ。出勤は9時〜19時台、退勤は12時〜21:30
-  var START_HOURS = CONFIG.startHours;
-  var END_HOURS = CONFIG.endHours;
+  // 時と分(00/30)を分けて選ぶ。選べる幅は店舗ごとの設定から来る（分で持つ）
+  var TIME_RANGE = CONFIG.timeRange;
+
+  function rangeOf(isEnd){ return isEnd ? TIME_RANGE.end : TIME_RANGE.start; }
 
   function hourOptions(isEnd, selectedHour){
-    var range = isEnd ? END_HOURS : START_HOURS;
+    var r = rangeOf(isEnd);
     var out = '';
-    for (var h = range.first; h <= range.last; h++){
+    for (var h = Math.floor(r.from / 60); h <= Math.floor(r.to / 60); h++){
       out += '<option value="' + h + '"' + (h === selectedHour ? ' selected' : '') + '>' + h + '時</option>';
     }
     return out;
   }
 
-  // 退勤の21時は21:30だけ（21:00はなし）
+  // ふだんは00分と30分。幅の端（いちばん早い・いちばん遅い）だけは、15分・45分もそのまま出す
   function minuteOptions(isEnd, hour, selectedMinute){
-    var mins = (isEnd && hour === END_HOURS.last) ? ['30'] : ['00', '30'];
+    var r = rangeOf(isEnd);
+    var mins = ['00', '15', '30', '45'].filter(function(m){
+      var v = hour * 60 + Number(m);
+      if (v < r.from || v > r.to) return false;
+      return Number(m) % 30 === 0 || v === r.from || v === r.to;
+    });
+    if (!mins.length) mins = ['00'];
     return mins.map(function(m){
       return '<option value="' + m + '"' + (m === selectedMinute ? ' selected' : '') + '>' + m + '分</option>';
     }).join('');
@@ -501,7 +588,7 @@
   // 締め期間（店長・社員は16日〜翌15日、キャストは21日〜翌20日など）。名前を選ぶと Code.js から受け取る。
   // fixedDays は表に無い日（募集より前の決まっているシフト）の出勤日数、days は締め期間ぜんぶの日数。
   // SHOW_OFF が true（店長・社員）なら休日日数＝締め期間の日数−出勤日数を出す
-  var PERIODS = [], SHOW_OFF = false;
+  var PERIODS = [], SHOW_OFF = false, PAY_CAP_MIN = 0;
   function workDays(p){
     var days = p.fixedDays;
     Object.keys(assigned).forEach(function(key){
@@ -513,6 +600,40 @@
   }
   function totalsLabelText(){
     return PERIODS.length ? (SHOW_OFF ? '休日合計（参考）' : '出勤合計（参考）') : '合計（参考）';
+  }
+
+  /* ---- 希望ぶんの金額の目安 ---- */
+  // 1日は PAY_CAP_MIN（ふつう8時間）まで。決まっている日は出勤履歴の実働時間をそのまま足す
+  function workHours(p){
+    var minutes = 0;
+    Object.keys(assigned).forEach(function(key){
+      var k = key.split('-').map(Number);
+      var ymd = weeks[k[0]].days[k[1]].ymd;
+      if (ymd < p.start || ymd > p.end) return;
+      var m = toMinutes(assigned[key].e) - toMinutes(assigned[key].s);
+      minutes += (PAY_CAP_MIN > 0 && m > PAY_CAP_MIN) ? PAY_CAP_MIN : m;
+    });
+    return (p.fixedHours || 0) + minutes / 60;
+  }
+  function yen(n){
+    return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  // 金額を出せる相手か（サーバーが時給をくれたか）
+  function canShowPay(){
+    return !SHOW_OFF && PERIODS.some(function(p){ return Number(p.wage) > 0; });
+  }
+  // 実際に出すのは、本人が「目安金額を見る」を押したときだけ。開き直すとまた隠れる
+  var payShown = false;
+  function showPay(){ return canShowPay() && payShown; }
+  function payRowsHtml(){
+    return PERIODS.map(function(p){
+      var pay = Number(p.wage) > 0 ? '約' + yen(Number(p.wage) * workHours(p)) + '円' : '—';
+      return '<span class="totals-period">' + escapeHtml(p.label) + ' <b>' + pay + '</b></span>';
+    }).join('');
+  }
+  function payNoteText(){
+    var cap = PAY_CAP_MIN / 60;
+    return '休憩を引いていない、おおよその目安です（1日' + cap + '時間まで／すでに決まっている日を含む／交通費は入っていません）。';
   }
   // 例：「10月20日〆 22日」「11月20日〆 5日」
   function periodRowsHtml(){
@@ -599,6 +720,9 @@
   var assigned = {};          // "w-d" -> {s,e}
   var pending = new Set();    // "w-d" 選択中（まだ時間を確定していない）
   var dirtyWeeks = new Set(); // 内容を変えた週（送信の時、この週だけシフト表に書き込む）
+  // 足りないところの募集。マスの赤い帯（refreshCell）でも使うので、マスを作る前に入れておく
+  var RECRUITS = (CONFIG.recruits || []).slice();
+  var WANTS = {};             // 日付 -> その日の募集（drawWants で入れ直す）
 
   var gridTable = document.getElementById('gridTable');
   function buildGrid(){
@@ -612,6 +736,7 @@
         var dateCls = d === 5 ? 'dow-sat' : ((d === 6 || isHoliday(day.m, day.d)) ? 'dow-sun' : '');
         return '<td><button type="button" class="grid-cell" data-w="' + w + '" data-d="' + d + '">' +
           '<span class="g-date ' + dateCls + '">' + day.m + '/' + day.d + '</span><span class="g-time"></span>' +
+          '<span class="want" hidden></span>' +
           '</button></td>';
       }).join('');
       return '<tr>' + cells + '</tr>';
@@ -635,18 +760,31 @@
       timeEl.textContent = '';
     }
     btn.setAttribute('data-pending', pending.has(key) ? 'true' : 'false');
+    btn.querySelector('.want').hidden = !(WANTS[weeks[w].days[d].ymd] || []).length;
   }
   weeks.forEach(function(week, w){ week.days.forEach(function(day, d){ refreshCell(w, d); }); });
 
   function refreshSelectionUI(){
     var n = pending.size;
-    document.getElementById('confirmBtn').disabled = n === 0;
-    document.getElementById('clearBtn').disabled = n === 0;
+    document.getElementById('confirmBtn').disabled = CONFIG.readOnly || n === 0;
+    document.getElementById('clearBtn').disabled = CONFIG.readOnly || n === 0;
     document.getElementById('selectionNote').innerHTML = n === 0
       ? SELECTION_HINT
       : '<b>' + n + 'マス</b>選択中。下の時間を選んで確定してください';
   }
   refreshSelectionUI();
+  drawWants();
+
+  // 締切を過ぎたあと、次の募集が始まるまでは「見るだけ」にする
+  if (CONFIG.readOnly) {
+    document.body.classList.add('readonly');
+    document.getElementById('sendBtn').disabled = true;
+    document.getElementById('sendBtn').textContent = '締切を過ぎています';
+    var ro = document.getElementById('readonlyNote');
+    ro.textContent = '締切を過ぎたので、いまは見るだけです。出した希望はそのまま残っています。'
+      + '次の募集のお知らせがLINEに届いたら、新しい期間の入力ができるようになります。';
+    ro.hidden = false;
+  }
 
   function refreshTotals(){
     var byPeriod = PERIODS.length > 0;   // 名前の読み込みが済んだら、締め期間ごとの日数にする
@@ -656,8 +794,25 @@
     daysEl.innerHTML = sumAssigned().days + '<small>日</small>';
     document.getElementById('totalsPeriods').hidden = !byPeriod;
     document.getElementById('totalsPeriods').innerHTML = periodRowsHtml();
+    var canPay = byPeriod && canShowPay();
+    var toggle = document.getElementById('payToggle');
+    toggle.hidden = !canPay;
+    toggle.setAttribute('aria-pressed', payShown ? 'true' : 'false');
+    toggle.textContent = payShown ? '目安金額を隠す' : '目安金額を見る';
+    var pay = canPay && payShown;
+    document.getElementById('totalsPay').hidden = !pay;
+    document.getElementById('totalsNote').hidden = !pay;
+    if (pay) {
+      document.getElementById('totalsPayPeriods').innerHTML = payRowsHtml();
+      document.getElementById('totalsNote').textContent = payNoteText();
+    }
   }
   refreshTotals();
+
+  document.getElementById('payToggle').addEventListener('click', function(){
+    payShown = !payShown;
+    refreshTotals();
+  });
 
   gridTable.addEventListener('click', function(e){
     var btn = e.target.closest('.grid-cell');
@@ -669,8 +824,10 @@
     refreshSelectionUI();
   });
 
-  setupTimePicker('gStart', false, 9, '00');
-  setupTimePicker('gEnd', true, 21, '30');
+  // 開いたときは「出勤のいちばん早い時間 〜 退勤のいちばん遅い時間」を出す
+  function mmOf(v){ return ('0' + (v % 60)).slice(-2); }
+  setupTimePicker('gStart', false, Math.floor(TIME_RANGE.start.from / 60), mmOf(TIME_RANGE.start.from));
+  setupTimePicker('gEnd', true, Math.floor(TIME_RANGE.end.to / 60), mmOf(TIME_RANGE.end.to));
 
   // 確定・未回答に戻すの後は、選択を解除した状態に戻す
   function applyToPending(action){
@@ -701,6 +858,89 @@
     applyToPending(function(key){ delete assigned[key]; });
   });
 
+  /* ---- 足りないところの募集 ---- */
+  // RECRUITS と WANTS は、上（マスを作るところ）で用意している
+  function indexWants(){
+    WANTS = {};
+    RECRUITS.forEach(function(r){
+      if (r.left <= 0) return;
+      if (!WANTS[r.ymd]) WANTS[r.ymd] = [];
+      WANTS[r.ymd].push(r);
+    });
+  }
+  function dayLabelOf(ymd){
+    for (var w = 0; w < weeks.length; w++) {
+      for (var d = 0; d < 7; d++) {
+        if (weeks[w].days[d].ymd === ymd) return weeks[w].days[d].m + '/' + weeks[w].days[d].d + '(' + DOW[d] + ')';
+      }
+    }
+    return ymd;
+  }
+  // 枠の候補を「16:00〜21:15」の形にする
+  function choicesOf(r){
+    var list = (r.choices && r.choices.length) ? r.choices : [{ from: r.from, to: r.to, text: r.from + '-' + r.to }];
+    return list.map(function(c){
+      return { from: c.from, to: c.to, text: c.text || (c.from + '-' + c.to) };
+    });
+  }
+  function drawWants(){
+    indexWants();
+    var open = RECRUITS.filter(function(r){ return r.left > 0; });
+    var onlyStretch = open.length && open.every(function(r){ return r.stretch; });
+    document.getElementById('wantBox').hidden = !open.length;
+    document.getElementById('wantTitle').textContent = onlyStretch
+      ? 'もう少し長く入れませんか？'
+      : '人が足りない時間です。入れそうならお願いします';
+    document.getElementById('wantList').innerHTML = open.map(function(r, i){
+      var list = choicesOf(r);
+      var head = r.stretch
+        ? (list.length > 1 ? 'この時間のどれかで入れませんか？' : 'この時間で入れませんか？')
+        : (list.length > 1 ? 'どの時間でも大丈夫です' : '');
+      var picks = r.mine
+        ? '<div class="mine">「入れます」を送りました' +
+            (r.myChoice ? '（' + escapeHtml(r.myChoice.replace('-', '〜')) + '）' : '') + '</div>'
+        : '<div class="want-picks">' + list.map(function(c, k){
+            return '<button type="button" data-i="' + i + '" data-c="' + k + '">' +
+              escapeHtml(c.from) + '〜' + escapeHtml(c.to) + (r.stretch ? ' にします' : ' で入れます') + '</button>';
+          }).join('') + '</div>';
+      return '<div class="want-item">' +
+        '<span class="w">' + escapeHtml(dayLabelOf(r.ymd)) +
+        (head ? ' <small>' + escapeHtml(head) + '</small>' : '') +
+        '<small>あと' + r.left + '人' + (r.applied ? '／' + r.applied + '人が「入れます」を押しています' : '') + '</small></span>' +
+        picks + '</div>';
+    }).join('');
+    Array.prototype.forEach.call(document.querySelectorAll('#wantList button'), function(b){
+      b.addEventListener('click', function(){
+        var r = open[Number(b.getAttribute('data-i'))];
+        sendApply(r, choicesOf(r)[Number(b.getAttribute('data-c'))], b);
+      });
+    });
+    weeks.forEach(function(week, w){ week.days.forEach(function(day, d){ refreshCell(w, d); }); });
+  }
+  function sendApply(r, pick, btn){
+    var name = document.getElementById('staffNameDisplay').textContent;
+    if (!name) return;
+    var back = btn.textContent;
+    Array.prototype.forEach.call(btn.parentNode.querySelectorAll('button'), function(b){ b.disabled = true; });
+    btn.textContent = '送っています…';
+    deviceInfo().then(function(info){
+      google.script.run
+        .withSuccessHandler(function(){
+          r.mine = true;
+          r.myChoice = pick.text;
+          r.applied = r.applied + 1;
+          drawWants();
+        })
+        .withFailureHandler(function(e){
+          Array.prototype.forEach.call(btn.parentNode.querySelectorAll('button'), function(b){ b.disabled = false; });
+          btn.textContent = back;
+          alert(gasMessage(e));
+        })
+        .applyRecruit({ id: r.id, name: name, choice: pick.text,
+          deviceId: info.deviceId, ip: info.ip, model: info.model, ua: info.ua });
+    });
+  }
+
   /* ---- 週ごとの備考 ---- */
   // 備考で選べる項目（1週につき1つ）。選択に加えて、下の欄に手入力・音声入力もできる
   var NOTE_CHOICES = CONFIG.noteChoices;
@@ -708,7 +948,8 @@
   // 週をタブで選び、下の欄はひとつだけ出す（週ごとの欄は中に残してあるので、送る内容は今までどおり）
   var weekNotesEl = document.getElementById('weekNotes');
   weekNotesEl.innerHTML =
-    '<div class="notes-hint">備考(任意)　週を選んで、当てはまる項目を1つタップ（もう一度押すと解除）。文字の欄は、キーボードのマイクボタンを押すと話して入力できます。</div>' +
+    '<div class="notes-sep"><span>ここからは備考（任意）です</span></div>' +
+    '<div class="notes-hint">時間の入力とは別のものです。伝えたいことがある週だけ、週を選んで当てはまる項目を1つタップ（もう一度押すと解除）。文字の欄は、キーボードのマイクボタンを押すと話して入力できます。</div>' +
     '<div class="note-tabs" id="noteTabs">' + weeks.map(function(week, w){
       return '<button type="button" class="note-tab" data-w="' + w + '" aria-pressed="' + (w === 0 ? 'true' : 'false') + '">' +
         week.label + '<small>' + week.range + '</small></button>';
@@ -793,6 +1034,7 @@
     assigned = {};
     PERIODS = [];
     SHOW_OFF = false;
+    payShown = false;                 // 名前を選び直したら、金額はまた隠す
     pending.clear();
     dirtyWeeks.clear();
     weeks.forEach(function(week, w){
@@ -819,6 +1061,8 @@
           if (loadedName !== name) return; // 読み込み中に名前を変えた場合は使わない
           PERIODS = (res.totals && res.totals.periods) || [];
           SHOW_OFF = !!(res.totals && res.totals.showOff);
+          PAY_CAP_MIN = Number((res.totals && res.totals.capHours) || 0) * 60;
+          if (res.recruits) { RECRUITS = res.recruits; drawWants(); }   // 自分が応募ずみかが分かる
           res.weeks.forEach(function(week, w){
             Object.keys(week.shifts).forEach(function(d){
               assigned[cellKey(w, d)] = week.shifts[d];
@@ -837,7 +1081,7 @@
           document.getElementById('selectionNote').innerHTML =
             '<span class="warn">' + escapeHtml('読み込めませんでした。' + gasMessage(err)) + '</span>';
         })
-        .getMyRequests({ name: name, deviceId: info.deviceId, startDate: CONFIG.startDate });
+        .getMyRequests({ name: name, deviceId: info.deviceId, startDate: CONFIG.startDate, lineId: LINE_ID });
     });
   }
 
@@ -901,7 +1145,10 @@
       lines.map(escapeHtml).join('<br>') + '<br>' +
       '内容を変えたいときは、直してもう一度送信してください。</p>' +
       '<div class="confirm-total">' + totalsLabelText() +
-      (PERIODS.length ? '<div class="totals-periods">' + periodRowsHtml() + '</div>' : ' <b>' + all.days + '日</b>') + '</div>';
+      (PERIODS.length ? '<div class="totals-periods">' + periodRowsHtml() + '</div>' : ' <b>' + all.days + '日</b>') +
+      (PERIODS.length && showPay()
+        ? '<div class="totals-periods">' + payRowsHtml() + '</div><div class="totals-note">' + escapeHtml(payNoteText()) + '</div>'
+        : '') + '</div>';
 
     weeks.forEach(function(week, w){
       var t = sumAssigned(w);

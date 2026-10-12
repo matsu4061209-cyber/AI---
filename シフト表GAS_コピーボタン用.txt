@@ -198,29 +198,42 @@ function positionNamesForMenu_() {
 function onOpen() {
   var ui = SpreadsheetApp.getUi();
   var posNames = positionNamesForMenu_();
+  // 上から「毎週やること」→「月ごと」→「設定のまとまり」の順。
+  // ふだん使わないものは下のまとまりに入れて、毎週使うものを探しやすくする
   ui.createMenu('スタッフ管理')
-    .addItem('スタッフを追加', 'addStaffMember')
-    .addItem('スタッフを削除', 'removeStaffMember')
-    .addItem('時間を固定するスタッフを設定', 'setProtectedStaff')
-    .addItem('店長・社員を設定', 'setStaffRoles')
-    .addSeparator()
-    .addItem('シフト希望の募集設定', 'openShiftRequestSettings')
-    .addSeparator()
-    .addItem('月次集計を開く', 'openMonthlySummary')
-    .addItem('売上予算を入れ直す', 'refreshWeekBudgets')
-    .addItem('目安人数を開く', 'openTargetSheet')
+    // ----- 毎週のシフト作り -----
+    .addItem('決まりを点検する（未成年・休憩）', 'checkWeekLawNow')
+    .addItem('足りないところを募集する', 'openRecruit')
     .addItem('目安人数を週シートに入れ直す', 'refreshWeekTargets')
-    .addItem('目安を人数で表示する（終わった週も）', 'switchTargetsToHeadcount')
     .addSeparator()
-    .addItem('調整前として記録する（いまを基準にする）', 'recordBeforeAdjust')
+    // ----- できたシフトを知らせる -----
+    .addItem('お試し公開（スタッフには送らない）', 'publishWeekTest')
     .addItem('確定する（スタッフに公開・お知らせ）', 'confirmAdjust')
     .addItem('もう一度知らせる（PDFを作り直す）', 'publishWeekAgain')
     .addSeparator()
-    .addItem('決まりを点検する（未成年・休憩）', 'checkWeekLawNow')
-    .addItem('スタッフの生年月日', 'openMinorSettings')
-    .addItem('時給と交通費の設定', 'openWageSettings')
-    .addItem('お試し公開（スタッフには送らない）', 'publishWeekTest')
-    .addItem('色を塗り直す（掃除）', 'refreshWeekColors')
+    // ----- 月ごと -----
+    .addItem('月次集計を開く', 'openMonthlySummary')
+    .addItem('毎月のおしらせ', 'openMonthlyNotice')
+    .addItem('古い週を書庫へ移す', 'archiveOldWeeks')
+    .addSeparator()
+    // ----- まとまり（ふだんは開かない設定） -----
+    .addSubMenu(ui.createMenu('スタッフの設定')
+      .addItem('スタッフを追加', 'addStaffMember')
+      .addItem('スタッフを削除', 'removeStaffMember')
+      .addSeparator()
+      .addItem('店長・社員を設定', 'setStaffRoles')
+      .addItem('時間を固定するスタッフを設定', 'setProtectedStaff')
+      .addSeparator()
+      .addItem('スタッフの生年月日', 'openMinorSettings')
+      .addItem('時給と交通費の設定', 'openWageSettings'))
+    .addSubMenu(ui.createMenu('目安人数と売上予算')
+      .addItem('目安人数を開く', 'openTargetSheet')
+      .addItem('売上予算を入れ直す', 'refreshWeekBudgets'))
+    .addSubMenu(ui.createMenu('シフト希望とお知らせ')
+      .addItem('シフト希望の募集設定', 'openShiftRequestSettings')
+      .addItem('お知らせの文面・日程', 'openNoticeSettings')
+      .addSeparator()
+      .addItem('毎月のおしらせをお試しで送る（スタッフには送りません）', 'sendMonthlyNoticeTest'))
     .addSubMenu(ui.createMenu('ポジション色分け')
       .addItem('色分けを始める（このシート）', 'unlockPositionColors')
       .addSeparator()
@@ -236,17 +249,16 @@ function onOpen() {
       .addItem('すべての週シートにボタンを置く', 'placePositionButtonsAllWeeks')
       .addItem('ボタンを消す', 'clearPositionButtons')
       .addItem('色分けをやめる（元に戻す）', 'relockPositionColors'))
-    .addSeparator()
-    .addItem('LINE通知の設定', 'openLineSettings')
-    .addItem('お知らせの文面・日程', 'openNoticeSettings')
-    .addItem('毎月のおしらせ', 'openMonthlyNotice')
-    .addItem('毎月のおしらせをお試しで送る（スタッフには送りません）', 'sendMonthlyNoticeTest')
-    .addItem('LINEログインの設定', 'openLiffSettings')
-    .addItem('自動でシート作成・お知らせを始める', 'startShiftAutomation')
-    .addItem('自動を止める', 'stopShiftAutomation')
-    .addItem('今すぐ点検する', 'runShiftCheckNow')
-    .addItem('出勤履歴を作り直す', 'rebuildAttendanceHistory')
-    .addItem('古い週を書庫へ移す', 'archiveOldWeeks')
+    .addItem('お店のはじめ方（新しい店舗）', 'openStoreSetup')
+    .addSubMenu(ui.createMenu('LINEのつなぎこみ')
+      .addItem('LINE通知の設定（はじめて入れる・入れ替える）', 'openLineSettings')
+      .addItem('LINEログインの設定（はじめて入れる・入れ替える）', 'openLiffSettings'))
+    .addSubMenu(ui.createMenu('困ったとき・やり直し')
+      .addItem('色を塗り直す（臨時用）', 'refreshWeekColors')
+      .addItem('出勤履歴を作り直す（臨時用）', 'rebuildAttendanceHistory')
+      .addSeparator()
+      .addItem('自動でシート作成・お知らせを再開する', 'startShiftAutomation')
+      .addItem('自動を止める（臨時用）', 'stopShiftAutomation'))
     .addToUi();
 }
 
@@ -608,7 +620,39 @@ var REQUEST_PENDING_HEADER_ROW = 8;
 var REQUEST_PENDING_FIRST_ROW = 9;   // まだ週シートが無い週の希望
 var REQUEST_PENDING_COLS = 19;       // シート名・名前・時間14・備考・送信日時・端末ID
 var REQUEST_INPUT_COLS = 15;         // 週シートのB〜P列
-var REQUEST_FORM_URL = 'https://script.google.com/macros/s/AKfycbwFtgsWnq75UnttAODig9q3c89E1Iek0Oow-lV8tHzF_Zp5qBQe2DXPahAeksqkd4i2/exec';
+/* ----- お店ごとに変わる2つ。設定シートに入っていればそれを使う -----
+   新しいお店では、メニュー「お店のはじめ方」から入れてもらう。
+   設定が空のときは、下の初期値（飯塚店）のまま動く＝今までの店はそのまま。   */
+// 下の初期値（REQUEST_FORM_URL_DEFAULT・RECORD_SPREADSHEET_ID_DEFAULT）の持ち主のファイル。
+// コピーして作った別のお店では、この初期値は「よそのお店の値」なので、必ず入れ替えてもらう
+var HOME_SHIFT_SPREADSHEET_ID = '1WXZ-hOSbPC4h7Atg75hnGp2Z3KLOggS6vTbE0SAj850';
+var STORE_FORM_URL_CELL = 'E46';      // このお店のシフト希望ページのアドレス
+var STORE_RECORD_ID_CELL = 'E47';     // このお店のアクセス記録ファイルのID
+var REQUEST_FORM_URL_DEFAULT = 'https://script.google.com/macros/s/AKfycbwFtgsWnq75UnttAODig9q3c89E1Iek0Oow-lV8tHzF_Zp5qBQe2DXPahAeksqkd4i2/exec';
+var STORE_SETUP_CACHE = {};           // 1回の実行の中では読み直さない
+
+function storeSetting_(cell, pattern, fallback) {
+  if (STORE_SETUP_CACHE[cell] === undefined) {
+    var text = '';
+    try {
+      text = String(SpreadsheetApp.getActiveSpreadsheet().getSheetByName(REQUEST_SETTINGS_SHEET)
+        .getRange(cell).getDisplayValue()).trim();
+    } catch (err) { text = ''; }
+    STORE_SETUP_CACHE[cell] = pattern.test(text) ? text : fallback;
+  }
+  return STORE_SETUP_CACHE[cell];
+}
+
+// このお店のシフト希望ページのアドレス
+function requestFormUrl_() {
+  return storeSetting_(STORE_FORM_URL_CELL,
+    /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/, REQUEST_FORM_URL_DEFAULT);
+}
+
+// このお店のアクセス記録ファイルのID
+function recordSpreadsheetId_() {
+  return storeSetting_(STORE_RECORD_ID_CELL, /^[A-Za-z0-9_-]{30,}$/, RECORD_SPREADSHEET_ID_DEFAULT);
+}
 var DOW_JP = ['日', '月', '火', '水', '木', '金', '土'];
 
 // 募集期間の決まり。B3:B5＝今回だけ手で決めた期間（空なら自動）、E3:E5＝基本設定（店舗ごとの決まり）
@@ -617,7 +661,13 @@ var REQUEST_BASE_WEEKS_CELL = 'E4';     // スタッフ入力締切＝募集が�
 var REQUEST_BASE_TIME_CELL = 'E5';      // 締切の時刻
 var REQUEST_STORE_NAME_CELL = 'E6';     // 店舗名（見出しなどに使う）
 var REQUEST_CAST_CLOSING_CELL = 'E7';   // キャストの締め日（月次集計に使う）
-var REQUEST_DEFAULT_BASE = { closingDay: 15, deadlineWeeks: 2, deadlineTime: '23:59', castClosingDay: 20 };
+// スタッフがフォームで選べる時間の幅。店舗ごとに営業時間が違うので設定で変えられる
+var REQUEST_START_FROM_CELL = 'E42';    // 出勤で選べる いちばん早い時間
+var REQUEST_START_TO_CELL = 'E43';      // 出勤で選べる いちばん遅い時間
+var REQUEST_END_FROM_CELL = 'E44';      // 退勤で選べる いちばん早い時間
+var REQUEST_END_TO_CELL = 'E45';        // 退勤で選べる いちばん遅い時間
+var REQUEST_DEFAULT_BASE = { closingDay: 15, deadlineWeeks: 2, deadlineTime: '23:59', castClosingDay: 20,
+  startFrom: '9:00', startTo: '19:30', endFrom: '12:00', endTo: '21:30' };
 
 // 「シフト希望設定」シートを取得（無ければ非表示で作る）
 function getRequestSettingsSheet_() {
@@ -641,6 +691,7 @@ function getRequestSettingsSheet_() {
   }
   // 基本設定の欄。空の項目だけ初期値を入れる（前の版で作ったシートにも足す）
   sheet.getRange('E3:E28').setNumberFormat('@');
+  sheet.getRange('E42:E47').setNumberFormat('@');   // 「9:00」が時刻に化けないように文字で持つ
   sheet.getRange('F22:F25').setNumberFormat('@');
   [[REQUEST_BASE_CLOSING_CELL, String(REQUEST_DEFAULT_BASE.closingDay)],
    [REQUEST_BASE_WEEKS_CELL, String(REQUEST_DEFAULT_BASE.deadlineWeeks)],
@@ -650,14 +701,18 @@ function getRequestSettingsSheet_() {
    [MONTHLY_DAY_CELL, String(MONTHLY_DEFAULT_DAY)],
    [MONTHLY_DAYS_CELL, MONTHLY_DEFAULT_DAYS.join(',')],
    [MONTHLY_TEXT_CELL, MONTHLY_DEFAULT_TEXT],
-   [MONTHLY_HOUR_CELL, String(MONTHLY_DEFAULT_HOUR)]].forEach(function(pair) {
+   [MONTHLY_HOUR_CELL, String(MONTHLY_DEFAULT_HOUR)],
+   [REQUEST_START_FROM_CELL, REQUEST_DEFAULT_BASE.startFrom],
+   [REQUEST_START_TO_CELL, REQUEST_DEFAULT_BASE.startTo],
+   [REQUEST_END_FROM_CELL, REQUEST_DEFAULT_BASE.endFrom],
+   [REQUEST_END_TO_CELL, REQUEST_DEFAULT_BASE.endTo]].forEach(function(pair) {
     if (String(sheet.getRange(pair[0]).getDisplayValue()).trim() === '') sheet.getRange(pair[0]).setValue(pair[1]);
   });
   // スタッフ入力締切の決め方を「期間の最終日の◯日前」から「募集が始まる◯週間前の日曜日」に変えたため、
   // 前の版で入っていた1〜4以外の数字（14など）は初期値に直す
   var weeksNow = Number(sheet.getRange(REQUEST_BASE_WEEKS_CELL).getDisplayValue());
   if (!(weeksNow >= 1 && weeksNow <= 4)) sheet.getRange(REQUEST_BASE_WEEKS_CELL).setValue(String(REQUEST_DEFAULT_BASE.deadlineWeeks));
-  sheet.getRange('D3:D41').setValues([
+  sheet.getRange('D3:D47').setValues([
     ['基本設定：社員の締め日（毎月この日）'],
     ['基本設定：スタッフ入力締切は募集が始まる何週間前の日曜日'],
     ['基本設定：スタッフ入力締切の時刻'],
@@ -696,7 +751,13 @@ function getRequestSettingsSheet_() {
     ['毎月のおしらせ：提出チェック（人数／出さない／使わない）'],
     ['LINEログイン：LIFF ID（いまは使いません）'],
     ['LINEログイン：チャネルID（メニュー「LINEログインの設定」で入れます）'],
-    ['LINEログイン：チャネルシークレット（同上）']
+    ['LINEログイン：チャネルシークレット（同上）'],
+    ['スタッフが選べる出勤の時間：いちばん早い'],
+    ['スタッフが選べる出勤の時間：いちばん遅い'],
+    ['スタッフが選べる退勤の時間：いちばん早い'],
+    ['スタッフが選べる退勤の時間：いちばん遅い'],
+    ['このお店のシフト希望ページのアドレス（メニュー「お店のはじめ方」で入れます）'],
+    ['このお店のアクセス記録ファイルのID（同上）']
   ]);
   // 欲しい人数の目安。空のときだけ初期値を入れる
   if (String(sheet.getRange(NEED_WEEKDAY_CELL).getDisplayValue()).trim() === '') {
@@ -765,8 +826,32 @@ function readRequestBase_(sheet) {
     closingDay: closing >= 1 && closing <= 31 ? Math.floor(closing) : REQUEST_DEFAULT_BASE.closingDay,
     deadlineWeeks: Number(weeksText) >= 1 && Number(weeksText) <= 4 ? Math.floor(Number(weeksText)) : REQUEST_DEFAULT_BASE.deadlineWeeks,
     deadlineTime: /^\d{2}:\d{2}$/.test(time) ? time : REQUEST_DEFAULT_BASE.deadlineTime,
-    castClosingDay: cast >= 1 && cast <= 31 ? Math.floor(cast) : REQUEST_DEFAULT_BASE.castClosingDay
+    castClosingDay: cast >= 1 && cast <= 31 ? Math.floor(cast) : REQUEST_DEFAULT_BASE.castClosingDay,
+    startFrom: stepTime_(sheet.getRange(REQUEST_START_FROM_CELL).getDisplayValue(), REQUEST_DEFAULT_BASE.startFrom),
+    startTo: stepTime_(sheet.getRange(REQUEST_START_TO_CELL).getDisplayValue(), REQUEST_DEFAULT_BASE.startTo),
+    endFrom: stepTime_(sheet.getRange(REQUEST_END_FROM_CELL).getDisplayValue(), REQUEST_DEFAULT_BASE.endFrom),
+    endTo: stepTime_(sheet.getRange(REQUEST_END_TO_CELL).getDisplayValue(), REQUEST_DEFAULT_BASE.endTo)
   };
+}
+
+// 「9:00」「21:15」のような15分きざみの時間だけ受け取る。それ以外は初期値
+function stepTime_(text, fallback) {
+  var t = String(text == null ? '' : text).trim();
+  var m = /^(\d{1,2}):(00|15|30|45)$/.exec(t);
+  if (!m || Number(m[1]) > 23) return fallback;
+  return Number(m[1]) + ':' + m[2];
+}
+
+// 0:00〜23:45 の15分ごとの選択肢（端の時間だけは15分・45分も決められる）
+function stepTimeOptions_(selected) {
+  var out = '';
+  for (var h = 0; h < 24; h++) {
+    ['00', '15', '30', '45'].forEach(function(mm) {
+      var t = h + ':' + mm;
+      out += '<option value="' + t + '"' + (t === selected ? ' selected' : '') + '>' + t + '</option>';
+    });
+  }
+  return out;
 }
 
 // スタッフ入力締切の日＝募集が始まる◯週間前の日曜日（初日が月曜なので、初日の前日の日曜からさらに◯−1週さかのぼる）
@@ -911,6 +996,21 @@ function openShiftRequestSettings() {
     '<select id="baseTime" style="' + select + '">' + requestTimeOptions_(base.deadlineTime) + '</select>' +
     '<label style="' + label + '">キャストの締め日（月次集計に使います）</label>' +
     '<select id="castClosingDay" style="' + select + '">' + numberOptions_(1, 31, base.castClosingDay, '毎月#日') + '</select>' +
+    '<label style="' + label + '">スタッフが選べる時間（出勤）</label>' +
+    '<div style="display:flex;gap:6px;align-items:center;">' +
+    '<select id="startFrom" style="flex:1;padding:6px;font-size:14px;">' + stepTimeOptions_(base.startFrom) + '</select>' +
+    '<span>〜</span>' +
+    '<select id="startTo" style="flex:1;padding:6px;font-size:14px;">' + stepTimeOptions_(base.startTo) + '</select>' +
+    '</div>' +
+    '<label style="' + label + '">スタッフが選べる時間（退勤）</label>' +
+    '<div style="display:flex;gap:6px;align-items:center;">' +
+    '<select id="endFrom" style="flex:1;padding:6px;font-size:14px;">' + stepTimeOptions_(base.endFrom) + '</select>' +
+    '<span>〜</span>' +
+    '<select id="endTo" style="flex:1;padding:6px;font-size:14px;">' + stepTimeOptions_(base.endTo) + '</select>' +
+    '</div>' +
+    '<p style="margin:6px 0 0;font-size:12px;color:#555;">スマホのフォームで選べる時間の幅です。ここは15分きざみで決められます。' +
+    'スタッフが選ぶのは30分きざみですが、<b>いちばん早い／遅い時間だけは、ここで決めた時間そのもの</b>も選べます' +
+    '（例：退勤を21:15にすると、…20:30／21:00／21:15 から選べます）。</p>' +
     '<label style="' + label + '">店舗名</label>' +
     '<input id="storeName" value="' + escapeHtml_(storeName) + '" placeholder="例：ペッパーランチ飯塚店" style="' + select + '">' +
     '<label style="' + label + '">書庫ファイルのURL（' + ARCHIVE_KEEP_WEEKS + '週より前の週シートの移動先。年が変わると自動で新しい書庫を作って入れ替えます）</label>' +
@@ -959,6 +1059,10 @@ function openShiftRequestSettings() {
     '      deadlineWeeks: document.getElementById("deadlineWeeks").value,' +
     '      baseTime: document.getElementById("baseTime").value,' +
     '      castClosingDay: document.getElementById("castClosingDay").value,' +
+    '      startFrom: document.getElementById("startFrom").value,' +
+    '      startTo: document.getElementById("startTo").value,' +
+    '      endFrom: document.getElementById("endFrom").value,' +
+    '      endTo: document.getElementById("endTo").value,' +
     '      storeName: document.getElementById("storeName").value,' +
     '      archiveUrl: document.getElementById("archiveUrl").value,' +
     '      manual: document.getElementById("manual").checked,' +
@@ -987,6 +1091,15 @@ function saveShiftRequestSettings(settings) {
   if (!(castClosingDay >= 1 && castClosingDay <= 31 && Math.floor(castClosingDay) === castClosingDay)) throw new Error('キャストの締め日は1〜31日で選んでください。');
   if (!(deadlineWeeks >= 1 && deadlineWeeks <= 4 && Math.floor(deadlineWeeks) === deadlineWeeks)) throw new Error('スタッフ入力締切は1〜4週間前で選んでください。');
   if (!/^\d{2}:\d{2}$/.test(baseTime)) throw new Error('スタッフ入力締切の時刻を選んでください。');
+  // 画面から届かなかった時は、今シートに入っている値をそのまま使う
+  var hoursNow = readRequestBase_(getRequestSettingsSheet_());
+  var hours = {};
+  ['startFrom', 'startTo', 'endFrom', 'endTo'].forEach(function(key) {
+    hours[key] = stepTime_(settings[key], hoursNow[key]);
+  });
+  if (stepMinutes_(hours.startTo) <= stepMinutes_(hours.startFrom)) throw new Error('出勤の時間は「早い→遅い」の順で選んでください。');
+  if (stepMinutes_(hours.endTo) <= stepMinutes_(hours.endFrom)) throw new Error('退勤の時間は「早い→遅い」の順で選んでください。');
+  if (stepMinutes_(hours.endTo) <= stepMinutes_(hours.startFrom)) throw new Error('退勤のいちばん遅い時間は、出勤のいちばん早い時間より後にしてください。');
 
   var values = [['', '', ''], ['', '', ''], ['', '', '']];
   if (settings.manual) {
@@ -1010,6 +1123,8 @@ function saveShiftRequestSettings(settings) {
   if (archiveUrl && !/[-\w]{25,}/.test(archiveUrl)) throw new Error('書庫ファイルのURLが正しくありません。');
   sheet.getRange('E3:E8').setNumberFormat('@')
     .setValues([[String(closingDay)], [String(deadlineWeeks)], [baseTime], [storeName], [String(castClosingDay)], [archiveUrl]]);
+  sheet.getRange('E42:E45').setNumberFormat('@')
+    .setValues([[hours.startFrom], [hours.startTo], [hours.endFrom], [hours.endTo]]);
 
   // 月次集計の見出し・締め期間も新しい設定に合わせる
   try {
@@ -1212,7 +1327,7 @@ function targetCatCol_(index) {
 // 前の版で作ったシートにも、あとから足した欄を入れる
 function ensureTargetSettings_(sheet) {
   if (String(sheet.getRange(TARGET_OPEN_ROW, 1).getValue()).trim() === '') {
-    sheet.getRange(TARGET_OPEN_ROW, 1).setValue('人を置く時間（開始〜終了。終了の時間には置きません）');
+    sheet.getRange(TARGET_OPEN_ROW, 1).setValue('人を置く時間（開始〜終了。終了の時間には置きません。9 でも 21:15 でも入れられます）');
     sheet.getRange(TARGET_OPEN_ROW, 2).setValue(TARGET_DEFAULT.openFrom);
     sheet.getRange(TARGET_OPEN_ROW, 3).setValue(TARGET_DEFAULT.openTo);
   }
@@ -1244,13 +1359,17 @@ function styleTargetSheet_(sheet) {
   var solid = SpreadsheetApp.BorderStyle.SOLID;
   var medium = SpreadsheetApp.BorderStyle.SOLID_MEDIUM;
 
-  // 表題と注意書き
-  sheet.getRange(1, 1, 1, cols).breakApart().merge()
+  // 表題と注意書き。
+  // ここをA列から結合すると、下の setFrozenColumns(1) が
+  // 「結合されたセルの一部だけを含む列を固定することはできません」で止まる（2026-10-07に発生）。
+  // 結合はやめて、色だけ行いっぱいに付け、文字は右へあふれさせる（見た目は同じ）。
+  sheet.getRange(1, 1, 2, cols).breakApart();
+  sheet.getRange(1, 1, 1, cols)
     .setBackground('#1C4587').setFontColor('#FFFFFF').setFontWeight('bold').setFontSize(13)
-    .setVerticalAlignment('middle');
+    .setWrap(false).setVerticalAlignment('middle');
   sheet.setRowHeight(1, 30);
-  sheet.getRange(2, 1, 1, cols).breakApart().merge()
-    .setFontColor('#666666').setFontSize(10).setWrap(true).setVerticalAlignment('middle');
+  sheet.getRange(2, 1, 1, cols)
+    .setFontColor('#666666').setFontSize(10).setWrap(false).setVerticalAlignment('middle');
   sheet.setRowHeight(2, 32);
 
   // 設定のところ（3〜6行目）
@@ -1258,7 +1377,7 @@ function styleTargetSheet_(sheet) {
   sheet.getRange(TARGET_SPH_ROW, 2, 3, 1).setBackground(TARGET_INPUT_COLOR);
   sheet.getRange(TARGET_OPEN_ROW, 2, 1, 2).setBackground(TARGET_INPUT_COLOR);
   sheet.getRange(TARGET_SPH_ROW, 2, 2, 1).setNumberFormat('#,##0"円"');
-  sheet.getRange(TARGET_OPEN_ROW, 2, 1, 2).setNumberFormat('0"時"');
+  sheet.getRange(TARGET_OPEN_ROW, 2, 1, 2).setNumberFormat('@');   // 「21:15」と入れても時刻に変わらないように
   sheet.getRange(TARGET_SPH_ROW, 1, 4, 3)
     .setBorder(true, true, true, true, true, true, TARGET_LINE_COLOR, solid);
 
@@ -1457,20 +1576,64 @@ function refreshTargetSheet_(sheet) {
       .map(function(r) { return r[0]; }));
     var autos = ratios.map(function(ratio, h) {
       var hour = TARGET_FIRST_HOUR + h;
-      return [autoPeople_(avg, ratio, sph, minPeople, hour >= open.from && hour < open.to)];
+      // その1時間が、人を置く時間と少しでも重なっていれば中とみなす（21:15 なら21時台も中）
+      var inside = hour * 60 < open.toMin && (hour + 1) * 60 > open.fromMin;
+      return [autoPeople_(avg, ratio, sph, minPeople, inside)];
     });
     sheet.getRange(TARGET_FIRST_ROW, c + 1, TARGET_HOURS, 1).setValues(autos);
   });
   return averages;
 }
 
-// 人を置く時間（開始〜終了。終了の時間には置かない）
+// 「22」（時だけ）と「21:15」（15分きざみ）の両方を分で読み取る
+function openMinutesOf_(cell, fallbackHour) {
+  var raw = cell.getValue();
+  if (raw instanceof Date) return raw.getHours() * 60 + raw.getMinutes();
+  var text = String(cell.getDisplayValue() == null ? '' : cell.getDisplayValue()).trim();
+  var m = /^(\d{1,2}):(\d{2})$/.exec(text);
+  if (m) {
+    var min = Number(m[1]) * 60 + Number(m[2]);
+    if (min >= 0 && min <= 24 * 60) return min;
+  }
+  var digits = String(text).replace(/[^0-9]/g, '');
+  if (digits) {
+    var hour = Number(digits);
+    if (hour >= 0 && hour <= 24) return hour * 60;
+  }
+  return fallbackHour * 60;   // 空や書き間違いは初期値
+}
+
+// スタッフが退勤できる、いちばん遅い時間（分）。この後ろに人は置けない
+function staffEndLimitMin_() {
+  try {
+    var settings = getRequestSettingsSheet_();
+    return stepMinutes_(stepTime_(settings.getRange(REQUEST_END_TO_CELL).getDisplayValue(), REQUEST_DEFAULT_BASE.endTo));
+  } catch (err) {
+    return stepMinutes_(REQUEST_DEFAULT_BASE.endTo);
+  }
+}
+
+// 人を置く時間（開始〜終了。終了の時間には置かない）。
+// スタッフが退勤できる上限（シフト希望設定）より後ろは、誰も入れないので終わりにする
 function targetOpenHours_(sheet) {
-  var from = Number(sheet.getRange(TARGET_OPEN_ROW, 2).getValue());
-  var to = Number(sheet.getRange(TARGET_OPEN_ROW, 3).getValue());
-  if (!(from >= 0 && from <= 23)) from = TARGET_DEFAULT.openFrom;
-  if (!(to >= 1 && to <= 24) || to <= from) to = TARGET_DEFAULT.openTo;
-  return { from: from, to: to };
+  var fromMin = openMinutesOf_(sheet.getRange(TARGET_OPEN_ROW, 2), TARGET_DEFAULT.openFrom);
+  var toMin = openMinutesOf_(sheet.getRange(TARGET_OPEN_ROW, 3), TARGET_DEFAULT.openTo);
+  if (!(toMin > fromMin)) {
+    fromMin = TARGET_DEFAULT.openFrom * 60;
+    toMin = TARGET_DEFAULT.openTo * 60;
+  }
+  var limit = staffEndLimitMin_();
+  if (limit > fromMin && limit < toMin) toMin = limit;
+  return { from: Math.floor(fromMin / 60), to: Math.ceil(toMin / 60), fromMin: fromMin, toMin: toMin };
+}
+
+// 不足を見る終わりの時間（分）。「人を置く時間の終了」と「退勤できる上限」の早いほう
+function shiftEndLimitMin_() {
+  var staff = staffEndLimitMin_();
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TARGET_SHEET_NAME);
+  if (!sheet) return staff;
+  var toMin = openMinutesOf_(sheet.getRange(TARGET_OPEN_ROW, 3), TARGET_DEFAULT.openTo);
+  return Math.min(staff, toMin);
 }
 
 // 目安人数シートを読む。手打ちが空の時は自動人数を使う
@@ -1494,6 +1657,7 @@ function readTargets_() {
     sph: Number(sheet.getRange(TARGET_SPH_ROW, 2).getValue()) || TARGET_DEFAULT.sph,
     maxSph: Number(sheet.getRange(TARGET_MAXSPH_ROW, 2).getValue()) || TARGET_DEFAULT.maxSph,
     minPeople: Number(sheet.getRange(TARGET_MIN_ROW, 2).getValue()),
+    open: targetOpenHours_(sheet),
     byCat: byCat
   };
 }
@@ -1505,13 +1669,18 @@ function applyWeekTargets_(sheet, targets, keys, tz) {
   if (!(top instanceof Date)) return 0;
   useHeadcountDisplay_(sheet);                         // 古い「人時」表示の週は、先に人数表示へ直す
   var start = Utilities.formatDate(top, tz, 'yyyy-MM-dd');
+  var open = targets.open || { fromMin: 0, toMin: 24 * 60 };
   var changed = 0;
   TARGET_BLOCKS.forEach(function(block, i) {
     var hours = targets.byCat[categoryOfYmd_(addDaysYmd_(start, i), keys)];
     if (!hours) return;
     var now = sheet.getRange(block.row, block.col, 1, TARGET_SLOTS * 2 - 1).getValues()[0];
     for (var s = 0; s < TARGET_SLOTS; s++) {
-      var people = Number(hours[Math.floor(s / 2)]);
+      // 30分のマスが「人を置く時間」と重なっていなければ0にする。
+      // 21:15 までなら 21:30〜22:00 のマスは空＝そこに不足は出ない
+      var slotFrom = TARGET_FIRST_HOUR * 60 + s * 30;
+      var inside = slotFrom < open.toMin && slotFrom + 30 > open.fromMin;
+      var people = inside ? Number(hours[Math.floor(s / 2)]) : 0;
       var want = people > 0 ? people : '';             // 画面には人数のまま出す
       if (String(now[s * 2]) === String(want)) continue;
       sheet.getRange(block.row, block.col + s * 2).setValue(want);
@@ -1555,22 +1724,6 @@ function useHeadcountDisplay_(sheet) {
   return fixed;
 }
 
-// メニュー「目安を人数で表示する（終わった週も）」
-function switchTargetsToHeadcount() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var ui = SpreadsheetApp.getUi();
-  var weeks = ss.getSheets().filter(function(s) { return /^\d{6}$/.test(s.getName()); });
-  if (!weeks.length) { ui.alert('週シートがありません。'); return; }
-  if (ui.alert('すべての週シート（' + weeks.length + '枚）の「目安」と「実時間」を、人数で出すように直します。\n\n' +
-      '今までは「4人 → 2」のように半分の数字で出ていました。これを「4人 → 4」にします。\n' +
-      '右はしの1日の合計は、今までと同じ数字のままです。\n\nよろしいですか。',
-      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
-  var done = 0;
-  weeks.forEach(function(s) { if (useHeadcountDisplay_(s)) done++; });
-  ui.alert(done ? done + '枚のシートを人数の表示に直しました。'
-                : 'すべて人数の表示になっていました（直すところはありませんでした）。');
-}
-
 // 手打ちの人数だと人時売上高が上限を超えてしまう区分（人が少なすぎる区分）を挙げる
 function tooLeanCategories_(ss, targets) {
   var averages = averageSalesByCategory_(ss);
@@ -1593,6 +1746,8 @@ function openTargetSheet() {
     '・構成比％：その時間に1日の売上の何％が売れるか（合計が100、または100%になるように）\n' +
     '　　「10」でも「10%」でも、どちらの書き方でも読み取ります。\n' +
     '・人を置く時間（B6〜C6）：この外の時間は0人になります（例 9〜22なら21時台まで）\n' +
+    '　　「21:15」のように15分きざみでも入れられます。その場合、21:30〜22:00には人を置きません。\n' +
+    '　　シフト希望設定の「退勤のいちばん遅い時間」より後ろには、どちらにしても人を置きません。\n' +
     '・自動人数：1日の平均売上×構成比÷目標人時売上高（人を置く時間は最低人数を下回りません）\n' +
     '・手打ち人数：実際に置く人数。週シートにはこちらが入ります（空なら自動人数）\n' +
     '　　週シートの「目安」には、この人数がそのまま出ます（4人なら4）。\n\n' +
@@ -1742,20 +1897,6 @@ function activeWeekSheet_() {
   return week;
 }
 
-// メニュー「調整前として記録する」
-function recordBeforeAdjust() {
-  var week = activeWeekSheet_();
-  if (!week) return;
-  var ui = SpreadsheetApp.getUi();
-  if (ui.alert('「' + week.getName() + '」の今の時間を「調整前」として記録します。\n\n' +
-      'このあと削った時間が、薄いグレーで残って見えるようになります。\nよろしいですか。',
-      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
-  clearAdjustMarks_(week);          // 前の薄い表示が残っていれば先に消す
-  saveAdjustSnapshots_(week);
-  repaintWeekColors_(week);
-  ui.alert('いまの時間を「調整前」として記録しました。\nこれから削った時間は、その場で薄いグレーになります。');
-}
-
 // メニュー「確定する（薄い表示を消す）」
 function confirmAdjust() {
   var week = activeWeekSheet_();
@@ -1859,7 +2000,7 @@ function weekPdfBlob_(week, fileName) {
     '?format=pdf&gid=' + week.getSheetId() +
     '&range=' + encodeURIComponent(PDF_RANGE) +
     '&portrait=false&scale=4&gridlines=false&printtitle=false&sheetnames=false' +
-    '&pagenum=UNDEFINED&fzr=false&top_margin=0.85&bottom_margin=0.2&left_margin=0.2&right_margin=0.2';
+    '&pagenum=UNDEFINED&fzr=false&printnotes=false&top_margin=0.85&bottom_margin=0.2&left_margin=0.2&right_margin=0.2';
   var res = UrlFetchApp.fetch(url, {
     headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
     muteHttpExceptions: true
@@ -2020,7 +2161,12 @@ var MINOR_NIGHT_END = 500;         // これより前の出勤は不可
 var MINOR_DAY_HOURS = 8;           // 1日の実働の上限
 var MINOR_WEEK_HOURS = 40;         // 1週の実働の上限（年少者は44時間の特例が使えない）
 var BREAK_RULES = [{ over: 8, need: 60 }, { over: 6, need: 45 }];   // 実働◯時間超なら休憩◯分
-var LAW_WARN_COLOR = '#FFC7CE';    // 決まりに反する人の名前を塗る色
+// 決まりに反する人の名前を塗る色。2段階にする
+//  濃い赤＝時間が長い・遅い（年少者の夜間/5時前/1日8時間超/1週40時間超、実働8時間超で休憩60分が足りない）
+//  うすい赤＝休憩のつけ方（6時間超で45分が足りない、休憩が勤務時間の外）
+var LAW_WARN_COLOR = '#FFC7CE';    // うすい赤
+var LAW_HARD_COLOR = '#C00000';    // 濃い赤
+var LAW_HARD_FONT = '#FFFFFF';     // 濃い赤のときの文字色（白）
 var ROSTER_URL_CELL = 'E28';       // シフト希望設定：アルバイト名簿ファイルのURL（空ならスタッフ区分シートの入力を使う）
 var ROLE_BIRTH_COL = 3;            // スタッフ区分：C列＝生年月日
 var ROLE_SCHOOL_COL = 4;           // スタッフ区分：D列＝高校生（〇）
@@ -2061,7 +2207,19 @@ function minorInfoMap_(useCache) {
   }
   var map = readRoleSheetBirths_();
   var fromRoster = readRosterBirths_();
-  Object.keys(fromRoster).forEach(function(key) { map[key] = fromRoster[key]; });
+  // 名簿のほうを先に使うが、名簿で空いているところは「スタッフ区分」シートに入れた分を残す。
+  // （名簿に生年月日が入っていない人の分まで消してしまうと、入れたはずの生年月日が未登録あつかいになる）
+  Object.keys(fromRoster).forEach(function(key) {
+    var now = map[key], add = fromRoster[key];
+    if (!now) { map[key] = add; return; }
+    map[key] = {
+      name: add.name || now.name,
+      birth: add.birth || now.birth,
+      highSchool: add.highSchool || now.highSchool,
+      kind: add.kind || now.kind,
+      wage: add.wage || now.wage
+    };
+  });
   if (cache) {
     try {
       cache.put(MINOR_CACHE_KEY, JSON.stringify(dryMinorMap_(map)), MINOR_CACHE_SEC);
@@ -2183,6 +2341,12 @@ function openBookByUrl_(url) {
   return id ? SpreadsheetApp.openById(id[0]) : null;
 }
 
+// 「9:30」を分に直す（30分きざみの設定を比べるのに使う）
+function stepMinutes_(t) {
+  var m = /^(\d{1,2}):(\d{2})$/.exec(String(t));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : -1;
+}
+
 // 時間の数字（900・2130）を分に直す
 function minutesOfTime_(value) {
   var n = Number(value);
@@ -2193,25 +2357,30 @@ function minutesOfTime_(value) {
 }
 
 // 1人・1日の決まり破りを調べる。戻り値は理由の配列（空なら問題なし）
+// 返すのは { list: 理由のことば, hard: 濃い赤にするか }
 function dayViolations_(person, info, date) {
-  var reasons = [];
+  var reasons = [], hard = false;
   var start = minutesOfTime_(person.start), end = minutesOfTime_(person.end);
-  if (start === null || end === null) return reasons;
-  if (end <= start) return reasons;                       // 書きかけは見ない
+  if (start === null || end === null) return { list: reasons, hard: hard };
+  if (end <= start) return { list: reasons, hard: hard };   // 書きかけは見ない
   var bStart = minutesOfTime_(person.breakStart), bEnd = minutesOfTime_(person.breakEnd);
   var breakMin = (bStart !== null && bEnd !== null && bEnd > bStart) ? bEnd - bStart : 0;
   var work = end - start - breakMin;
 
   var minor = !!info && (info.highSchool || isMinorOn_(info.birth, date));
   if (minor) {
-    if (end > minutesOfTime_(MINOR_NIGHT_START)) reasons.push('22時以降の勤務');
-    if (start < minutesOfTime_(MINOR_NIGHT_END)) reasons.push('5時前の勤務');
-    if (work > MINOR_DAY_HOURS * 60) reasons.push('1日8時間を超える勤務（' + (Math.round(work / 6) / 10) + '時間）');
+    if (end > minutesOfTime_(MINOR_NIGHT_START)) { reasons.push('22時以降の勤務'); hard = true; }
+    if (start < minutesOfTime_(MINOR_NIGHT_END)) { reasons.push('5時前の勤務'); hard = true; }
+    if (work > MINOR_DAY_HOURS * 60) {
+      reasons.push('1日8時間を超える勤務（' + (Math.round(work / 6) / 10) + '時間）');
+      hard = true;
+    }
   }
   for (var i = 0; i < BREAK_RULES.length; i++) {
     if (work > BREAK_RULES[i].over * 60) {
       if (breakMin < BREAK_RULES[i].need) {
         reasons.push('実働' + (Math.round(work / 6) / 10) + '時間に対して休憩' + breakMin + '分（' + BREAK_RULES[i].need + '分必要）');
+        if (BREAK_RULES[i].over >= 8) hard = true;        // 8時間を超える日は濃い赤
       }
       break;
     }
@@ -2219,7 +2388,7 @@ function dayViolations_(person, info, date) {
   if (breakMin > 0 && bStart !== null && (bStart < start || bEnd > end)) {
     reasons.push('休憩が勤務時間の外にある');
   }
-  return reasons;
+  return { list: reasons, hard: hard };
 }
 
 // 週シートの1日ぶん（日ブロック）の人を読む
@@ -2251,9 +2420,11 @@ function checkWeekLaw_(week, paint) {
     var date = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + day);
     var people = blockPeople_(week, day);
     people.forEach(function(person) {
-      if (!person.name) return;
+      // 名前を消した行は、前に付いた色とメモを消してから次へ（消し忘れて赤が残らないように）
+      if (!person.name) { if (paint) paintLawWarning_(week, block, person.row, [], false); return; }
       var who = info[flatName_(person.name)] || null;
-      var reasons = dayViolations_(person, who, date);
+      var v = dayViolations_(person, who, date);
+      var reasons = v.list;
       var start = minutesOfTime_(person.start), end = minutesOfTime_(person.end);
       if (start !== null && end !== null && end > start) {
         var bs = minutesOfTime_(person.breakStart), be = minutesOfTime_(person.breakEnd);
@@ -2261,9 +2432,9 @@ function checkWeekLaw_(week, paint) {
         var key = flatName_(person.name);
         weekWork[key] = (weekWork[key] || 0) + (end - start - brk);
       }
-      if (paint) paintLawWarning_(week, block, person.row, reasons);
+      if (paint) paintLawWarning_(week, block, person.row, reasons, v.hard);
       if (reasons.length) {
-        found.push({ day: day, name: person.name, date: date, reasons: reasons });
+        found.push({ day: day, name: person.name, date: date, reasons: reasons, hard: v.hard });
       }
     });
   });
@@ -2272,21 +2443,32 @@ function checkWeekLaw_(week, paint) {
     var who = info[key];
     var minor = who && (who.highSchool || isMinorOn_(who.birth, monday));
     if (minor && weekWork[key] > MINOR_WEEK_HOURS * 60) {
-      found.push({ day: -1, name: who.name, date: monday,
+      found.push({ day: -1, name: who.name, date: monday, hard: true,
         reasons: ['1週40時間を超える勤務（' + (Math.round(weekWork[key] / 6) / 10) + '時間）'] });
     }
   });
   return found;
 }
 
+// この色は、決まりの見張りが塗ったものか
+function isLawColor_(bg) {
+  var c = String(bg || '').toUpperCase();
+  return c === LAW_WARN_COLOR.toUpperCase() || c === LAW_HARD_COLOR.toUpperCase();
+}
+
 // 名前のマスに色とメモを付ける／消す
-function paintLawWarning_(week, block, row, reasons) {
+function paintLawWarning_(week, block, row, reasons, hard) {
   var cell = week.getRange(row, block.col - 5);
   if (reasons.length) {
-    cell.setBackground(LAW_WARN_COLOR);
+    cell.setBackground(hard ? LAW_HARD_COLOR : LAW_WARN_COLOR);
+    cell.setFontColor(hard ? LAW_HARD_FONT : null);
+    cell.setFontWeight(hard ? 'bold' : null);
     cell.setNote('決まりの確認：\n・' + reasons.join('\n・'));
-  } else if (String(cell.getNote()).indexOf('決まりの確認') === 0) {
+  } else if (String(cell.getNote()).indexOf('決まりの確認') === 0 || isLawColor_(cell.getBackground())) {
+    // メモを手で消してあっても、この色が残っていれば消す
     cell.setBackground(null);
+    cell.setFontColor(null);
+    cell.setFontWeight(null);
     cell.setNote('');
   }
 }
@@ -2302,10 +2484,12 @@ function checkEditedLaw_(week, range) {
     if (!info) { info = minorInfoMap_(); monday = weekMondayOf_(week); }
     var date = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + day);
     blockPeople_(week, day).forEach(function(person) {
-      if (person.row < r0 || person.row > r1 || !person.name) return;
-      var reasons = dayViolations_(person, info[flatName_(person.name)] || null, date);
-      paintLawWarning_(week, block, person.row, reasons);
-      if (reasons.length) messages.push(DOW_JP[date.getDay()] + '曜 ' + person.name + '：' + reasons[0]);
+      if (person.row < r0 || person.row > r1) return;
+      // 名前を消した行は、前に付いた色とメモも消す
+      if (!person.name) { paintLawWarning_(week, block, person.row, [], false); return; }
+      var v = dayViolations_(person, info[flatName_(person.name)] || null, date);
+      paintLawWarning_(week, block, person.row, v.list, v.hard);
+      if (v.list.length) messages.push(DOW_JP[date.getDay()] + '曜 ' + person.name + '：' + v.list[0]);
     });
   });
   if (messages.length) {
@@ -2389,7 +2573,8 @@ function lawReportText_(found, unknown) {
     if (lines.length) lines.push('');
     lines.push('生年月日が未登録のため、未成年かどうか調べられませんでした。');
     lines.push('・' + unknown.join('、'));
-    lines.push('（スタッフ管理 → スタッフの生年月日 で入れられます）');
+    lines.push('（スタッフ管理 → スタッフの生年月日 で入れられます。');
+    lines.push('　名前の書き方がシフト表と違っていても、別の人として出ます）');
   }
   return lines.join('\n');
 }
@@ -3195,7 +3380,7 @@ var NOTICE_HOUR = 10;               // 自動で動かす時刻（朝10時）
 var AUTO_SHEETS_PER_DAY = 2;        // 1日に自動で作る週シートの上限（時間切れを防ぐ）
 var NOTICE_LOG_KEEP = 12;           // 控えに残す件数
 // スマホのフォームの記録（誰が送ったか）を見るためのファイル
-var RECORD_SPREADSHEET_ID = '1tgFvH1k3WxsMb_fG2C_m6vMu_n9KTKGgdScSk7jNxGM';   // シフト希望_アクセス記録（飯塚店）
+var RECORD_SPREADSHEET_ID_DEFAULT = '1tgFvH1k3WxsMb_fG2C_m6vMu_n9KTKGgdScSk7jNxGM';   // シフト希望_アクセス記録（飯塚店）
 var RECORD_SUBMIT_SHEET = '送信の記録';
 var RECORD_NAME_COL = 3;    // 名前の列
 var RECORD_DATA_COL = 16;   // 送った中身（この期間のものかを見る）
@@ -3206,7 +3391,221 @@ var LINE_REGISTER_CELL = 'E12';     // 送り先の登録を受け付ける期�
 var LINE_TEST_TARGET_CELL = 'E32';
 var LINE_REGISTER_MINUTES = 10;
 // LINE Developers の「Webhook URL」に貼るアドレス（スマホのフォームと同じアドレスで受け取る）
-var LINE_WEBHOOK_URL = REQUEST_FORM_URL;
+// LINE Developers の「Webhook URL」に貼るアドレス＝シフト希望ページと同じ
+function lineWebhookUrl_() { return requestFormUrl_(); }
+
+
+
+/* ================= お店のはじめ方（新しい店舗の設定） =================
+   新しいお店では、コードを触らずにここだけ埋めれば動くようにする。
+   入っているか・まだかが一目で分かる形にして、上から順に案内する。     */
+
+// いまの入り具合を調べる。画面と、保存したあとの点検の両方で使う
+function storeSetupState_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var settings = getRequestSettingsSheet_();
+  function text(cell) { return String(settings.getRange(cell).getDisplayValue()).trim(); }
+  var home = ss.getId() === HOME_SHIFT_SPREADSHEET_ID;
+  // 初期値の持ち主のお店なら、その値をそのまま設定に書いておく（以後コードに頼らない）。
+  // コピーして作った別のお店では書かない。よその店の値が入ってしまうため
+  if (home) {
+    if (!text(STORE_FORM_URL_CELL)) settings.getRange(STORE_FORM_URL_CELL).setValue(REQUEST_FORM_URL_DEFAULT);
+    if (!text(STORE_RECORD_ID_CELL)) settings.getRange(STORE_RECORD_ID_CELL).setValue(RECORD_SPREADSHEET_ID_DEFAULT);
+    STORE_SETUP_CACHE = {};
+  }
+  var url = text(STORE_FORM_URL_CELL);
+  var record = text(STORE_RECORD_ID_CELL);
+  var recordName = '';
+  if (record) {
+    try { recordName = SpreadsheetApp.openById(record).getName(); } catch (err) { recordName = ''; }
+  }
+  return {
+    home: home,
+    // 設定が空のまま動いている＝よそのお店の値を使っている。コピーして作ったお店では危ない
+    borrowed: !home && (!url || !record),
+    store: text(REQUEST_STORE_NAME_CELL),
+    token: text(LINE_TOKEN_CELL),
+    loginId: text(LINE_LOGIN_ID_CELL),
+    loginSecret: text(LINE_LOGIN_SECRET_CELL),
+    url: url,
+    urlOk: /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url),
+    record: record,
+    recordName: recordName,
+    shiftId: ss.getId(),
+    shiftName: ss.getName()
+  };
+}
+
+// 画面から呼ぶ保存。★末尾に _ を付けると画面から呼べなくなるため付けない
+function saveStoreSetup(values) {
+  values = values || {};
+  var settings = getRequestSettingsSheet_();
+  var store = String(values.store || '').trim();
+  var url = String(values.url || '').trim();
+  var record = String(values.record || '').trim();
+
+  if (store) settings.getRange(REQUEST_STORE_NAME_CELL).setValue(store);
+  if (url) {
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url)) {
+      throw new Error('ページのアドレスは https://script.google.com/macros/s/… /exec の形で入れてください。');
+    }
+    settings.getRange(STORE_FORM_URL_CELL).setValue(url);
+  }
+  if (record) {
+    var id = record;
+    var m = /\/spreadsheets\/d\/([A-Za-z0-9_-]+)/.exec(record);   // URLを貼られてもIDを取り出す
+    if (m) id = m[1];
+    if (!/^[A-Za-z0-9_-]{30,}$/.test(id)) throw new Error('アクセス記録のIDが正しくありません。');
+    try { SpreadsheetApp.openById(id); }
+    catch (err) { throw new Error('そのIDのファイルを開けませんでした。共有されているか確かめてください。'); }
+    settings.getRange(STORE_RECORD_ID_CELL).setValue(id);
+  }
+  STORE_SETUP_CACHE = {};        // 次から新しい値を読む
+  return storeSetupState_();
+}
+
+// メニュー「お店のはじめ方（新しい店舗）」
+function openStoreSetup() {
+  var data = JSON.stringify(storeSetupState_()).replace(/</g, '\u003c');
+  var html = [
+    '<style>',
+    '  body{ font-family:sans-serif; font-size:13.5px; line-height:1.7; margin:0; padding:6px 10px 10px; }',
+    '  h3{ margin:0 0 4px; font-size:13.5px; }',
+    '  p.note{ margin:2px 0 6px; font-size:11.5px; color:#555; }',
+    '  .step{ border:1px solid #ddd; border-left:4px solid #ddd; border-radius:8px; padding:9px 11px; margin-bottom:8px; }',
+    '  .step.ok{ border-left-color:#1E8449; background:#F6FBF7; }',
+    '  .step.todo{ border-left-color:#C0392B; background:#FFFBFA; }',
+    '  .mark{ float:right; font-size:11.5px; font-weight:bold; }',
+    '  .step.ok .mark{ color:#1E8449; }',
+    '  .step.todo .mark{ color:#C0392B; }',
+    '  .warn{ background:#FDECEA; border:1px solid #C0392B; border-radius:8px;',
+    '    padding:8px 11px; margin-bottom:9px; font-size:12px; color:#A0231A; }',
+    '  input{ width:100%; box-sizing:border-box; padding:6px; font-size:12.5px; }',
+    '  input[readonly]{ background:#F2F2F2; color:#333; }',
+    '  ol{ margin:4px 0 0 18px; padding:0; font-size:12px; color:#333; }',
+    '  .foot{ position:sticky; bottom:0; background:#fff; border-top:1px solid #eee;',
+    '    padding-top:8px; display:flex; gap:8px; align-items:center; justify-content:flex-end; }',
+    '  #msg{ flex:1; margin:0; font-size:11.5px; color:#186A3B; }',
+    '  #saveBtn{ padding:6px 14px; font-size:13px; }',
+    '</style>',
+    '<p class="note">新しいお店で使うときは、上から順に埋めてください。',
+    '<b>コードを書き換える必要はありません。</b>緑はもう入っているところです。</p>',
+    '<div id="warn"></div>',
+    '<div id="list"></div>',
+    '<div class="foot"><p id="msg"></p><button id="saveBtn">保存する</button></div>',
+    '<script>',
+    'var D = ' + data + ';',
+    'function esc(s){ return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }',
+    'function step(no, title, ok, body){',
+    '  return "<div class=\\"step " + (ok ? "ok" : "todo") + "\\"><span class=\\"mark\\">" +',
+    '    (ok ? "入っています" : "まだです") + "</span><h3>" + no + ". " + title + "</h3>" + body + "</div>";',
+    '}',
+    'function draw(){',
+    '  document.getElementById("warn").innerHTML = D.borrowed',
+    '    ? "<div class=\\"warn\\"><b>ほかのお店の値で動いています。</b><br>' +
+      '2と3がまだ入っていないので、いまは別のお店のページとアクセス記録を使っています。' +
+      'このまま使うと、記録が混ざります。必ず入れ替えてください。</div>"',
+    '    : "";',
+    '  var html = "";',
+    '  html += step(1, "お店の名前", !!D.store,',
+    '    "<p class=\\"note\\">お知らせや画面の見出しに出ます。</p>" +',
+    '    "<input id=\\"store\\" value=\\"" + esc(D.store) + "\\" placeholder=\\"例）飯塚店\\">");',
+    '  html += step(2, "このお店のシフト希望ページ", D.urlOk,',
+    '    "<p class=\\"note\\">フォームのGASを<b>ウェブアプリとして公開</b>し、出てきたアドレスを貼ります。</p>" +',
+    '    "<input id=\\"url\\" value=\\"" + esc(D.url) + "\\" placeholder=\\"https://script.google.com/macros/s/……/exec\\">" +',
+    '    "<ol><li>フォームのGASを開く</li><li>デプロイ →「新しいデプロイ」→ ウェブアプリ</li>" +',
+    '    "<li>アクセスできるユーザー＝全員</li><li>出てきたアドレスをここに貼る</li></ol>");',
+    '  html += step(3, "アクセス記録のファイル", !!D.recordName,',
+    '    "<p class=\\"note\\">LINEの持ち主・送信の記録・募集と応募を入れるファイルです。' +
+      'お店ごとに1つ作ってください（ほかのお店と同じものを使わないでください）。</p>" +',
+    '    "<input id=\\"record\\" value=\\"" + esc(D.record) + "\\" placeholder=\\"スプレッドシートのURLを貼ってもOKです\\">" +',
+    '    (D.recordName ? "<p class=\\"note\\">いま見ているファイル：<b>" + esc(D.recordName) + "</b></p>" : ""));',
+    '  html += step(4, "LINE通知（お知らせを送る）", !!D.token,',
+    '    "<p class=\\"note\\">メニューの「LINEのつなぎこみ」→「LINE通知の設定」で入れます。</p>");',
+    '  html += step(5, "LINEログイン（本人を見分ける）", !!(D.loginId && D.loginSecret),',
+    '    "<p class=\\"note\\">メニューの「LINEのつなぎこみ」→「LINEログインの設定」で入れます。</p>");',
+    '  html += step(6, "フォーム側に、このシフト表を教える", true,',
+    '    "<p class=\\"note\\">フォームのGASの <b>SHIFT_SPREADSHEET_ID</b> に、下のIDを入れます。' +
+      'ここだけはフォーム側の作業です。</p>" +',
+    '    "<input readonly value=\\"" + esc(D.shiftId) + "\\" onclick=\\"this.select()\\">" +',
+    '    "<p class=\\"note\\">このファイル：" + esc(D.shiftName) + "</p>");',
+    '  document.getElementById("list").innerHTML = html;',
+    '}',
+    'function show(t, err){ var m = document.getElementById("msg"); m.textContent = t; m.style.color = err ? "#B03A2E" : "#186A3B"; }',
+    'document.getElementById("saveBtn").addEventListener("click", function(){',
+    '  var btn = document.getElementById("saveBtn");',
+    '  btn.disabled = true; show("保存しています…");',
+    '  google.script.run',
+    '    .withSuccessHandler(function(res){ D = res; draw(); show("保存しました。"); btn.disabled = false; })',
+    '    .withFailureHandler(function(e){ show(e.message, true); btn.disabled = false; })',
+    '    .saveStoreSetup({',
+    '      store: document.getElementById("store").value,',
+    '      url: document.getElementById("url").value,',
+    '      record: document.getElementById("record").value });',
+    '});',
+    'draw();',
+    '</script>'
+  ].join('\n');
+  SpreadsheetApp.getUi().showModalDialog(
+    HtmlService.createHtmlOutput(html).setWidth(520).setHeight(640), 'お店のはじめ方');
+}
+
+/* ================= 祝日の一覧を新しくする（年に1回だけ） =================
+   「祝日」シートは内閣府のCSVから取り込んだ日付の一覧。週シートの色付けと、
+   目安人数の区分（平日・土曜・日曜・祝日）の両方がこれを見ている。
+   内閣府は毎年2月ごろに翌年ぶんを足すので、3月に1回だけ取り直せば足りる。
+   ただし、先の週シートを作ろうとしているのに その年の祝日が入っていなければ、
+   3月を待たずにその場で取りに行く（取りこぼしを自分で直す）。          */
+var HOLIDAY_SHEET_NAME = '祝日';
+var HOLIDAY_REFRESH_MONTH = 3;              // 年に1回、この月に取り直す
+var HOLIDAY_AHEAD_DAYS = 150;               // この先の日付の年まで入っていてほしい
+var HOLIDAY_YEAR_KEY = 'holidayRefreshedYear';   // 最後に取り直した年
+var HOLIDAY_TRY_KEY = 'holidayTriedOn';          // 最後に取りに行った日（1日1回まで）
+
+// その年の祝日が「祝日」シートに入っているか
+function hasHolidayYear_(year) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOLIDAY_SHEET_NAME);
+  if (!sheet || sheet.getLastRow() < 2) return false;
+  var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+  for (var i = values.length - 1; i >= 0; i--) {     // 新しい日付は下にあるので下から探す
+    if (values[i][0] instanceof Date && values[i][0].getFullYear() === year) return true;
+  }
+  return false;
+}
+
+// 取り直すかどうかを決めて、必要なら取りに行く。知らせる文を返す（何もしなければ空）
+function maybeRefreshHolidays_() {
+  var props = PropertiesService.getDocumentProperties();
+  var tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+  var now = new Date();
+  var today = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
+  var year = now.getFullYear();
+
+  var aheadYear = new Date(now.getTime() + HOLIDAY_AHEAD_DAYS * 24 * 60 * 60 * 1000).getFullYear();
+  var missing = !hasHolidayYear_(aheadYear);                               // 先の年がまだ無い
+  var yearly = (now.getMonth() + 1) === HOLIDAY_REFRESH_MONTH &&
+    Number(props.getProperty(HOLIDAY_YEAR_KEY) || 0) !== year;             // 3月の1回
+  if (!missing && !yearly) return '';
+  if (props.getProperty(HOLIDAY_TRY_KEY) === today) return '';             // 1日に何度も取りに行かない
+  props.setProperty(HOLIDAY_TRY_KEY, today);
+
+  try {
+    refreshHolidayList_();                                                 // 読み取り用のほうにある
+    props.setProperty(HOLIDAY_YEAR_KEY, String(year));
+    return '祝日の一覧を取り込み直しました（' + aheadYear + '年ぶんまで）。';
+  } catch (err) {
+    // 取りに行けなくてもシフト作りは止めない。気づけるようにメールだけ出す
+    try {
+      MailApp.sendEmail(Session.getEffectiveUser().getEmail(),
+        '【シフト表】祝日の一覧を取り込めませんでした',
+        '内閣府の祝日CSVを取りに行きましたが、うまくいきませんでした。\n\n' +
+        '理由：' + err.message + '\n\n' +
+        'そのままでも今までの祝日は使えます。' + aheadYear + '年の祝日が入っていないと、\n' +
+        'その日が平日あつかいになり、目安人数が少なめに出ます。');
+    } catch (mailErr) {}
+    return '';
+  }
+}
 
 // メニュー「自動でシート作成・お知らせを始める」：毎日朝10時に動く予約を入れる
 function startShiftAutomation() {
@@ -3247,8 +3646,9 @@ function dailyShiftCheck() {
   var now = new Date();
   var today = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
   kitRefreshSummary_(settings, today);        // 募集していない時期も書き直すので、期間の判定より前に置く
+  var holiday = maybeRefreshHolidays_();      // 週シートを作る前に、祝日の一覧を新しくしておく
   var period = currentRequestPeriod_(settings, now);
-  if (!period) return { created: [], missingBudget: [], notice: '' };
+  if (!period) return { created: [], missingBudget: [], notice: '', holiday: holiday };
 
   var created = ensurePeriodSheets_(ss, period);
   var missing = missingBudgetDays_(ss, period);
@@ -3256,7 +3656,7 @@ function dailyShiftCheck() {
 
   // 予算が足りない日は、週シートを作った日とお知らせを送った日にだけメールする（毎日は送らない）
   if (missing.length && (created.length || notice)) noticeMissingBudget_(ss, period, missing, settings, today);
-  return { created: created, missingBudget: missing, notice: notice };
+  return { created: created, missingBudget: missing, notice: notice, holiday: holiday };
 }
 
 // 募集している期間の週シートを、足りなければ古い方から順に作る
@@ -3315,9 +3715,10 @@ function sendDeadlineNotice_(ss, settings, period, today) {
     return '';
   }
 
-  var text = fillNoticeText_(noticeTemplateFor_(notice, left), ss, period, left);
+  var card = {};
+  var text = fillNoticeText_(noticeTemplateFor_(notice, left), ss, period, left, null, card);
   try {
-    linePush_(line, text);
+    linePush_(line, noticeMessage_(text, card));
   } catch (e) {
     noticeSendFailure_(settings, what, e.message);
     return '';
@@ -3387,7 +3788,7 @@ function filledWeeksByName_(ss, period) {
 // この募集期間に送信した人の一覧（記録ファイルが読めない時は null）
 function submittedNames_(period) {
   try {
-    var sheet = SpreadsheetApp.openById(RECORD_SPREADSHEET_ID).getSheetByName(RECORD_SUBMIT_SHEET);
+    var sheet = SpreadsheetApp.openById(recordSpreadsheetId_()).getSheetByName(RECORD_SUBMIT_SHEET);
     if (!sheet || sheet.getLastRow() < 2) return {};
     var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, RECORD_DATA_COL).getValues();
     var out = {};
@@ -3469,7 +3870,7 @@ function openLineSettings() {
     '<p style="margin:0 0 8px;font-size:12px;color:#555;">LINE公式アカウントから、スタッフのグループへお知らせを送るための設定です。</p>' +
 
     '<label style="display:block;font-weight:bold;">① LINE Developers に貼り付けるアドレス（Webhook URL）</label>' +
-    '<input readonly value="' + LINE_WEBHOOK_URL + '" onclick="this.select()" style="' + box + '">' +
+    '<input readonly value="' + lineWebhookUrl_() + '" onclick="this.select()" style="' + box + '">' +
 
     '<label style="display:block;font-weight:bold;margin-top:12px;">② チャネルアクセストークン</label>' +
     '<textarea id="token" style="' + box + 'height:70px;">' + escapeHtml_(line.token) + '</textarea>' +
@@ -3601,18 +4002,6 @@ function sendMonthlyNoticeTest() {
   return text;
 }
 
-// メニュー「今すぐ点検する」：毎日の自動点検を、その場で1回動かす（お知らせの日でなければ送りません）
-function runShiftCheckNow() {
-  var result = dailyShiftCheck();
-  var monthly = monthlyNoticeCheck();
-  SpreadsheetApp.getUi().alert(
-    '作った週シート：' + (result.created.length ? result.created.join('、') : 'なし') + '\n' +
-    '日別の予算が無い日：' + (result.missingBudget.length ? result.missingBudget.length + '日' : 'なし') + '\n' +
-    'LINEに送ったお知らせ：' + (result.notice ? '\n' + result.notice : 'なし（今日は送る日ではありません）') + '\n' +
-    '毎月のおしらせ：' + (monthly ? '\n' + monthly : 'なし（今日は送る日ではありません）'));
-}
-
-
 // ===== お知らせの文面・日程の設定（メニュー「お知らせの文面・日程」） =====
 // 送る日・送る時刻・文面を、店長が画面から変えられるようにする。
 // 文面の {期間} {締切} {リンク} {パソコン} {残り日数} {未提出} {途中} {入力状況} は、送るときに中身へ置き換わる。
@@ -3625,6 +4014,11 @@ var NOTICE_DEFAULT_FIRST = 'シフト希望の入力をお願いします。\n�
 var NOTICE_DEFAULT_LATER = '【あと{残り日数}日】シフト希望のスタッフ入力締切が近づいています。\n期間 {期間}\nスタッフ入力締切 {締切}\n{入力状況}\n\n{人手不足}\n{リンク}';
 // 締切の当日に送る文。{お礼}と{人手不足}は必ずどちらか片方だけが出る
 var NOTICE_DEFAULT_LAST = '【本日が締切】シフト希望のスタッフ入力締切は今日 {締切} です。\n期間 {期間}\n{入力状況}\n\n{お礼}{人手不足}\n{リンク}';
+// 「まだ出していない人：◯人」を出すのは、締切までこの日数以内になってから。
+// それより前は早すぎて急かすだけなので、{入力状況}は何も出さない
+var NOTICE_STATUS_WITHIN_DAYS = 5;
+// {リンク}{パソコン}を消したあと、残りがこの文字数までならその行ごと消す（「パソコンから→」など）
+var NOTICE_LINK_LINE_MAX = 12;
 
 // 「14,7,5,3」のような文字を数字の一覧にする（空の切れ端は落とす）
 function splitDays_(text) {
@@ -3656,6 +4050,678 @@ function readNoticeSettings_(settings) {
 function noticeTemplateFor_(notice, left) {
   if (left === 0) return notice.last;
   return left === notice.days[0] ? notice.first : notice.later;
+}
+
+
+/* ================= 足りないところの募集 =================
+   週シートの「目安」と「実時間」の差＝不足を30分ごとに拾い、続いているところを1つの枠にまとめる。
+   店長が画面で選んだ枠だけを「募集と応募」シート（アクセス記録）に書き、
+   スタッフのシフト希望の画面に赤く重ねて出す。週シートの中には枠を置かない
+   （週シートに名前と時間を入れると、その時間の「実時間」が増えて不足が消えてしまうため）。   */
+var RECRUIT_SHEET_NAME = '募集と応募';
+var RECRUIT_HEADERS = ['枠ID', '週シート', '日付', '曜日', '開始', '終了', '人数', '状態', '応募', '入れた人',
+  '作った日時', '種類', '候補', '声をかける人'];
+var RECRUIT_MIN_MINUTES = 90;        // これより短い不足は、画面で最初からチェックを外しておく
+var RECRUIT_OPEN = '募集中';
+var RECRUIT_KIND_NEW = '新しく';     // だれでも入れる枠（候補の時間から選んでもらう）
+var RECRUIT_KIND_STRETCH = '延ばす'; // その日もう入っている人に、早く来る／遅くまでを頼む枠
+var RECRUIT_KINDS = [RECRUIT_KIND_NEW, RECRUIT_KIND_STRETCH];
+var RECRUIT_MAX_CHOICES = 4;         // 1つの枠に出せる候補の時間の数
+
+// 「募集と応募」シート（アクセス記録の中。使うときに作る。スタッフには見せない）
+function getRecruitSheet_() {
+  var ss = SpreadsheetApp.openById(recordSpreadsheetId_());
+  var sheet = ss.getSheetByName(RECRUIT_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(RECRUIT_SHEET_NAME);
+    sheet.hideSheet();
+  }
+  if (sheet.getMaxColumns() < RECRUIT_HEADERS.length) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), RECRUIT_HEADERS.length - sheet.getMaxColumns());
+  }
+  var head = sheet.getRange(1, 1, 1, RECRUIT_HEADERS.length).getDisplayValues()[0];
+  var same = RECRUIT_HEADERS.every(function(h, i) { return String(head[i]).trim() === h; });
+  if (!same) {
+    sheet.getRange(1, 1, 1, RECRUIT_HEADERS.length).setValues([RECRUIT_HEADERS])
+      .setFontWeight('bold').setBackground('#EFF0ED');
+    sheet.setFrozenRows(1);
+    sheet.getRange('C:C').setNumberFormat('@');
+    sheet.getRange('E:F').setNumberFormat('@');
+    sheet.getRange('M:M').setNumberFormat('@');
+  }
+  return sheet;
+}
+
+// 分（540）を「9:00」にする
+function minuteLabel_(m) {
+  return Math.floor(m / 60) + ':' + ('0' + (m % 60)).slice(-2);
+}
+
+// 「9:00」「900」を分に直す。空なら -1
+function hhmmToMin_(v) {
+  var t = String(v == null ? '' : v).trim();
+  if (!t) return -1;
+  var m = /^(\d{1,2}):(\d{2})$/.exec(t);
+  if (m) return Number(m[1]) * 60 + Number(m[2]);
+  var n = Number(t.replace(/[^0-9]/g, ''));
+  if (!(n > 0)) return -1;
+  return Math.floor(n / 100) * 60 + (n % 100);
+}
+
+// 募集で選べる時間。1時間ごと（お店の開き時間から閉め時間まで）＋設定の端の時間（21:15 など）
+function recruitTimeOptions_() {
+  var base = readRequestBase_(getRequestSettingsSheet_());
+  var first = hhmmToMin_(base.startFrom), last = hhmmToMin_(base.endTo);
+  if (!(last > first)) { first = 9 * 60; last = 21 * 60 + 30; }
+  var out = [];
+  if (first % 60) out.push(minuteLabel_(first));
+  for (var m = Math.ceil(first / 60) * 60; m <= last; m += 60) out.push(minuteLabel_(m));
+  if (last % 60) out.push(minuteLabel_(last));
+  return out;
+}
+
+// 選択肢に無い時間（19:30 など）を、いちばん近い選択肢に寄せる。up=true なら遅い側へ
+function snapOption_(label, options, up) {
+  var want = hhmmToMin_(label);
+  var mins = options.map(hhmmToMin_);
+  if (options.indexOf(label) >= 0) return label;
+  var best = -1;
+  for (var i = 0; i < mins.length; i++) {
+    if (up ? mins[i] >= want : mins[i] <= want) { if (up) { best = i; break; } best = i; }
+  }
+  if (best < 0) best = up ? mins.length - 1 : 0;
+  return options[best];
+}
+
+// 候補の時間。シートには「16:00-21:15」の行で持つ
+function parseChoices_(text, fallbackFrom, fallbackTo) {
+  var out = [];
+  String(text == null ? '' : text).split('\n').forEach(function(line) {
+    var m = /^\s*(\d{1,2}:\d{2})\s*[-–~〜]\s*(\d{1,2}:\d{2})\s*$/.exec(line);
+    if (!m) return;
+    var a = stepTime_(m[1], ''), b = stepTime_(m[2], '');
+    if (a && b && hhmmToMin_(b) > hhmmToMin_(a)) out.push({ from: a, to: b });
+  });
+  if (!out.length && fallbackFrom && fallbackTo) out.push({ from: fallbackFrom, to: fallbackTo });
+  return out;
+}
+
+function choicesText_(list) {
+  return list.map(function(c) { return c.from + '-' + c.to; }).join('\n');
+}
+
+// 候補をまとめた言い方（「16:00〜21:15 か 18:00〜21:15」）
+function choicesLabel_(list) {
+  return list.map(function(c) { return c.from + '〜' + c.to; }).join(' か ');
+}
+
+// 名前を改行で積んだ列を一覧にする
+function recruitListCell_(text) {
+  return String(text == null ? '' : text).split('\n')
+    .map(function(s) { return String(s).trim(); })
+    .filter(function(s) { return s; });
+}
+
+// 週シートの開始日（T1）。無ければ空
+function weekStartYmd_(sheet) {
+  var v = sheet.getRange('T1').getValue();
+  if (!(v instanceof Date)) return '';
+  return Utilities.formatDate(v, SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(), 'yyyy-MM-dd');
+}
+
+// 1日ぶんの不足を、30分ごとの並びでそのまま返す（9:00 が先頭、足りていないマスは人数、足りていれば0）
+function lackRowOfDay_(sheet, block) {
+  var cols = TARGET_SLOTS * 2 - 1;
+  var guide = sheet.getRange(block.row, block.col, 1, cols).getValues()[0];
+  var actual = sheet.getRange(block.row + 1, block.col, 1, cols).getValues()[0];
+  var out = [];
+  for (var s = 0; s < TARGET_SLOTS; s++) {
+    var lack = (Number(guide[s * 2]) || 0) - (Number(actual[s * 2]) || 0);
+    out.push(lack > 0 ? lack : 0);
+  }
+  return out;
+}
+
+// 不足を見る終わりの時間から、色を付けるマスの数（9:00から30分ごと）
+function lackCellCount_() {
+  var n = Math.ceil((shiftEndLimitMin_() - TARGET_FIRST_HOUR * 60) / 30);
+  return Math.max(1, Math.min(TARGET_SLOTS, n));
+}
+
+// 1日ぶんの不足。続いているところを1つの枠にする。
+// 人数は、その枠でいちばん足りない時の人数。endLimitMin は退勤できる上限（22:00でなく21:15で止めるため）
+function shortageOfDay_(sheet, block, endLimitMin) {
+  var lacks = lackRowOfDay_(sheet, block);
+  var out = [];
+  var open = null;
+  for (var s = 0; s < TARGET_SLOTS; s++) {
+    var lack = lacks[s];
+    if (lack > 0) {
+      var from = (TARGET_FIRST_HOUR * 60) + s * 30;
+      if (!open) open = { fromMin: from, toMin: from + 30, people: lack };
+      else { open.toMin = from + 30; open.people = Math.max(open.people, lack); }
+    } else if (open) { out.push(open); open = null; }
+  }
+  if (open) out.push(open);
+  return out.map(function(x) {
+    var to = endLimitMin > 0 && x.toMin > endLimitMin ? endLimitMin : x.toMin;
+    return { fromMin: x.fromMin, toMin: to, people: x.people, minutes: to - x.fromMin };
+  }).filter(function(x) { return x.minutes > 0; });
+}
+
+// 週シート1枚ぶんの不足。日付・曜日も付ける
+function shortageOfWeek_(sheet) {
+  var startYmd = weekStartYmd_(sheet);
+  if (!startYmd) return [];
+  var endLimit = shiftEndLimitMin_();
+  var out = [];
+  TARGET_BLOCKS.forEach(function(block, dayIndex) {
+    var ymd = addDaysYmd_(startYmd, dayIndex);
+    shortageOfDay_(sheet, block, endLimit).forEach(function(x) {
+      out.push({
+        week: sheet.getName(), dayIndex: dayIndex, ymd: ymd,
+        label: ymdLabel_(ymd), dow: WEEK_DOW_JP[dayIndex],
+        from: minuteLabel_(x.fromMin), to: minuteLabel_(x.toMin),
+        people: x.people, minutes: x.minutes
+      });
+    });
+  });
+  return out;
+}
+
+// その日もう入っている人のうち「まだ延ばせる人」。
+// 左の入力表（希望）と、右の日別ブロック（いまの時間）の差を見る
+function stretchableOn_(sheet, dayIndex) {
+  var last = sheet.getLastRow();
+  if (last < ROSTER_START_ROW) return [];
+  var wish = sheet.getRange(ROSTER_START_ROW, 1, last - ROSTER_START_ROW + 1, 15).getDisplayValues();
+  var names = sheet.getRange(DAY_BLOCKS[dayIndex].names);
+  var now = sheet.getRange(names.getRow(), names.getColumn(), names.getNumRows(), 3).getDisplayValues();
+  var assigned = {};
+  now.forEach(function(r) {
+    var n = String(r[0]).trim();
+    if (n) assigned[flatName_(n)] = { s: hhmmToMin_(r[1]), e: hhmmToMin_(r[2]) };
+  });
+  var out = [];
+  wish.forEach(function(r) {
+    var name = String(r[0]).trim();
+    if (!name) return;
+    var a = assigned[flatName_(name)];
+    if (!a || !(a.e > a.s)) return;                         // その日に入っていない人は対象外
+    var ws = hhmmToMin_(r[1 + dayIndex * 2]), we = hhmmToMin_(r[2 + dayIndex * 2]);
+    var early = (we > ws) ? a.s - ws : 0, late = (we > ws) ? we - a.e : 0;
+    out.push({ name: name, now: minuteLabel_(a.s) + '–' + minuteLabel_(a.e),
+      wish: (we > ws) ? minuteLabel_(ws) + '–' + minuteLabel_(we) : '',
+      nowFrom: minuteLabel_(a.s), nowTo: minuteLabel_(a.e),
+      early: early > 0 ? early : 0, late: late > 0 ? late : 0 });
+  });
+  return out;
+}
+
+// 「募集と応募」シートの中身。週シート名を渡すとその週だけ
+function readRecruits_(weekName) {
+  var sheet = getRecruitSheet_();
+  var last = sheet.getLastRow();
+  if (last < 2) return [];
+  var out = [];
+  sheet.getRange(2, 1, last - 1, RECRUIT_HEADERS.length).getDisplayValues().forEach(function(r, i) {
+    if (!String(r[0]).trim()) return;
+    if (weekName && String(r[1]).trim() !== String(weekName)) return;
+    var kind = String(r[11]).trim();
+    out.push({ row: i + 2, id: String(r[0]).trim(), week: String(r[1]).trim(), ymd: String(r[2]).trim(),
+      dow: String(r[3]).trim(), from: String(r[4]).trim(), to: String(r[5]).trim(),
+      people: Number(r[6]) || 1, state: String(r[7]).trim(),
+      applied: String(r[8]).trim(), filled: String(r[9]).trim(),
+      kind: RECRUIT_KINDS.indexOf(kind) >= 0 ? kind : RECRUIT_KIND_NEW,
+      choices: parseChoices_(r[12], String(r[4]).trim(), String(r[5]).trim()),
+      targets: recruitListCell_(r[13]) });
+  });
+  return out;
+}
+
+// 画面から呼ばれる保存。選んだ枠だけを「募集中」にする（その週のぶんだけ入れ替える）。
+// 同じ日・同じ種類・同じ候補の枠が前からあれば、応募の中身は引き継ぐ
+// ★末尾に _ を付けると画面から呼べなくなるため付けない
+function saveRecruits(values) {
+  values = values || {};
+  var week = String(values.week || '');
+  if (!/^\d{6}$/.test(week)) throw new Error('週が正しくありません。');
+  var list = Array.isArray(values.slots) ? values.slots : [];
+  var sheet = getRecruitSheet_();
+  var stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
+  var last = sheet.getLastRow();
+  var keep = [];
+  var before = {};
+  if (last >= 2) {
+    sheet.getRange(2, 1, last - 1, RECRUIT_HEADERS.length).getDisplayValues().forEach(function(r) {
+      if (!String(r[0]).trim()) return;
+      if (String(r[1]).trim() !== week) { keep.push(r); return; }    // ほかの週はそのまま残す
+      before[r[2] + '|' + String(r[11]).trim() + '|' + String(r[12]).trim()] = r;  // 日付|種類|候補
+    });
+  }
+  var added = [];
+  list.forEach(function(x) {
+    var ymd = String(x.ymd || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) throw new Error('日付が正しくありません。');
+    var label = ymdLabel_(ymd);
+    var kind = RECRUIT_KINDS.indexOf(String(x.kind)) >= 0 ? String(x.kind) : RECRUIT_KIND_NEW;
+    // 候補をもらっていなければ、開始と終了を候補1つとして扱う
+    var raw = Array.isArray(x.choices) && x.choices.length ? x.choices : [{ from: x.from, to: x.to }];
+    var choices = [];
+    raw.forEach(function(c) {
+      var from = stepTime_(c && c.from, ''), to = stepTime_(c && c.to, '');
+      if (!from || !to || hhmmToMin_(to) <= hhmmToMin_(from)) throw new Error(label + ' の時間が正しくありません。');
+      var text = from + '-' + to;
+      if (choices.indexOf(text) === -1) choices.push(text);
+    });
+    if (!choices.length) throw new Error(label + ' の時間を入れてください。');
+    if (choices.length > RECRUIT_MAX_CHOICES) throw new Error(label + ' の候補は' + RECRUIT_MAX_CHOICES + 'つまでです。');
+    var people = Number(x.people);
+    if (!(people >= 1 && people <= 9 && Math.floor(people) === people)) throw new Error(label + ' の人数は1〜9で入れてください。');
+    var targets = (Array.isArray(x.targets) ? x.targets : [])
+      .map(function(n) { return String(n).trim(); }).filter(function(n) { return n; });
+    if (kind === RECRUIT_KIND_STRETCH && !targets.length) throw new Error(label + ' は、声をかける人を選んでください。');
+    if (kind === RECRUIT_KIND_NEW) targets = [];
+    if (kind === RECRUIT_KIND_STRETCH && people > targets.length) people = targets.length;
+    var mins = choices.map(function(t) { return t.split('-'); });
+    var from = mins.map(function(p) { return p[0]; }).sort(function(a, b) { return hhmmToMin_(a) - hhmmToMin_(b); })[0];
+    var to = mins.map(function(p) { return p[1]; }).sort(function(a, b) { return hhmmToMin_(b) - hhmmToMin_(a); })[0];
+    var text = choices.join('\n');
+    var old = before[ymd + '|' + kind + '|' + text];
+    added.push(old
+      ? [old[0], week, ymd, x.dow, from, to, people, RECRUIT_OPEN, old[8], old[9], old[10], kind, text, targets.join('\n')]
+      : [week + '-' + ymd.replace(/-/g, '') + '-' + from.replace(':', '') + (kind === RECRUIT_KIND_STRETCH ? '-s' : ''),
+         week, ymd, x.dow, from, to, people, RECRUIT_OPEN, '', '', stamp, kind, text, targets.join('\n')]);
+  });
+  var all = keep.concat(added);
+  if (last >= 2) sheet.getRange(2, 1, last - 1, RECRUIT_HEADERS.length).clearContent();
+  if (all.length) sheet.getRange(2, 1, all.length, RECRUIT_HEADERS.length).setValues(all);
+  // 週シートの色をすぐ合わせる（募集をやめた分は色も消える）
+  try {
+    refreshRecruitMarks_(SpreadsheetApp.getActiveSpreadsheet().getSheetByName(week));
+  } catch (err) { Logger.log('募集の色付けに失敗: ' + err.message); }
+  return added.length;
+}
+
+
+/* --- 募集中の時間を、週シートの「目安」「実時間」の行に色で出す ---
+   セルの背景を直接塗ると、もとの色が分からなくなって戻せない。
+   条件付き書式（いつでも当たる「=TRUE」のルール）なら、ルールを消すだけで元どおりになる。   */
+var RECRUIT_MARK_COLOR = '#F1948A';     // 募集する（赤）
+var RECRUIT_MARK_COLOR2 = '#F5B041';    // 今いる人に頼む（橙）
+var RECRUIT_MARK_FORMULA = '=TRUE';
+
+// このルールは自分（募集）が入れたものか
+function isRecruitMarkRule_(rule) {
+  var bc = rule.getBooleanCondition();
+  if (!bc) return false;
+  if (String(bc.getCriteriaType()) !== 'CUSTOM_FORMULA') return false;
+  var values = bc.getCriteriaValues();
+  if (!values || String(values[0]) !== RECRUIT_MARK_FORMULA) return false;
+  var bg = String(bc.getBackground() || '').toUpperCase();
+  return bg === RECRUIT_MARK_COLOR.toUpperCase() || bg === RECRUIT_MARK_COLOR2.toUpperCase();
+}
+
+// 30分のマスの集まり（日 → マスの番号）を、続いているところごとに範囲にする。
+// 1マスは2列ぶん。縦は「目安」と「実時間」の2行なので、帯のように見える
+function slotsToRanges_(sheet, bag) {
+  var out = [];
+  Object.keys(bag).forEach(function(dayText) {
+    var block = TARGET_BLOCKS[Number(dayText)];
+    if (!block) return;
+    var ks = Object.keys(bag[dayText]).map(Number).sort(function(a, b) { return a - b; });
+    var i = 0;
+    while (i < ks.length) {
+      var from = ks[i], to = from;
+      while (i + 1 < ks.length && ks[i + 1] === to + 1) { i++; to = ks[i]; }
+      i++;
+      out.push(sheet.getRange(block.row, block.col + from * 2, 2, (to - from + 1) * 2));
+    }
+  });
+  return out;
+}
+
+// その週で募集している時間を、赤（新しく）と橙（今いる人に頼む）に分ける
+function recruitMarkRanges_(sheet) {
+  var startYmd = weekStartYmd_(sheet);
+  if (!startYmd) return { red: [], orange: [] };
+  var cells = lackCellCount_();
+  var red = {}, orange = {};
+  readRecruits_(sheet.getName()).forEach(function(r) {
+    if (r.state !== RECRUIT_OPEN) return;
+    var day = daysBetweenYmd_(startYmd, r.ymd);
+    if (!(day >= 0 && day <= 6)) return;
+    var bag = (r.kind === RECRUIT_KIND_STRETCH) ? orange : red;
+    r.choices.forEach(function(c) {
+      var from = hhmmToMin_(c.from), to = hhmmToMin_(c.to);
+      for (var m = from; m < to; m += 30) {
+        var k = Math.floor((m - TARGET_FIRST_HOUR * 60) / 30);
+        if (k < 0 || k >= cells) continue;
+        if (!bag[day]) bag[day] = {};
+        bag[day][k] = true;
+      }
+    });
+  });
+  // 同じマスが両方に入っていたら赤を残す（二重に塗らない）
+  Object.keys(orange).forEach(function(day) {
+    Object.keys(orange[day]).forEach(function(k) {
+      if (red[day] && red[day][k]) delete orange[day][k];
+    });
+    if (!Object.keys(orange[day]).length) delete orange[day];
+  });
+  return { red: slotsToRanges_(sheet, red), orange: slotsToRanges_(sheet, orange) };
+}
+
+// ===== 「不足」の欄（もとの「個人目標」「挨拶・清掃」の欄）=====
+// 色だけだと印刷で分かりにくいので、日ごとに「時間と人数」を文字で書く。
+// 募集が無くなれば空にする（書きっぱなしにしない）ため、ある日もない日も毎回書き直す。
+// 9行を1つにつなげて（結合して）、その中で折り返す。1行ずつ書くと、列がせまくて字が切れるため
+var LACK_TEXT_COL = 64;            // 升目の先頭から数えた列（月曜なら CK列）
+var LACK_TEXT_ROWS = 9;            // つなげる行数（もとの「個人目標」〜「挨拶・清掃」の9行）
+var LACK_TEXT_HEAD = '不足';
+var LACK_TEXT_COLOR = '#C00000';   // 文字色
+var LACK_TEXT_BG = '#FADBD8';      // うすい赤のしき色（ひと目で気づけるように）
+var LACK_TEXT_SIZE = 12;           // 文字の大きさ。見出しも時間も人数も、1つのマスなので全部これ
+
+// その日の募集を「16:00-21:15 1名」の形にする
+function lackTextOf_(r) {
+  var times = r.choices.map(function(c) { return c.from + '-' + c.to; }).join(' か ');
+  return times + ' ' + (Number(r.people) || 1) + '名' +
+    (r.kind === RECRUIT_KIND_STRETCH ? ' ※延長' : '');
+}
+
+// 曜日ごとの行（募集中のものだけ）
+function lackTextLines_(sheet) {
+  var out = {};
+  var startYmd = weekStartYmd_(sheet);
+  if (!startYmd) return out;
+  readRecruits_(sheet.getName()).forEach(function(r) {
+    if (r.state !== RECRUIT_OPEN) return;
+    var day = daysBetweenYmd_(startYmd, r.ymd);
+    if (!(day >= 0 && day <= 6)) return;
+    if (!out[day]) out[day] = [];
+    out[day].push(lackTextOf_(r));
+  });
+  return out;
+}
+
+// 「不足」の欄を1つのマスにまとめて返す。できなければ null
+// ※ 結合は「その結合ぜんぶ」を選ばないとほどけない。もとからある結合（横に広い等）を
+//    1つずつほどいてから、同じ幅で9行ぶんを結合し直す。
+//    何かの理由でできなくても、シフトの保存そのものは止めない
+function lackBox_(sheet, block) {
+  var row = block.head + 1, col = block.col + LACK_TEXT_COL;
+  try {
+    var area = sheet.getRange(row, col, LACK_TEXT_ROWS, 1);
+    var merges = area.getMergedRanges();
+    // 上や下へはみ出している結合（売上の欄など）は、こわさずにそのままにする
+    var outside = merges.some(function(m) {
+      return m.getRow() < row || m.getLastRow() > row + LACK_TEXT_ROWS - 1;
+    });
+    if (outside) return null;
+    var left = col, right = col;
+    merges.forEach(function(m) {
+      left = Math.min(left, m.getColumn());
+      right = Math.max(right, m.getLastColumn());
+    });
+    merges.forEach(function(m) { m.breakApart(); });
+    var wide = sheet.getRange(row, left, LACK_TEXT_ROWS, right - left + 1);
+    wide.merge();
+    return wide;
+  } catch (e) {
+    Logger.log('lackBox_: ' + e.message);
+    return null;
+  }
+}
+
+// 「不足」の欄を、いまの募集に合わせて書き直す
+function refreshLackText_(sheet) {
+  if (!sheet || !isWeekSheetName_(sheet.getName())) return 0;
+  var byDay = lackTextLines_(sheet);
+  var total = 0;
+  ADJUST_BLOCKS.forEach(function(block, day) {
+    var lines = (byDay[day] || []).slice();
+    if (lines.length > 7) {                          // 入りきらない分はまとめる
+      lines = lines.slice(0, 6).concat(['ほか ' + (lines.length - 6) + '件']);
+    }
+    var text = lines.length ? LACK_TEXT_HEAD + '\n' + lines.join('\n') : '';
+    var box = lackBox_(sheet, block);
+    if (box) {                                       // 1つのマスにまとめられた
+      box.setValue(text);
+      box.setWrap(true);                             // 中で折り返す（字が切れないように）
+      box.setVerticalAlignment('top');
+      box.setFontSize(LACK_TEXT_SIZE);
+      box.setFontWeight(lines.length ? 'bold' : null);
+      box.setFontColor(lines.length ? LACK_TEXT_COLOR : null);
+      box.setBackground(lines.length ? LACK_TEXT_BG : null);
+    } else {                                         // まとめられないときは1行ずつ入れる
+      var rows = [];
+      for (var i = 0; i < LACK_TEXT_ROWS; i++) rows.push([text.split('\n')[i] === undefined ? '' : text.split('\n')[i]]);
+      var area = sheet.getRange(block.head + 1, block.col + LACK_TEXT_COL, LACK_TEXT_ROWS, 1);
+      area.setValues(rows);
+      area.setFontSize(LACK_TEXT_SIZE);
+      area.setFontWeight(lines.length ? 'bold' : null);
+      area.setFontColor(lines.length ? LACK_TEXT_COLOR : null);
+      area.setBackground(lines.length ? LACK_TEXT_BG : null);
+    }
+    total += lines.length;
+  });
+  return total;
+}
+
+// 週シートの色を、いまの募集に合わせて引き直す。募集が無くなれば色も消える
+function refreshRecruitMarks_(sheet) {
+  if (!sheet || !isWeekSheetName_(sheet.getName())) return 0;
+  var marks = recruitMarkRanges_(sheet);
+  var mine = [];
+  [[marks.red, RECRUIT_MARK_COLOR], [marks.orange, RECRUIT_MARK_COLOR2]].forEach(function(pair) {
+    if (!pair[0].length) return;
+    mine.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(RECRUIT_MARK_FORMULA)
+      .setBackground(pair[1])
+      .setRanges(pair[0])
+      .build());
+  });
+  var keep = sheet.getConditionalFormatRules().filter(function(rule) { return !isRecruitMarkRule_(rule); });
+  // 自分のルールを先に置く（先のルールが勝つので、募集の色がちゃんと出る）
+  sheet.setConditionalFormatRules(mine.concat(keep));
+  refreshLackText_(sheet);        // 「不足」の欄（時間と人数）も一緒に書き直す
+  return marks.red.length + marks.orange.length;
+}
+
+// メニュー「足りないところを募集する」
+// シフト表を見ながら直したいので、動かせる窓（モードレス）で出す。開いたままシートも触れる
+function openRecruit() {
+  var sheet = SpreadsheetApp.getActiveSheet();
+  if (!isWeekSheetName_(sheet.getName())) {
+    SpreadsheetApp.getUi().alert('週のシート（261019 のような名前）を開いてから押してください。');
+    return;
+  }
+  refreshRecruitMarks_(sheet);        // スマホで承認したあとなど、色がずれていたら直す
+  var opts = recruitTimeOptions_();
+  var startYmd = weekStartYmd_(sheet);
+  var stretchByDay = {};
+  function stretchOf(dayIndex) {
+    if (!(dayIndex >= 0 && dayIndex <= 6)) return [];
+    if (!stretchByDay[dayIndex]) stretchByDay[dayIndex] = stretchableOn_(sheet, dayIndex);
+    return stretchByDay[dayIndex];
+  }
+  var slots = [];
+  var seen = {};
+  // いま募集している枠は、直した中身のまま先に出す（チェックを外せば止まる）
+  readRecruits_(sheet.getName()).forEach(function(r) {
+    if (r.state !== RECRUIT_OPEN) return;
+    seen[r.ymd + '|' + r.from + '|' + r.to] = true;
+    slots.push({ ymd: r.ymd, dow: r.dow, label: ymdLabel_(r.ymd), kind: r.kind,
+      choices: r.choices, people: r.people, targets: r.targets, minutes: 0, on: true,
+      applied: r.applied, now: true,
+      stretch: stretchOf(startYmd ? daysBetweenYmd_(startYmd, r.ymd) : -1) });
+  });
+  // 不足から出した枠（すでに募集している時間と同じものは出さない）
+  shortageOfWeek_(sheet).forEach(function(x) {
+    if (seen[x.ymd + '|' + x.from + '|' + x.to]) return;
+    slots.push({ ymd: x.ymd, dow: x.dow, label: x.label, kind: RECRUIT_KIND_NEW,
+      choices: [{ from: snapOption_(x.from, opts, false), to: snapOption_(x.to, opts, true) }],
+      people: x.people, targets: [], minutes: x.minutes,
+      on: x.minutes >= RECRUIT_MIN_MINUTES, applied: '', now: false,
+      stretch: stretchOf(x.dayIndex) });
+  });
+  slots.sort(function(a, b) {
+    if (a.ymd !== b.ymd) return a.ymd < b.ymd ? -1 : 1;
+    return hhmmToMin_(a.choices[0].from) - hhmmToMin_(b.choices[0].from);
+  });
+  var data = { week: sheet.getName(), slots: slots, min: RECRUIT_MIN_MINUTES,
+    options: opts, kinds: RECRUIT_KINDS, maxChoices: RECRUIT_MAX_CHOICES };
+  SpreadsheetApp.getUi().showModelessDialog(
+    HtmlService.createHtmlOutput(recruitDialogHtml_(data)).setWidth(470).setHeight(620),
+    '足りないところを募集する');
+}
+
+function recruitDialogHtml_(data) {
+  var json = JSON.stringify(data).replace(/</g, '\u003c');
+  return [
+    '<style>',
+    '  body{ font-family:sans-serif; font-size:13px; line-height:1.6; margin:0; padding:6px 10px 10px; }',
+    '  .lead{ margin:0 0 8px; font-size:11.5px; color:#555; }',
+    '  .slot{ border:1px solid #ddd; border-left:4px solid #ddd; border-radius:8px; padding:7px 9px; margin-bottom:8px; }',
+    '  .slot.on{ border-left-color:#C0392B; background:#FFFBFA; }',
+    '  .head{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; }',
+    '  .head label{ font-weight:bold; }',
+    '  .lack{ font-size:11px; color:#888; }',
+    '  .sub{ font-size:11px; color:#555; margin:6px 0 2px; font-weight:bold; }',
+    '  .row{ display:flex; align-items:center; gap:4px; margin-bottom:3px; }',
+    '  .row select{ font-size:12px; padding:2px; }',
+    '  .x{ border:0; background:none; color:#B03A2E; cursor:pointer; font-size:13px; padding:0 4px; }',
+    '  .add{ border:1px dashed #bbb; background:#fff; border-radius:6px; font-size:11.5px; padding:3px 8px; cursor:pointer; }',
+    '  .tgt{ display:block; font-size:11.5px; color:#333; }',
+    '  .tgt small{ color:#777; }',
+    '  .app{ font-size:11.5px; color:#B45309; margin-top:4px; }',
+    '  .foot{ position:sticky; bottom:0; background:#fff; border-top:1px solid #eee; padding-top:8px;',
+    '    display:flex; align-items:center; gap:8px; justify-content:flex-end; }',
+    '  #msg{ flex:1; font-size:11.5px; color:#186A3B; margin:0; }',
+    '  #saveBtn{ padding:6px 12px; font-size:13px; }',
+    '</style>',
+    '<p class="lead">「目安」と「実時間」の差から出しています。<b>この窓は動かせます</b>（上の帯をつかんで左右へ）。',
+    '開いたままシートも見られます。募集にした時間は、週シートの「目安」「実時間」の行が',
+    '<b style="color:#C0392B;">赤</b>（新しく）・<b style="color:#B9770E;">橙</b>（今いる人に頼む）になります。',
+    data.min + '分より短いところは、最初から外してあります。</p>',
+    '<div id="list"></div>',
+    '<div class="foot"><p id="msg"></p>',
+    '<button id="saveBtn">チェックした枠で募集する</button></div>',
+    '<script>',
+    'var DATA = ' + json + ';',
+    'var NEW = DATA.kinds[0], STRETCH = DATA.kinds[1];',
+    'function esc(s){ return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }',
+    'function hours(min){ return Math.round(min / 60 * 10) / 10; }',
+    'function timeSel(cls, i, c, selected){',
+    '  return "<select class=\\"" + cls + "\\" data-i=\\"" + i + "\\" data-c=\\"" + c + "\\">" +',
+    '    DATA.options.map(function(t){ return "<option value=\\"" + t + "\\"" + (t === selected ? " selected" : "") + ">" + t + "</option>"; }).join("") +',
+    '    "</select>";',
+    '}',
+    'function pplSel(i, people, max){',
+    '  var out = "<select class=\\"ppl\\" data-i=\\"" + i + "\\">";',
+    '  for (var n = 1; n <= max; n++) out += "<option value=\\"" + n + "\\"" + (n === people ? " selected" : "") + ">" + n + "人</option>";',
+    '  return out + "</select>";',
+    '}',
+    'function card(s, i){',
+    '  var stretch = s.kind === STRETCH;',
+    '  var max = stretch ? Math.max(1, s.stretch.length) : 9;',
+    '  if (s.people > max) s.people = max;',
+    '  var head = "<div class=\\"head\\">" +',
+    '    "<label><input type=\\"checkbox\\" class=\\"on\\" data-i=\\"" + i + "\\"" + (s.on ? " checked" : "") + "> " +',
+    '    esc(s.label) + "</label>" +',
+    '    "<select class=\\"kind\\" data-i=\\"" + i + "\\">" +',
+    '      "<option value=\\"" + NEW + "\\"" + (stretch ? "" : " selected") + ">新しく入ってもらう</option>" +',
+    '      "<option value=\\"" + STRETCH + "\\"" + (stretch ? " selected" : "") + ">今いる人に頼む</option>" +',
+    '    "</select>" + pplSel(i, s.people, max) +',
+    '    (s.minutes ? "<span class=\\"lack\\">" + hours(s.minutes) + "時間足りません</span>" : "") +',
+    '    (s.now ? "<span class=\\"lack\\">募集中</span>" : "") + "</div>";',
+    '  var tgt = "";',
+    '  if (stretch) {',
+    '    tgt = "<div class=\\"sub\\">声をかける人（その日に入っている人）</div>";',
+    '    tgt += s.stretch.length ? s.stretch.map(function(p, t){',
+    '      var on = s.targets.indexOf(p.name) >= 0;',
+    '      return "<label class=\\"tgt\\"><input type=\\"checkbox\\" class=\\"t\\" data-i=\\"" + i + "\\" data-t=\\"" + t + "\\"" +',
+    '        (on ? " checked" : "") + "> " + esc(p.name) +',
+    '        " <small>いま " + esc(p.now) + (p.wish ? "／希望 " + esc(p.wish) : "") + "</small></label>";',
+    '    }).join("") : "<div class=\\"tgt\\"><small>この日に入っている人がいません。</small></div>";',
+    '  }',
+    '  var head2 = stretch ? "入ってほしい時間（どれでもよい）" : "入れる時間（どれでもよい）";',
+    '  var rows = "<div class=\\"sub\\">" + head2 + "</div>" + s.choices.map(function(c, k){',
+    '    return "<div class=\\"row\\">" + timeSel("cf", i, k, c.from) + "〜" + timeSel("ct", i, k, c.to) +',
+    '      (s.choices.length > 1 ? "<button type=\\"button\\" class=\\"x\\" data-del=\\"" + i + "\\" data-c=\\"" + k + "\\">✕</button>" : "") +',
+    '      "</div>";',
+    '  }).join("");',
+    '  if (s.choices.length < DATA.maxChoices) {',
+    '    rows += "<button type=\\"button\\" class=\\"add\\" data-add=\\"" + i + "\\">＋ この時間でもよい、を足す</button>";',
+    '  }',
+    '  return "<div class=\\"slot" + (s.on ? " on" : "") + "\\">" + head + tgt + rows +',
+    '    (s.applied ? "<div class=\\"app\\">応募：" + esc(s.applied.split("\\n").map(function(l){ return l.split("|")[0]; }).join("、")) + "</div>" : "") +',
+    '    "</div>";',
+    '}',
+    'function draw(){',
+    '  var box = document.getElementById("list");',
+    '  if (!DATA.slots.length) {',
+    '    box.innerHTML = "<p style=\\"color:#186A3B;\\">足りないところはありません。</p>";',
+    '    document.getElementById("saveBtn").disabled = true;',
+    '    return;',
+    '  }',
+    '  box.innerHTML = DATA.slots.map(card).join("");',
+    '}',
+    'function show(t, err){ var m = document.getElementById("msg"); m.textContent = t; m.style.color = err ? "#B03A2E" : "#186A3B"; }',
+    'document.getElementById("list").addEventListener("change", function(ev){',
+    '  var el = ev.target, i = Number(el.getAttribute("data-i"));',
+    '  if (!(i >= 0)) return;',
+    '  var s = DATA.slots[i];',
+    '  if (el.classList.contains("on")) { s.on = el.checked; draw(); return; }',
+    '  if (el.classList.contains("kind")) {',
+    '    s.kind = el.value;',
+    '    if (s.kind === STRETCH && !s.targets.length) s.targets = s.stretch.map(function(p){ return p.name; });',
+    '    draw(); return;',
+    '  }',
+    '  if (el.classList.contains("ppl")) { s.people = Number(el.value); return; }',
+    '  if (el.classList.contains("t")) {',
+    '    var name = s.stretch[Number(el.getAttribute("data-t"))].name;',
+    '    var at = s.targets.indexOf(name);',
+    '    if (el.checked && at === -1) s.targets.push(name);',
+    '    if (!el.checked && at >= 0) s.targets.splice(at, 1);',
+    '    return;',
+    '  }',
+    '  var c = Number(el.getAttribute("data-c"));',
+    '  if (el.classList.contains("cf")) s.choices[c].from = el.value;',
+    '  if (el.classList.contains("ct")) s.choices[c].to = el.value;',
+    '});',
+    'document.getElementById("list").addEventListener("click", function(ev){',
+    '  var el = ev.target;',
+    '  var add = el.getAttribute && el.getAttribute("data-add");',
+    '  if (add !== null && add !== undefined) {',
+    '    var s = DATA.slots[Number(add)];',
+    '    var last = s.choices[s.choices.length - 1];',
+    '    s.choices.push({ from: last.from, to: last.to });',
+    '    draw(); return;',
+    '  }',
+    '  var del = el.getAttribute && el.getAttribute("data-del");',
+    '  if (del !== null && del !== undefined) {',
+    '    DATA.slots[Number(del)].choices.splice(Number(el.getAttribute("data-c")), 1);',
+    '    draw();',
+    '  }',
+    '});',
+    'document.getElementById("saveBtn").addEventListener("click", function(){',
+    '  var slots = DATA.slots.filter(function(s){ return s.on; }).map(function(s){',
+    '    return { ymd: s.ymd, dow: s.dow, kind: s.kind, people: s.people,',
+    '      choices: s.choices, targets: s.kind === STRETCH ? s.targets : [] };',
+    '  });',
+    '  var btn = document.getElementById("saveBtn");',
+    '  btn.disabled = true;',
+    '  show("送っています…");',
+    '  google.script.run',
+    '    .withSuccessHandler(function(n){ show(n + "件を募集中にしました。スタッフの画面に出ます。"); btn.disabled = false; })',
+    '    .withFailureHandler(function(e){ show(e.message, true); btn.disabled = false; })',
+    '    .saveRecruits({ week: DATA.week, slots: slots });',
+    '});',
+    'draw();',
+    '</script>'
+  ].join('\n');
 }
 
 /* ================= 時給と交通費（スタッフのページに出す概算の給与で使う） ================= */
@@ -4085,28 +5151,53 @@ function shortStaffTextFrom_(info, allowHard) {
 // 文の中の {…} を、その時の中身に置き換える。
 // ready ＝ 何通も続けて作るときに、同じ数え直しをくり返さないための入れ物
 //（「今の内容で見てみる」は送る日の数だけ文を作るので、これが無いと同じ集計を何回もやることになる）
-function fillNoticeText_(template, ss, period, left, ready) {
+// card ＝ 渡すとリンクを文から外してボタンにまわす（長いURLで文が読みにくくなるため）
+function fillNoticeText_(template, ss, period, left, ready, card) {
   var text = String(template);
   var last = addDaysYmd_(period.start, period.weeks * 7 - 1);
   var done = ready || {};
+  // リンクを文から外してボタンにまわす。
+  // 「パソコンから→{パソコン}」のようにリンクだけの行は、前置きごと1行まるごと消す
+  if (card) {
+    text = text.split('\n').map(function(line) {
+      var rest = line;
+      if (rest.indexOf('{リンク}') !== -1) { card.link = true; rest = rest.split('{リンク}').join(''); }
+      if (rest.indexOf('{パソコン}') !== -1) { card.pc = true; rest = rest.split('{パソコン}').join(''); }
+      if (rest === line) return line;                       // リンクの無い行はそのまま
+      // 「パソコンから→」のような短い前置きだけが残る行は、リンクのための行なので丸ごと消す
+      if (rest.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '').length <= NOTICE_LINK_LINE_MAX) return null;
+      return rest.replace(/[\s\u3000]+$/, '');
+    }).filter(function(line) { return line !== null; }).join('\n');
+  }
   var map = {
     '{期間}': ymdLabel_(period.start) + '〜' + ymdLabel_(last),
     '{締切}': ymdLabel_(period.deadline.slice(0, 10)) + ' ' + period.deadline.slice(11),
+    '{締切日}': ymdLabel_(period.deadline.slice(0, 10)),       // 時刻なし（1行目を短くしたい時に使う）
     '{リンク}': staffPageUrl_(getRequestSettingsSheet_(), '?p=' + period.start.slice(2).replace(/-/g, '')),
-    // パソコン用。LINEログインを通らずに直接開く（LINEに入っていない画面からでも使える）
-    '{パソコン}': REQUEST_FORM_URL + '?p=' + period.start.slice(2).replace(/-/g, ''),
+    // パソコン用。LINEログインを通らずに直接開く（LINEに入っていない画面からでも使える）。
+    // authuser=0 は、Googleに複数ログインしているパソコンで「ファイルを開くことができません」に
+    // なるのを防ぐため（Googleが勝手に2つ目のアカウントで開こうとする）
+    '{パソコン}': requestFormUrl_() + '?p=' + period.start.slice(2).replace(/-/g, '') + '&authuser=0',
     '{残り日数}': String(left),
     '{店舗名}': getStoreName_()
   };
+  if (card) { card.linkUrl = map['{リンク}']; card.pcUrl = map['{パソコン}']; }
   if (/\{未提出\}|\{途中\}|\{入力状況\}/.test(text)) {
-    if (!done.waiting) done.waiting = waitingCounts_(ss, period);
-    var waiting = done.waiting;
-    var lines = [];
-    if (waiting.notSubmitted) lines.push('まだ出していない人：' + waiting.notSubmitted + '人');
-    if (waiting.partial) lines.push('途中の人（1週でも空きがある）：' + waiting.partial + '人');
-    map['{未提出}'] = String(waiting.notSubmitted);
-    map['{途中}'] = String(waiting.partial);
-    map['{入力状況}'] = lines.length ? lines.join('\n') : 'みなさん提出ありがとうございます。変える方はお早めに。';
+    if (left > NOTICE_STATUS_WITHIN_DAYS) {
+      // まだ日があるうちは人数を出さない（早いうちから急かさないため）
+      map['{未提出}'] = '';
+      map['{途中}'] = '';
+      map['{入力状況}'] = '';
+    } else {
+      if (!done.waiting) done.waiting = waitingCounts_(ss, period);
+      var waiting = done.waiting;
+      var lines = [];
+      if (waiting.notSubmitted) lines.push('まだ出していない人：' + waiting.notSubmitted + '人');
+      if (waiting.partial) lines.push('途中の人（1週でも空きがある）：' + waiting.partial + '人');
+      map['{未提出}'] = String(waiting.notSubmitted);
+      map['{途中}'] = String(waiting.partial);
+      map['{入力状況}'] = lines.length ? lines.join('\n') : 'みなさん提出ありがとうございます。変える方はお早めに。';
+    }
   }
   if (/\{人手不足\}|\{お礼\}/.test(text)) {
     if (!done.info) done.info = shortStaffInfo_(ss, period);       // 数えるのは1回だけ
@@ -4117,6 +5208,42 @@ function fillNoticeText_(template, ss, period, left, ready) {
   }
   Object.keys(map).forEach(function(key) { text = text.split(key).join(map[key]); });
   return text.replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '');   // 中身が空だった差し込みの空行を詰める
+}
+
+// お知らせをLINEへ送る形にする。リンクは長くて読みにくいので、文には出さずにボタンにする
+function noticeMessage_(text, card) {
+  var c = card || {};
+  if (!c.link && !c.pc) return text;                 // リンクを使わない文は、今までどおりの文だけ
+  var buttons = [];
+  if (c.link && c.linkUrl) {
+    buttons.push({ type: 'button', style: 'primary', height: 'sm',
+      action: { type: 'uri', label: 'シフト希望を入力する', uri: c.linkUrl } });
+  }
+  if (c.pc && c.pcUrl) {
+    // パソコン用も枠のあるボタンにする（文字だけだと押せると気づかれにくい）
+    buttons.push({ type: 'button', style: 'secondary', height: 'sm',
+      action: { type: 'uri', label: 'パソコンで入力する', uri: c.pcUrl } });
+  }
+  if (!buttons.length) return text;
+  return {
+    type: 'flex',
+    altText: String(text).slice(0, 300),             // 通知に出る短い文（400字まで）
+    contents: {
+      type: 'bubble',
+      size: 'mega',
+      body: { type: 'box', layout: 'vertical', contents: [
+        { type: 'text', text: String(text), wrap: true, size: 'sm', color: '#111111' }] },
+      footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: buttons }
+    }
+  };
+}
+
+// 「今の内容で見てみる」で、ボタンの見え方も分かるようにする
+function noticeButtonLabels_(card) {
+  var out = [];
+  if (card.link && card.linkUrl) out.push('［ボタン］シフト希望を入力する');
+  if (card.pc && card.pcUrl) out.push('［ボタン］パソコンで入力する');
+  return out;
 }
 
 // メニュー「お知らせの文面・日程」
@@ -4137,8 +5264,11 @@ function openNoticeSettings() {
     '<textarea id="last" style="' + box + 'height:110px;">' + escapeHtml_(notice.last) + '</textarea>' +
     '<p style="margin:8px 0 0;font-size:12px;color:#555;">使える差し込み：<br>' +
     '{期間}／{締切}／{リンク}／{残り日数}／{未提出}／{途中}／{入力状況}／{人手不足}／{お礼}／{店舗名}<br>' +
+    '{締切日}＝締切の日にちだけ（時刻なし）。1行目を短くしたいときに使います。<br>' +
     '{パソコン}＝パソコン用のリンク（LINEログインを通らない）<br>' +
+    '　{リンク}と{パソコン}は、その行がまるごと<b>下のボタン</b>になります（長いURLを文に出しません）。<br>' +
     '{入力状況}＝「まだ出していない人：◯人」などを自動で作ります（全員そろっていればお礼の文になります）。<br>' +
+    '　出るのは<b>締切まであと' + NOTICE_STATUS_WITHIN_DAYS + '日以内</b>のときだけです。それより前の日は何も出ません。<br>' +
     '{人手不足}＝人が少なめの日を知らせます（少ない日が4日以上なら曜日でまとめます）。足りている時は何も出ません。<br>' +
     '　「このままでは運営に支障が出ます」という強めの言い方になるのは、<b>締切まであと3日以内</b>で、なおかつ<br>' +
     '　ひとりあと1日以上足りないときだけです。それより前の日は「入れそうな方がいたら」の軽い声かけになります。<br>' +
@@ -4147,6 +5277,7 @@ function openNoticeSettings() {
     '<p id="msg" style="margin:8px 0 0;font-size:12px;color:#186A3B;"></p>' +
     '<div style="margin-top:10px;text-align:right;">' +
     '<button onclick="doPreview()" style="margin-right:8px;padding:6px 12px;">今の内容で見てみる</button>' +
+    '<button id="testBtn" onclick="doTest()" style="margin-right:8px;padding:6px 12px;">お試しに送ってみる</button>' +
     '<button id="saveBtn" onclick="doSave()" style="padding:6px 12px;">保存する</button>' +
     '</div>' +
     '<pre id="preview" style="white-space:pre-wrap;background:#F4F4F2;border-radius:6px;padding:8px;font-size:12px;margin-top:8px;"></pre>' +
@@ -4168,6 +5299,14 @@ function openNoticeSettings() {
     '    .withSuccessHandler(function(t){ document.getElementById("preview").textContent = t; show("この内容で送られます（まだ送っていません）"); })' +
     '    .withFailureHandler(function(e){ show(e.message, true); })' +
     '    .previewNoticeText(values());' +
+    '}' +
+    'function doTest(){' +
+    '  document.getElementById("testBtn").disabled = true;' +
+    '  show("送っています…");' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function(t){ show(t); document.getElementById("testBtn").disabled = false; })' +
+    '    .withFailureHandler(function(e){ show(e.message, true); document.getElementById("testBtn").disabled = false; })' +
+    '    .sendNoticeTest(values());' +
     '}' +
     '</script>';
   SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(520).setHeight(620), 'お知らせの文面・日程');
@@ -4220,10 +5359,41 @@ function previewNoticeText(values) {
   days.forEach(function(left) {
     out.push('― ' + (left === 0 ? '締切当日' : left + '日前') +
       '（' + ymdLabel_(addDaysYmd_(period.deadline.slice(0, 10), -left)) + '） ―');
-    out.push(fillNoticeText_(noticeTemplateFor_(notice, left), ss, period, left, ready));
+    var card = {};
+    out.push(fillNoticeText_(noticeTemplateFor_(notice, left), ss, period, left, ready, card));
+    noticeButtonLabels_(card).forEach(function(s) { out.push(s); });
     out.push('');
   });
   return out.join('\n');
+}
+
+// 「お試しに送ってみる」：今書いている内容のまま、お試しの送り先へ1通だけ送る。
+// 送るのは「今日が送る日ならその日の文、そうでなければ次に送る日の文」
+function sendNoticeTest(values) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var settings = getRequestSettingsSheet_();
+  var period = currentRequestPeriod_(settings, new Date());
+  if (!period) throw new Error('今は募集期間がありません。');
+  var line = lineConfig_(settings, true);
+  if (!line.token) throw new Error('チャネルアクセストークンが入っていません。');
+  if (!line.target) throw new Error('お試しの送り先が登録されていません。メニュー「LINE通知の設定」から登録してください。');
+  var days = splitDays_(values.days).filter(function(n) { return n >= 0; }).sort(function(a, b) { return b - a; });
+  if (!days.length) throw new Error('送る日を1つ以上入れてください（例 14,7,3）。');
+  var today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  var rest = daysBetweenYmd_(today, period.deadline.slice(0, 10));
+  var soon = days.filter(function(n) { return n <= rest; });
+  var left = days.indexOf(rest) !== -1 ? rest : (soon.length ? soon[0] : days[days.length - 1]);
+  var notice = {
+    days: days,
+    first: String(values.first || NOTICE_DEFAULT_FIRST),
+    later: String(values.later || NOTICE_DEFAULT_LATER),
+    last: String(values.last || NOTICE_DEFAULT_LAST)
+  };
+  var card = {};
+  var text = fillNoticeText_(noticeTemplateFor_(notice, left), ss, period, left, null, card);
+  linePush_(line, noticeMessage_(text, card));
+  return 'お試しの送り先に送りました（' + (left === 0 ? '締切当日' : left + '日前') +
+    'の文）。スタッフのグループには送っていません。';
 }
 
 
@@ -4281,12 +5451,12 @@ function staffPageUrl_(settings, path) {
   if (/^[0-9]{8,12}$/.test(loginId)) {
     return LINE_AUTH_URL + '?response_type=code'
       + '&client_id=' + loginId
-      + '&redirect_uri=' + encodeURIComponent(REQUEST_FORM_URL)
+      + '&redirect_uri=' + encodeURIComponent(requestFormUrl_())
       + '&state=' + encodeURIComponent(path || '-')
       + '&scope=' + encodeURIComponent('profile openid');
   }
   var id = liffId_(settings);
-  return id ? 'https://liff.line.me/' + id + path : REQUEST_FORM_URL + path;
+  return id ? 'https://liff.line.me/' + id + path : requestFormUrl_() + path;
 }
 
 // メニュー「LINEログインの設定」
@@ -4301,7 +5471,7 @@ function openLiffSettings() {
     '「チャネルID」（数字だけ）を貼り付けてください。'+'\n\n'+
     '今の設定：' + (nowId || 'まだ入っていません') + '\n\n'+
     '※先に、そのチャネルの「コールバックURL」に'+'\n'+
-    REQUEST_FORM_URL + '\n'+
+    requestFormUrl_() + '\n'+
     'を登録しておいてください。'+'\n\n'+
     '何も入れずにOKを押すと、LINEログインを使わない状態に戻ります。',
     ui.ButtonSet.OK_CANCEL);
@@ -4346,7 +5516,7 @@ function kitMode_(settings) {
 // 置き場所は「シフト希望_アクセス記録」。飯塚店シフトはスタッフ全員が開くので、
 // 誰が出した・出していないという健康にかかわる記録は置かない。
 function getKitSheet_() {
-  var ss = SpreadsheetApp.openById(RECORD_SPREADSHEET_ID);
+  var ss = SpreadsheetApp.openById(recordSpreadsheetId_());
   var sheet = ss.getSheetByName(KIT_SHEET_NAME);
   if (!sheet) sheet = ss.insertSheet(KIT_SHEET_NAME);
   kitEnsureLayout_(sheet);
@@ -4451,7 +5621,7 @@ function kitDoneMap_(ym) {
 function kitLineRegistered_() {
   var map = {};
   try {
-    var sheet = SpreadsheetApp.openById(RECORD_SPREADSHEET_ID).getSheetByName(KIT_LINE_OWNER_SHEET);
+    var sheet = SpreadsheetApp.openById(recordSpreadsheetId_()).getSheetByName(KIT_LINE_OWNER_SHEET);
     if (!sheet) return map;
     var last = sheet.getLastRow();
     if (last < 2) return map;
