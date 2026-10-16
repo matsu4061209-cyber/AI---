@@ -118,6 +118,11 @@
   .dchip.sat{ color:var(--sat); }
   .dchip[aria-pressed="true"]{ background:var(--accent-tint); border-color:var(--accent); font-weight:700; }
   .dchip.mine::after{ content:''; position:absolute; top:4px; right:4px; width:6px; height:6px; border-radius:50%; background:var(--accent); }
+  /* 今日の曜日。どの日が今日かひと目で分かるように「今日」と出す。
+     ほかの曜日にも同じ高さの空の行を置いて、ボタンの高さをそろえる */
+  .dchip .tdy{ display:block; font-size:9.5px; line-height:1.35; min-height:1.35em; font-weight:700; color:var(--accent); }
+  .dchip.tday{ border-color:var(--accent); }
+  .dchip.tday .num{ font-weight:700; }
   .legend{ font-size:11.5px; color:var(--text-muted); display:flex; gap:12px; flex-wrap:wrap; }
   .legend i{ display:inline-block; width:14px; height:8px; border-radius:3px; vertical-align:middle; margin-right:4px; }
   .board{ background:var(--surface); border-radius:14px; box-shadow:var(--shadow); padding:10px 12px 12px; }
@@ -475,8 +480,12 @@
     el('days').innerHTML = DOW.map(function(dw, i){
       var cls = ['dchip', dayClass(w, i)];
       if (mineOf(w, i)) cls.push('mine');
-      return '<button type="button" class="' + cls.join(' ') + '" data-i="' + i + '" aria-pressed="' + (i === d) + '">' +
-        dw + '<span class="num">' + DATA.weeks[w].labels[i].split('/')[1] + '</span></button>';
+      var isToday = DATA.weeks[w].ymds[i] === DATA.today;
+      if (isToday) cls.push('tday');
+      return '<button type="button" class="' + cls.join(' ') + '" data-i="' + i + '" aria-pressed="' + (i === d) + '"' +
+        (isToday ? ' aria-label="今日 ' + dw + ' ' + DATA.weeks[w].labels[i] + '"' : '') + '>' +
+        dw + '<span class="num">' + DATA.weeks[w].labels[i].split('/')[1] + '</span>' +
+        '<span class="tdy">' + (isToday ? '今日' : '') + '</span></button>';
     }).join('');
 
     var ppl = DATA.weeks[w].days[d];
@@ -524,10 +533,14 @@
   (function init(){
     if (!DATA.weeks.length) { el('noWeeks').hidden = false; return; }
 
-    el('tabs').style.gridTemplateColumns = 'repeat(' + Math.min(DATA.weeks.length, 4) + ',1fr)';
-    el('tabs').innerHTML = DATA.weeks.map(function(wk, i){
+    // 終わった週（past）はタブに出さない。合計を出すのには使うので、中身は持っている
+    var shown = DATA.weeks.map(function(wk, i){ return { wk: wk, i: i }; })
+      .filter(function(x){ return !x.wk.past; });
+    el('tabs').style.gridTemplateColumns = 'repeat(' + Math.min(Math.max(shown.length, 1), 4) + ',1fr)';
+    el('tabs').innerHTML = shown.map(function(x){
+      var wk = x.wk;
       var label = wk.ymds[0] <= DATA.today && DATA.today <= wk.ymds[6] ? '今週' : '';
-      return '<button type="button" class="tab" data-i="' + i + '">' + (label ? label + '<br>' : '') +
+      return '<button type="button" class="tab" data-i="' + x.i + '">' + (label ? label + '<br>' : '') +
         '<span class="num">' + wk.labels[0] + '〜' + wk.labels[6] + '</span></button>';
     }).join('');
 
@@ -539,6 +552,11 @@
     if (open < 0) DATA.weeks.forEach(function(wk, i){
       if (wk.ymds[0] <= DATA.today && DATA.today <= wk.ymds[6]) open = i;
     });
+    // 終わった週はタブに出していないので、そこを開かない（古いお知らせのリンクを押したとき）
+    if (open < 0 || DATA.weeks[open].past) {
+      open = -1;
+      DATA.weeks.forEach(function(wk, i){ if (open < 0 && !wk.past) open = i; });
+    }
     state.week = open >= 0 ? open : DATA.weeks.length - 1;
 
     var saved = load();

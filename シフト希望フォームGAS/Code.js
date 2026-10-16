@@ -98,6 +98,16 @@ function applyLiffState_(e) {
 // 中身は全員に同じもの（募集の期間・名簿・祝日）なので、少しの間だけ覚えておく。
 // 店長が設定を変えても、この秒数がすぎれば新しい内容になる。
 var PAGE_CACHE_SEC = 120;
+// できたシフトを見る画面は、シフト表の週シートを何枚も読むので重い（実測10〜11秒）。
+// 中身は全員に同じなので長めに覚えておき、店長が公開したときに消す（下の ?flush=）
+// シフトは毎日変わるものではないので、長く覚えておく。
+// 公開（確定・もう一度知らせる）のたびにシフト表GASが ?flush= を呼んで消すので、古いまま出ることはない。
+// ただし万一その連絡が届かなかったときのために、覚えておく上限を決めておく
+var SHIFT_PAGE_CACHE_SEC = 21600;              // すぐ出せるほう（CacheService）の上限＝6時間
+var SHIFT_PAGE_KEEP_DAYS = 4;                  // 長く覚えておくほう（文書の保管場所）の上限＝4日
+var SHIFT_PAGE_PROP_KEY = 'SHIFTPAGE_SAVED';   // 保管場所の鍵（中身は分けて入れる）
+var SHIFT_PAGE_CHUNK = 7000;                   // 1つに入れる文字数
+var SHIFT_PAGE_CACHE_KEY = 'SHIFTPAGE_V1';
 
 function pageCache_() {
   try { return CacheService.getScriptCache(); } catch (err) { return null; }
@@ -120,6 +130,65 @@ function remember_(key, build) {
   var made = build();
   if (cache) { try { cache.put(key, JSON.stringify(made), PAGE_CACHE_SEC); } catch (err) {} }
   return made;
+}
+
+// ===== 長く覚えておく入れ物（文書の保管場所）=====
+// CacheService は最長6時間なので、それより長くはこちらに置く。
+// 大きいと1つに入らないので、7000文字ずつに分けて入れる
+function longStore_() {
+  try { return PropertiesService.getScriptProperties(); } catch (err) { return null; }
+}
+
+function saveLong_(obj) {
+  var props = longStore_();
+  if (!props) return false;
+  try {
+    var text = JSON.stringify(obj);
+    var before = Number(props.getProperty(SHIFT_PAGE_PROP_KEY + '_n') || 0);
+    var n = Math.ceil(text.length / SHIFT_PAGE_CHUNK);
+    var map = {};
+    map[SHIFT_PAGE_PROP_KEY + '_n'] = String(n);
+    for (var i = 0; i < n; i++) map[SHIFT_PAGE_PROP_KEY + '_' + i] = text.substr(i * SHIFT_PAGE_CHUNK, SHIFT_PAGE_CHUNK);
+    props.setProperties(map, false);
+    for (var j = n; j < before; j++) props.deleteProperty(SHIFT_PAGE_PROP_KEY + '_' + j);   // 前より短くなった分を消す
+    return true;
+  } catch (err) { return false; }
+}
+
+function loadLong_() {
+  var props = longStore_();
+  if (!props) return null;
+  try {
+    var all = props.getProperties();
+    var n = Number(all[SHIFT_PAGE_PROP_KEY + '_n'] || 0);
+    if (!n) return null;
+    var text = '';
+    for (var i = 0; i < n; i++) {
+      var part = all[SHIFT_PAGE_PROP_KEY + '_' + i];
+      if (part === undefined) return null;      // 欠けていたら使わない
+      text += part;
+    }
+    return JSON.parse(text);
+  } catch (err) { return null; }
+}
+
+function clearLong_() {
+  var props = longStore_();
+  if (!props) return;
+  try {
+    var n = Number(props.getProperty(SHIFT_PAGE_PROP_KEY + '_n') || 0);
+    props.deleteProperty(SHIFT_PAGE_PROP_KEY + '_n');
+    for (var i = 0; i < n; i++) props.deleteProperty(SHIFT_PAGE_PROP_KEY + '_' + i);
+  } catch (err) {}
+}
+
+// 覚えておいた内容を消す。店長が公開したときにシフト表GASから呼ばれる
+function forgetPages_() {
+  clearLong_();
+  var cache = pageCache_();
+  if (!cache) return false;
+  try { cache.removeAll([SHIFT_PAGE_CACHE_KEY, 'CONFIG_V2']); } catch (err) { return false; }
+  return true;
 }
 
 // LINEログインから戻ってきたとき（?code=…&state=…）、本人のLINEユーザーIDを受け取り、
@@ -177,6 +246,15 @@ function doGet(e) {
   e = applyLineLogin_(e);
   // 速さの調べ用。スプレッドシートを一切読まずに返す（中身は無い）
   if (e && e.parameter && e.parameter.ping) return HtmlService.createHtmlOutput('ok');
+  // 店長が公開したとき、シフト表GASから呼ばれる。覚えていた内容を消して作り直させる
+  if (e && e.parameter && e.parameter.flush) {
+    return ContentService.createTextOutput(forgetPages_() ? 'ok' : 'ng');
+  }
+  // ?slow=1 で、どこに時間がかかっているかを段階ごとに返す（遅いと言われたときの調べ用）
+  if (e && e.parameter && e.parameter.slow) {
+    return ContentService.createTextOutput(JSON.stringify(shiftPageTiming_(), null, 1))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
   // ?lineowners=1 で、LINEログインの登録が何人ぶん入っているかだけを返す（調査用。名前は返さない）
   if (e && e.parameter && e.parameter.lineowners) return lineOwnerCount_();
   // カレンダーアプリが読みに来たとき（?cal=その人の鍵）は、その人のシフトだけを返す
@@ -615,6 +693,17 @@ function rosterNames_(sheet) {
   return sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues()
     .map(function(r) { return String(r[0]).trim(); })
     .filter(function(n) { return n; });
+}
+
+// すでに読んである中身（A列をふくむ）から、名簿（A4〜A25）を取り出す
+function rosterFromGrid_(values) {
+  var out = [];
+  for (var i = 0; i < ROSTER_ROWS; i++) {
+    var row = values[ROSTER_START_ROW - 1 + i] || [];
+    var name = String(row[0] == null ? '' : row[0]).trim();
+    if (name) out.push(name);
+  }
+  return out;
 }
 
 // 「祝日」シートの日付は、シフト表GASが日本時間の0時として書き込んでいる。
@@ -1637,6 +1726,12 @@ var CALENDAR_BLOCKS = [
   { head: 3, col: 113 }, { head: 23, col: 113 }, { head: 42, col: 113 }, { head: 61, col: 113 }
 ];
 var CALENDAR_PEOPLE = 16;             // 1日に並ぶ人数
+// 1枚の週シートから読む範囲。時間帯の升目（数式が入っていて重い）は読まない。
+// 左は A列（名簿）〜X列（左の日ブロックの休終）をまとめて1回、右は5列ぶんを1回
+var CALENDAR_READ_ROWS = 80;
+var CALENDAR_LEFT_COLS = 24;          // A〜X
+var CALENDAR_RIGHT_COL = 108;         // 右の日ブロックの名前の列（113-5）
+var CALENDAR_RIGHT_COLS = 5;
 // このウェブアプリ自身のアドレス（カレンダー登録やお知らせのリンクに使う。作り直さない決まり）
 var SELF_URL = 'https://script.google.com/macros/s/AKfycbwFtgsWnq75UnttAODig9q3c89E1Iek0Oow-lV8tHzF_Zp5qBQe2DXPahAeksqkd4i2/exec';
 var PUBLISHED_WEEKS_CELL = 'E26';     // シフト希望設定：確定して公開した週（シフト表GASが書く）
@@ -1683,14 +1778,18 @@ function namesInWeeks_(weeks) {
 
 // 載せる週：今日から CALENDAR_PAST_DAYS 日前以降で、店長が「確定する」を押して公開した週。
 // まだ一度も公開していない間は、希望を受け付けている週より前を載せる（今までどおり）
-function calendarWeekSheets_(shiftSs, today) {
+// fromYmd（'20260921' の形）を渡すと、その日より前に終わる週は読まない。
+// 読んでから捨てるのは無駄（1枚読むのに1秒ほどかかる）。カレンダー配信は渡さないので今までどおり
+function calendarWeekSheets_(shiftSs, today, fromYmd) {
   var from = new Date(today.getTime() - (CALENDAR_PAST_DAYS + 7) * 86400000);
   var published = publishedWeeks_(shiftSs);
   return shiftSs.getSheets().filter(function(sh) {
     var n = sh.getName();
     if (!/^\d{6}$/.test(n)) return false;
     if (published.length ? published.indexOf(n) === -1 : n >= FIRST_WRITABLE_SHEET) return false;
-    return weekStartOf_(n) >= from;
+    if (weekStartOf_(n) < from) return false;
+    if (fromYmd && weekEndYmdOf_(n) < String(fromYmd)) return false;
+    return true;
   });
 }
 
@@ -1727,32 +1826,49 @@ function personShifts_(weeks, name) {
 
 // 公開した週を、週ごと・曜日ごとに読む
 // [{ sheet, ymds:[7], labels:[7], days:[[{name,start,end,breakStart,breakEnd}]×7] }]
-function readPublishedWeeks_(shiftSs, today) {
+function readPublishedWeeks_(shiftSs, today, fromYmd) {
   var weeks = [];
-  calendarWeekSheets_(shiftSs, today).forEach(function(sh) {
+  calendarWeekSheets_(shiftSs, today, fromYmd).forEach(function(sh) {
     var monday = weekStartOf_(sh.getName());
     var week = { sheet: sh.getName(), ymds: [], labels: [], days: [[], [], [], [], [], [], []] };
-    var areas = {};
+    // 速さの肝は「読みに行く回数」。1回につき0.2秒ほどかかるので、
+    // 1枚につき2回（左と右の値）だけにする。名簿も左の中に入っている。
+    // 「見た目」は時間がDateや文字で入っていたときだけ読む（ふつうは900のような数字なので読まない）
+    var leftRange = sh.getRange(1, 1, CALENDAR_READ_ROWS, CALENDAR_LEFT_COLS);
+    var rightRange = sh.getRange(1, CALENDAR_RIGHT_COL, CALENDAR_READ_ROWS, CALENDAR_RIGHT_COLS);
+    var v1 = leftRange.getValues(), v2 = rightRange.getValues(), d1 = null, d2 = null;
+    function isLeft(col) { return col <= CALENDAR_LEFT_COLS; }
+    function val(row, col) {
+      var r = (isLeft(col) ? v1 : v2)[row - 1] || [];
+      return r[isLeft(col) ? col - 1 : col - CALENDAR_RIGHT_COL];
+    }
+    function disp(row, col) {
+      if (isLeft(col)) { if (!d1) d1 = leftRange.getDisplayValues(); }
+      else if (!d2) d2 = rightRange.getDisplayValues();
+      var r = (isLeft(col) ? d1 : d2)[row - 1] || [];
+      return r[isLeft(col) ? col - 1 : col - CALENDAR_RIGHT_COL];
+    }
+    function timeAt(row, col) {
+      var v = val(row, col);
+      if (v === '' || v === null || v === undefined) return '';
+      if (typeof v === 'number') return sheetTime_(v, '');
+      return sheetTime_(v, disp(row, col));           // ここだけ見た目が要る
+    }
+
     var order = {};                                   // 名簿（週シートの名前の欄）の並び順
-    rosterNames_(sh).forEach(function(n, i) { order[normalizeName_(n)] = i; });
+    rosterFromGrid_(v1).forEach(function(n, i) { order[normalizeName_(n)] = i; });
     CALENDAR_BLOCKS.forEach(function(b, day) {
       var nameCol = b.col - 5;
-      if (!areas[nameCol]) {
-        var rg = sh.getRange(1, nameCol, 80, 5);
-        areas[nameCol] = { values: rg.getValues(), displays: rg.getDisplayValues() };
-      }
-      var area = areas[nameCol];
       var date = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + day);
       week.ymds[day] = Utilities.formatDate(date, 'Asia/Tokyo', 'yyyyMMdd');
       week.labels[day] = (date.getMonth() + 1) + '/' + date.getDate();
-      for (var r = b.head; r < b.head + CALENDAR_PEOPLE; r++) {
-        var v = area.values[r] || [], d = area.displays[r] || [];
-        var name = String(v[0] || '').trim();
-        var start = sheetTime_(v[1], d[1]), end = sheetTime_(v[2], d[2]);
+      for (var r = b.head + 1; r <= b.head + CALENDAR_PEOPLE; r++) {
+        var name = String(val(r, nameCol) || '').trim();
+        var start = timeAt(r, nameCol + 1), end = timeAt(r, nameCol + 2);
         if (!name || !start || !end) continue;
         week.days[day].push({
           name: name, start: start, end: end,
-          breakStart: sheetTime_(v[3], d[3]), breakEnd: sheetTime_(v[4], d[4])
+          breakStart: timeAt(r, nameCol + 3), breakEnd: timeAt(r, nameCol + 4)
         });
       }
       // 並びは週シートの名前の欄と同じ順（名簿順）。名簿に無い人は後ろに回し、同じ位置なら早い出勤から
@@ -2021,12 +2137,25 @@ function myPayInfo(name, birthCode, deviceId) {
 // 画面に出す週。今週からが基本。ただし「締め日までの合計」を出すため、
 // いまの締め期間のはじめ（fromYmd）がもっと前なら、そこまでさかのぼって出す。
 // ※ ymds は '20261012' の形。前はここを '2026-10-12' の形で比べていたので、どの週も残っていた
-function weeksFromThisWeek_(weeks, today, fromYmd) {
+// 画面に出す「いちばん前の日」。今週の月曜が基本。締め期間のはじめがもっと前なら、そこまで
+function weekFloorYmd_(today, fromYmd) {
   var d = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   d.setDate(d.getDate() - ((d.getDay() + 6) % 7));        // 今週の月曜
   var from = d.getFullYear() + ('0' + (d.getMonth() + 1)).slice(-2) + ('0' + d.getDate()).slice(-2);
   if (fromYmd && String(fromYmd) < from) from = String(fromYmd);
+  return from;
+}
+
+function weeksFromThisWeek_(weeks, today, fromYmd) {
+  var from = weekFloorYmd_(today, fromYmd);
   return weeks.filter(function(wk) { return wk.ymds[6] >= from; });   // 週の最終日がその日以降なら出す
+}
+
+// 週シート名（261019）の、その週の日曜日を '20261025' の形で
+function weekEndYmdOf_(sheetName) {
+  var monday = weekStartOf_(sheetName);
+  var sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
+  return sunday.getFullYear() + ('0' + (sunday.getMonth() + 1)).slice(-2) + ('0' + sunday.getDate()).slice(-2);
 }
 
 // '2026-10-12' を '20261012' に
@@ -2040,43 +2169,139 @@ function periodOfYmd_(ymdTight, closingDay) {
   return { from: tightYmd_(p.start), to: tightYmd_(p.end), label: closingLabel_(p.end) };
 }
 
-function shiftPage_(weekParam) {
-  var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
-  var now = new Date();
-  // 締め日は人によって違う（店長・社員＝E3／キャスト＝E7）。週は早いほうに合わせてさかのぼる
-  var settings = shiftSs.getSheetByName(REQUEST_SETTINGS_SHEET);
-  var closingDays = { emp: closingDayOf_(settings, true), cast: closingDayOf_(settings, false) };
-  var todayYmd = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyyMMdd');
-  var firstYmd = [periodOfYmd_(todayYmd, closingDays.emp).from,
-    periodOfYmd_(todayYmd, closingDays.cast).from].sort()[0];
-  var weeks = weeksFromThisWeek_(readPublishedWeeks_(shiftSs, now), now, firstYmd);
-  var storeName = STORE_NAME;
-  try { storeName = loadConfig_(shiftSs).storeName || STORE_NAME; } catch (err) {}
+// シートから読んだ中身を取り出す。覚えてあればそれを使う（重いのはここだけ）
+// ※ 覚えておくのは「シートに書いてある事実」だけ。今日がいつか・どの週を出すか は毎回その場で決める。
+//    そうしないと、日付が変わったときに覚えた内容が使えなくなる
+function shiftSheetData_(now) {
+  var cache = pageCache_();
+  var fresh = null;
 
-  var data = {
-    storeName: storeName,
-    today: Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd'),
-    openWeek: /^\d{6}$/.test(weekParam) ? weekParam : '',
-    names: staffNames_(shiftSs, weeks),
-    keys: {},
-    holidays: holidayLabels_(shiftSs, weeks),
-    weeks: weeks.map(function(wk) {
-      return { sheet: wk.sheet, ymds: wk.ymds, labels: wk.labels, days: wk.days,
-        // その週がふくまれる締め期間。合計を「締め日まで」で出すのに使う
-        period: { emp: periodOfYmd_(wk.ymds[0], closingDays.emp),
-          cast: periodOfYmd_(wk.ymds[0], closingDays.cast) } };
-    }),
-    selfUrl: SELF_URL,
-    employees: employeeNames_(shiftSs)          // この人たちには給与のボタンを出さない
-  };
-  data.names.forEach(function(n) { data.keys[n] = calendarKey_(n); });
+  if (cache) {
+    var hit = cache.get(SHIFT_PAGE_CACHE_KEY);
+    if (hit) { try { fresh = JSON.parse(hit); } catch (err) {} }
+  }
+  if (!fresh) {
+    var saved = loadLong_();
+    if (saved && (now.getTime() - Number(saved.builtAt || 0)) < SHIFT_PAGE_KEEP_DAYS * 86400000) {
+      fresh = saved;
+      if (cache) { try { cache.put(SHIFT_PAGE_CACHE_KEY, JSON.stringify(fresh), SHIFT_PAGE_CACHE_SEC); } catch (err) {} }
+    }
+  }
+  if (!fresh) {
+    fresh = readShiftSheets_(now);
+    if (cache) { try { cache.put(SHIFT_PAGE_CACHE_KEY, JSON.stringify(fresh), SHIFT_PAGE_CACHE_SEC); } catch (err) {} }
+    saveLong_(fresh);
+  }
+  return fresh;
+}
+
+function shiftPage_(weekParam) {
+  var now = new Date();
+  var data = shiftPageData_(now);
+  data.openWeek = /^\d{6}$/.test(weekParam) ? weekParam : '';
 
   var template = HtmlService.createTemplateFromFile('shift');
   template.dataJson = JSON.stringify(data).replace(/</g, '\u003c');
   return template.evaluate()
-    .setTitle('シフト｜' + storeName)
+    .setTitle('シフト｜' + data.storeName)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+// どこで時間を使っているかを測る。?slow=1 から呼ぶ
+function shiftPageTiming_() {
+  var out = {}, t0 = new Date().getTime(), t = t0;
+  function lap(name) { var now = new Date().getTime(); out[name] = (now - t) / 1000; t = now; }
+
+  var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
+  lap('1_シフト表をひらく');
+
+  var settings = shiftSs.getSheetByName(REQUEST_SETTINGS_SHEET);
+  var closingDays = { emp: closingDayOf_(settings, true), cast: closingDayOf_(settings, false) };
+  lap('2_締め日の設定をよむ');
+
+  var now = new Date();
+  var weeks = readPublishedWeeks_(shiftSs, now);
+  lap('3_週シートをよむ（' + weeks.length + '枚）');
+
+  var names = staffNames_(shiftSs, weeks);
+  lap('4_名前の一覧');
+
+  holidayLabels_(shiftSs, weeks);
+  lap('5_祝日');
+
+  employeeNames_(shiftSs);
+  lap('6_店長・社員');
+
+  names.forEach(function(n) { calendarKey_(n); });
+  lap('7_カレンダーの鍵');
+
+  out['0_ぜんぶ'] = (new Date().getTime() - t0) / 1000;
+  return out;
+}
+
+// シフト表を実際に読む（重い処理はここだけ）。ここで作った物を覚えておく
+function readShiftSheets_(now) {
+  var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
+  var settings = shiftSs.getSheetByName(REQUEST_SETTINGS_SHEET);
+  // 締め日は人によって違う（店長・社員＝E3／キャスト＝E7）
+  var closingDays = { emp: closingDayOf_(settings, true), cast: closingDayOf_(settings, false) };
+  // 店舗名はマス1つ。ここで設定ぜんぶを読み直すと、そのぶん遅くなる
+  var storeName = STORE_NAME;
+  try {
+    if (settings) storeName = String(settings.getRange(SETTING_STORE_NAME_CELL).getDisplayValue()).trim() || STORE_NAME;
+  } catch (err) {}
+
+  var weeks = readPublishedWeeks_(shiftSs, now);
+  var names = staffNames_(shiftSs, weeks);
+  var keys = {};
+  names.forEach(function(n) { keys[n] = calendarKey_(n); });
+
+  return {
+    builtAt: now.getTime(),
+    storeName: storeName,
+    closing: closingDays,
+    names: names,
+    keys: keys,
+    holidays: holidayLabels_(shiftSs, weeks),
+    weeks: weeks.map(function(wk) {
+      return { sheet: wk.sheet, ymds: wk.ymds, labels: wk.labels, days: wk.days };
+    }),
+    employees: employeeNames_(shiftSs)          // この人たちには給与のボタンを出さない
+  };
+}
+
+// 画面に渡す中身。重いところは覚えてある物を使い、今日に合わせた分だけここで足す
+function shiftPageData_(now) {
+  var base = shiftSheetData_(now);
+  var todayYmd = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyyMMdd');
+  var closingDays = base.closing || { emp: DEFAULT_BASE.closingDay, cast: DEFAULT_CAST_CLOSING_DAY };
+  var firstYmd = [periodOfYmd_(todayYmd, closingDays.emp).from,
+    periodOfYmd_(todayYmd, closingDays.cast).from].sort()[0];
+  var floorYmd = weekFloorYmd_(now, firstYmd);     // 合計に要る、いちばん前の日
+  var thisMonday = weekFloorYmd_(now, null);       // 今週の月曜
+
+  var weeks = base.weeks.filter(function(wk) { return wk.ymds[6] >= floorYmd; })
+    .map(function(wk) {
+      return { sheet: wk.sheet, ymds: wk.ymds, labels: wk.labels, days: wk.days,
+        // 終わった週はタブに出さない（合計には使う）
+        past: wk.ymds[6] < thisMonday,
+        // その週がふくまれる締め期間。合計を「締め日まで」で出すのに使う
+        period: { emp: periodOfYmd_(wk.ymds[0], closingDays.emp),
+          cast: periodOfYmd_(wk.ymds[0], closingDays.cast) } };
+    });
+
+  return {
+    storeName: base.storeName,
+    today: todayYmd,
+    openWeek: '',
+    names: base.names,
+    keys: base.keys,
+    holidays: base.holidays,
+    weeks: weeks,
+    selfUrl: SELF_URL,
+    employees: base.employees
+  };
 }
 
 // 名前の一覧＝一番新しい週シートの名簿＋公開した週に出てくる名前

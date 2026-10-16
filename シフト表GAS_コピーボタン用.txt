@@ -1971,6 +1971,7 @@ function markPublished_(settings, sheetName) {
   var list = publishedWeekList_(settings).filter(function(x) { return x !== sheetName; });
   list.push(sheetName);
   settings.getRange(PUBLISHED_WEEKS_CELL).setValue(list.slice(-PUBLISHED_KEEP).join('|'));
+  flushStaffPageCache_();     // スタッフのページが覚えている古い内容を消す
 }
 
 // PDFの入れ物フォルダ。シフト表と同じ場所の「シフトPDF」の中に、年ごとのフォルダを作る
@@ -1991,6 +1992,21 @@ function pdfFolder_(settings, year) {
   var yearName = String(year) + '年';
   var sub = top.getFoldersByName(yearName);
   return sub.hasNext() ? sub.next() : top.createFolder(yearName);
+}
+
+// 公開したら、スタッフのページが覚えている内容を消させる（古いシフトが出ないように）。
+// つながらなくても公開そのものは止めない
+function flushStaffPageCache_() {
+  try {
+    var url = requestFormUrl_();
+    if (!url) return false;
+    var res = UrlFetchApp.fetch(url + (url.indexOf('?') >= 0 ? '&' : '?') + 'flush=1',
+      { muteHttpExceptions: true, followRedirects: true });
+    return res.getResponseCode() === 200;
+  } catch (e) {
+    Logger.log('flushStaffPageCache_: ' + e.message);
+    return false;
+  }
 }
 
 // 週シートの決まった範囲をPDFにする
