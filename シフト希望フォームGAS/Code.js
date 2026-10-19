@@ -661,11 +661,20 @@ function autoPeriods_(base, now) {
 // 次の募集の「1回目のお知らせ」を送る日（ここで画面が新しい期間に切り替わる）
 var NOTICE_DAYS_CELL_FORM = 'E13';     // お知らせ：送る日（締切の何日前か。シフト表GASが書く）
 var NOTICE_FIRST_DAYS_DEFAULT = 14;
+// ※お知らせを送るかどうかは、シフト表GAS（sendDeadlineNotice_）が「日付の差」だけで決めている。
+// こちらも同じく日付でそろえ、その日の0時から新しい期間に切り替える。
+// 締切の時刻（23:59など）から引き算すると、お知らせが届いた朝はまだ切り替わらず、
+// 「案内は来たのに入力できない」という食い違いが起きる。
 function noticeStartMs_(settings, next) {
   var days = String(settings.getRange(NOTICE_DAYS_CELL_FORM).getDisplayValue()).split(/[,、\s]+/)
     .map(Number).filter(function(n) { return n >= 0 && n <= 60 && Math.floor(n) === n; });
   var first = days.length ? Math.max.apply(null, days) : NOTICE_FIRST_DAYS_DEFAULT;
-  return jstTime_(next.deadline) - first * 86400000;
+  return jstTime_(noticeFirstYmd_(next.deadline, first) + ' 00:00');
+}
+
+// 1回目のお知らせを送る日（締切の日付から first 日前）
+function noticeFirstYmd_(deadline, first) {
+  return addDays_(String(deadline).slice(0, 10), -first);
 }
 
 // その月の締め日が入っている週の日曜日（締め日が日曜ならその日）。月の日数を超える締め日は末日にする

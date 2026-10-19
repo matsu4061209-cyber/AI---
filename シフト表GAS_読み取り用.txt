@@ -89,7 +89,8 @@ function copyAttendanceData() {
       clearAdjustMarks_(sheet);               // 前回の薄いグレーが残っていれば先に消す
       clearOurGridColors_(sheet);             // 前のポジションの色も消す（希望からやり直すため）
       saveAdjustSnapshots_(sheet);
-      repaintWeekColors_(sheet);              // いる時間を薄い水色に戻す
+      ensureGridPaintable_(sheet);            // 自動の水色ルールが残っていれば外す（1回だけ）
+      repaintWeekColors_(sheet);              // いる時間を水色に戻す
       refreshRecruitMarks_(sheet);            // 募集中の時間の色も、いまの募集に合わせ直す
       SpreadsheetApp.getActiveSpreadsheet().toast(
         '転写しました。今の時間を「調整前」として記録しました。', 'シフト表', 6);

@@ -86,8 +86,8 @@ function createWeekSheetFrom_(ss, currentSheet) {
   const clearRangesStr = ["T24:X39", "T43:X58", "T62:X77", "DD4:DH19", "DD24:DH39", "DD43:DH58", "DD62:DH77"];
   clearRangesStr.forEach(rangeStr => newSheet.getRange(rangeStr).clearContent());
 
-  // 7-2. ポジションの色分けは新しい週に持ち越さない（水色の自動ルールを戻して、色を消す）
-  resetPositionColorsOnCopy_(currentSheet, newSheet);
+  // 7-2. ポジションの色は新しい週に持ち越さない
+  resetPositionColorsOnCopy_(newSheet);
 
   // 8. 祝日の色付けを新しいシートにも反映する（「祝日」シートは既にあるものを使う）
   applyHolidayColoring_(newSheet);
@@ -188,7 +188,7 @@ function positionNamesForMenu_() {
   try {
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(REQUEST_SETTINGS_SHEET);
     if (!sheet) return POSITION_DEFAULTS.map(function(p) { return p.name; });
-    return sheet.getRange(POSITION_NAME_ROW, 5, POSITION_COUNT, 1).getValues()
+    return positionCells_(sheet)
       .map(function(r, i) { return String(r[0]).trim() || POSITION_DEFAULTS[i].name; });
   } catch (e) {
     return POSITION_DEFAULTS.map(function(p) { return p.name; });
@@ -235,26 +235,26 @@ function onOpen() {
       .addSeparator()
       .addItem('毎月のおしらせをお試しで送る（スタッフには送りません）', 'sendMonthlyNoticeTest'))
     .addSubMenu(ui.createMenu('ポジション色分け')
-      .addItem('色分けを始める（このシート）', 'unlockPositionColors')
-      .addSeparator()
       .addItem(posNames[0] + 'に塗る', 'paintPosition1')
       .addItem(posNames[1] + 'に塗る', 'paintPosition2')
       .addItem(posNames[2] + 'に塗る', 'paintPosition3')
       .addItem(posNames[3] + 'に塗る', 'paintPosition4')
+      .addItem(posNames[4] + 'に塗る', 'paintPosition5')
       .addItem('選んだところの色を戻す', 'clearPositionPaint')
       .addSeparator()
+      .addItem('週ぜんぶ水色にもどす', 'clearAllPositionColors')
       .addItem('名前と色を変える', 'openPositionSettings')
       .addSeparator()
       .addItem('ボタンを画面に置く', 'placePositionButtons')
       .addItem('すべての週シートにボタンを置く', 'placePositionButtonsAllWeeks')
-      .addItem('ボタンを消す', 'clearPositionButtons')
-      .addItem('色分けをやめる（元に戻す）', 'relockPositionColors'))
+      .addItem('ボタンを消す', 'clearPositionButtons'))
     .addItem('お店のはじめ方（新しい店舗）', 'openStoreSetup')
     .addSubMenu(ui.createMenu('LINEのつなぎこみ')
       .addItem('LINE通知の設定（はじめて入れる・入れ替える）', 'openLineSettings')
       .addItem('LINEログインの設定（はじめて入れる・入れ替える）', 'openLiffSettings'))
     .addSubMenu(ui.createMenu('困ったとき・やり直し')
       .addItem('色を塗り直す（臨時用）', 'refreshWeekColors')
+      .addItem('すべての週シートを手で塗る形にする（臨時用）', 'makeAllWeeksPaintable')
       .addItem('出勤履歴を作り直す（臨時用）', 'rebuildAttendanceHistory')
       .addSeparator()
       .addItem('自動でシート作成・お知らせを再開する', 'startShiftAutomation')
@@ -693,6 +693,7 @@ function getRequestSettingsSheet_() {
   sheet.getRange('E3:E28').setNumberFormat('@');
   sheet.getRange('E42:E47').setNumberFormat('@');   // 「9:00」が時刻に化けないように文字で持つ
   sheet.getRange('F22:F25').setNumberFormat('@');
+  sheet.getRange('E48:F48').setNumberFormat('@');   // ポジション5（E26が埋まっているので離れた行）
   [[REQUEST_BASE_CLOSING_CELL, String(REQUEST_DEFAULT_BASE.closingDay)],
    [REQUEST_BASE_WEEKS_CELL, String(REQUEST_DEFAULT_BASE.deadlineWeeks)],
    [REQUEST_BASE_TIME_CELL, REQUEST_DEFAULT_BASE.deadlineTime],
@@ -712,7 +713,7 @@ function getRequestSettingsSheet_() {
   // 前の版で入っていた1〜4以外の数字（14など）は初期値に直す
   var weeksNow = Number(sheet.getRange(REQUEST_BASE_WEEKS_CELL).getDisplayValue());
   if (!(weeksNow >= 1 && weeksNow <= 4)) sheet.getRange(REQUEST_BASE_WEEKS_CELL).setValue(String(REQUEST_DEFAULT_BASE.deadlineWeeks));
-  sheet.getRange('D3:D47').setValues([
+  sheet.getRange('D3:D48').setValues([
     ['基本設定：社員の締め日（毎月この日）'],
     ['基本設定：スタッフ入力締切は募集が始まる何週間前の日曜日'],
     ['基本設定：スタッフ入力締切の時刻'],
@@ -757,7 +758,8 @@ function getRequestSettingsSheet_() {
     ['スタッフが選べる退勤の時間：いちばん早い'],
     ['スタッフが選べる退勤の時間：いちばん遅い'],
     ['このお店のシフト希望ページのアドレス（メニュー「お店のはじめ方」で入れます）'],
-    ['このお店のアクセス記録ファイルのID（同上）']
+    ['このお店のアクセス記録ファイルのID（同上）'],
+    ['ポジション5：名前（E列）と色（F列）']
   ]);
   // 欲しい人数の目安。空のときだけ初期値を入れる
   if (String(sheet.getRange(NEED_WEEKDAY_CELL).getDisplayValue()).trim() === '') {
@@ -768,8 +770,8 @@ function getRequestSettingsSheet_() {
   }
   // ポジションの名前と色。空のところだけ初期値を入れる
   POSITION_DEFAULTS.forEach(function(pos, i) {
-    var nameCell = sheet.getRange(POSITION_NAME_ROW + i, 5);
-    var colorCell = sheet.getRange(POSITION_NAME_ROW + i, 6);
+    var nameCell = sheet.getRange(POSITION_ROWS[i], 5);
+    var colorCell = sheet.getRange(POSITION_ROWS[i], 6);
     if (String(nameCell.getDisplayValue()).trim() === '') nameCell.setValue(pos.name);
     if (String(colorCell.getDisplayValue()).trim() === '') colorCell.setValue(pos.color);
   });
@@ -1913,7 +1915,7 @@ function confirmAdjust() {
   if ((found.length || unknown.length) && ui.alert('決まりの確認（' + week.getName() + '）',
       lawReportText_(found, unknown) + '\n\nこのまま確定して公開しますか。\n「いいえ」を押すと、直してから確定できます。',
       ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
-  setPen_(week, null);                 // 確定したらペンは置く
+  ensureGridPaintable_(week);          // 自動の水色ルールが残っていれば、ここでも外す
   var cleared = clearAdjustMarks_(week, ourColors_());
   saveAdjustSnapshots_(week);
   repaintWeekColors_(week);
@@ -2669,29 +2671,44 @@ function saveMinorSettings(rosterUrl, list) {
 }
 
 // ===================== ポジションの色分け =====================
-// 時間帯バーの水色は「値が0.25なら#00B0F0」という条件付き書式で付いている。
+// MARKER_POSITION_RUN
+// 時間帯バーの水色は、もともと「値が0.25なら#00B0F0」という条件付き書式で付いていた。
 // 条件付き書式は直接塗った色より強いので、そのままでは人がいるマスに色を塗っても見えない。
-// そこで「色分けを始める」で、そのシートの水色ルールだけを外して控え、
-// 代わりに人がいるマスを水色で直接塗る。以後はポジションごとに塗り分けられる。
-// 「色分けをやめる」で、ルールを戻して元どおりにする（シート1枚ずつ・いつでも戻せる）。
-// シートの条件付き書式に入っている水色。この色のルールを外して色分けを始める（変えない）
+// 前は「色分けを始める／やめる」でこのルールを外したり戻したりしていたが、
+//   ・戻すときにルールを作り直すので、元と同じにならない（やめても元に戻らない）
+//   ・「色分け中かどうか」の見分け方が2か所で食い違う（塗っても色が変わらない）
+// という不具合が続いたので、モードそのものを無くした。
+// いまは週シートからこのルールを外しておき、人がいるマスの水色も同じ色でGASが塗る。
+// 見た目は今までと変わらず、いつでもポジションを塗れる。
+// シートの条件付き書式に入っている水色（この色のルールを外す）
 var POSITION_RULE_COLOR = '#00B0F0';
-// 色分け中に「まだポジションを決めていない時間」を塗る色。ポジションの色と見分けやすい薄い水色
-var POSITION_BASE_COLOR = '#CCEEFF';
-var POSITION_COUNT = 4;
-var POSITION_NAME_ROW = 22;                 // E22〜E25 名前、F22〜F25 色
+// 人がいて、まだポジションを決めていない時間の色。今までの自動の水色と同じ色にする
+var POSITION_BASE_COLOR = '#00B0F0';
+// ポジションの名前と色を入れておく行（E列＝名前・F列＝色）
+// ※E26は「確定して公開した週」で埋まっているので、5つめだけ離れた48行目に置く
+var POSITION_NAME_ROW = 22;                 // E22〜E25 名前、F22〜F25 色（1〜4）
+var POSITION_ROWS = [22, 23, 24, 25, 48];
+var POSITION_COUNT = POSITION_ROWS.length;
 var POSITION_DEFAULTS = [
   { name: 'デシャップ',   color: '#E06666' },
   { name: 'キッチン',     color: '#4A86E8' },
   { name: 'ウォッシャー', color: '#A9D18E' },
-  { name: '店長',         color: '#B4A7D6' }
+  { name: '店長',         color: '#B4A7D6' },
+  { name: '掃除',         color: '#FFD966' }
 ];
+
+// 設定シートから、ポジションの行だけをまとめて読む（読みに行くのは1回）
+function positionCells_(sheet) {
+  var top = Math.min.apply(null, POSITION_ROWS);
+  var bottom = Math.max.apply(null, POSITION_ROWS);
+  var all = sheet.getRange(top, 5, bottom - top + 1, 2).getValues();
+  return POSITION_ROWS.map(function(row) { return all[row - top]; });
+}
 
 // ポジションの名前と色を読む
 function positionList_() {
   var settings = getRequestSettingsSheet_();
-  var values = settings.getRange(POSITION_NAME_ROW, 5, POSITION_COUNT, 2).getValues();
-  return values.map(function(r, i) {
+  return positionCells_(settings).map(function(r, i) {
     var name = String(r[0]).trim() || POSITION_DEFAULTS[i].name;
     var color = String(r[1]).trim();
     return { name: name, color: /^#[0-9A-Fa-f]{6}$/.test(color) ? color : POSITION_DEFAULTS[i].color };
@@ -2708,123 +2725,28 @@ function inGridArea_(row, col) {
   return false;
 }
 
-// 色分け中かどうか
-// 印（A・B列）だけでなく、外した水色ルールの中身（D列）が入っていることまで確かめる。
-// 印だけ残っていると「色分け中のつもりなのに水色が復活している」状態になり、
-// 塗っても条件付き書式に隠れて何も起きないように見えるため。
-function positionUnlockRow_(week) {
-  var sheet = getAdjustSheet_();
-  var row = adjustRowMap_(sheet)[week.getName() + '/cf'];
-  if (!row) return 0;
-  if (String(sheet.getRange(row, 4).getValue()).trim() === '') return 0;   // 中身が無い印は無視する
-  return row;
-}
-
-// メニュー「色分けを始める（このシート）」
-function unlockPositionColors() {
-  var week = activeWeekSheet_();
-  if (!week) return;
-  var ui = SpreadsheetApp.getUi();
-  if (positionUnlockRow_(week)) { ui.alert('「' + week.getName() + '」はすでに色分けを始めています。'); return; }
-  if (ui.alert('「' + week.getName() + '」でポジションの色分けを始めます。\n\n' +
-      '・時間帯バーの水色を、自動（条件付き書式）から手で塗る形に切り替えます\n' +
-      '・削った時間の薄いグレーは、そのまま一緒に使えます\n' +
-      '・「色分けをやめる」でいつでも元どおりに戻せます\n\nよろしいですか。',
-      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
-
-  var rules = week.getConditionalFormatRules();
-  var keep = [], removed = [];
-  rules.forEach(function(rule) {
-    var bc = rule.getBooleanCondition();
-    if (bc && String(bc.getCriteriaType()) === 'NUMBER_EQUAL_TO' &&
-        Number(bc.getCriteriaValues()[0]) === 0.25 &&
-        String(bc.getBackground()).toUpperCase() === POSITION_RULE_COLOR) {
-      removed.push({
-        ranges: rule.getRanges().map(function(r) { return r.getA1Notation(); }),
-        value: Number(bc.getCriteriaValues()[0]),
-        bg: String(bc.getBackground()),
-        fc: bc.getFontColor() ? String(bc.getFontColor()) : ''
-      });
-    } else {
-      keep.push(rule);
-    }
+// このシートの「値が0.25なら水色」という自動の色づけを外しておく（まだ付いていれば）。
+// 「色分け中かどうか」という状態は持たない。シートの中身だけを見て、必要なときに1回だけ外す。
+// 外したあとは人がいるマスの水色もGASが同じ色で塗るので、見た目は変わらない。
+function ensureGridPaintable_(week) {
+  var keep = [], removed = 0;
+  week.getConditionalFormatRules().forEach(function(rule) {
+    if (isGridBlueRule_(rule)) { removed++; return; }
+    keep.push(rule);
   });
-  if (!removed.length) { ui.alert('水色のルールが見つかりませんでした。何も変えていません。'); return; }
+  if (!removed) return false;
   week.setConditionalFormatRules(keep);
-
-  saveUnlockRecord_(week, removed);
-  repaintWeekColors_(week);
-  SpreadsheetApp.getActiveSpreadsheet().toast(
-    '色分けを始めました。時間帯のマスを選んでから、ポジションのボタンを押してください。', 'シフト表', 6);
-}
-
-// 確認を出さずに色分けを始める（ポジションのボタンから呼ぶ）
-function startPositionColors_(week) {
-  var rules = week.getConditionalFormatRules();
-  var keep = [], removed = [];
-  rules.forEach(function(rule) {
-    var bc = rule.getBooleanCondition();
-    if (bc && String(bc.getCriteriaType()) === 'NUMBER_EQUAL_TO' &&
-        Number(bc.getCriteriaValues()[0]) === 0.25 &&
-        String(bc.getBackground()).toUpperCase() === POSITION_RULE_COLOR) {
-      removed.push({
-        ranges: rule.getRanges().map(function(r) { return r.getA1Notation(); }),
-        value: Number(bc.getCriteriaValues()[0]),
-        bg: String(bc.getBackground()),
-        fc: bc.getFontColor() ? String(bc.getFontColor()) : ''
-      });
-    } else {
-      keep.push(rule);
-    }
-  });
-  if (!removed.length) return false;
-  week.setConditionalFormatRules(keep);
-  saveUnlockRecord_(week, removed);
   repaintWeekColors_(week);
   return true;
 }
 
-function saveUnlockRecord_(week, removed) {
-  var sheet = getAdjustSheet_();
-  var row = adjustRowMap_(sheet)[week.getName() + '/cf'];
-  if (!row) {
-    row = Math.max(sheet.getLastRow() + 1, 2);
-    sheet.getRange(row, 1, 1, 2).setValues([[week.getName(), 'cf']]);
-  }
-  sheet.getRange(row, 3, 1, 2).setValues([
-    [Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'), JSON.stringify(removed)]
-  ]);
-}
-
-// メニュー「色分けをやめる（元に戻す）」
-function relockPositionColors() {
-  var week = activeWeekSheet_();
-  if (!week) return;
-  var ui = SpreadsheetApp.getUi();
-  var row = positionUnlockRow_(week);
-  if (!row) { ui.alert('「' + week.getName() + '」は色分けを始めていません。'); return; }
-  if (ui.alert('「' + week.getName() + '」の色分けをやめて、元の自動の水色に戻します。\n\n' +
-      '塗ったポジションの色は消えます。（削った時間の薄いグレーは残ります）\nよろしいですか。',
-      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
-
-  var sheet = getAdjustSheet_();
-  var removed = [];
-  try { removed = JSON.parse(String(sheet.getRange(row, 4).getValue())); } catch (e) { removed = []; }
-  var rules = week.getConditionalFormatRules();
-  removed.forEach(function(item) {
-    var builder = SpreadsheetApp.newConditionalFormatRule()
-      .whenNumberEqualTo(item.value)
-      .setBackground(item.bg)
-      .setRanges(item.ranges.map(function(a1) { return week.getRange(a1); }));
-    if (item.fc) builder.setFontColor(item.fc);
-    rules.push(builder.build());
-  });
-  week.setConditionalFormatRules(rules);
-  // 控えの行ごと空にする（これで「色分け中」の印が消える）
-  sheet.getRange(row, 1, 1, 5).setValues([['', '', '', '', '']]);
-  setPen_(week, null);
-  repaintWeekColors_(week);          // ポジションの色を白に戻す（薄いグレーは残す）
-  ui.alert('元に戻しました。時間帯バーの水色は、また自動で付くようになります。');
+// 「値が0.25なら水色」という、時間帯バーの自動の色づけかどうか
+// （右はしの「計」の列にも同じルールが付いているが、計は0.25にならないので外しても見た目は変わらない）
+function isGridBlueRule_(rule) {
+  var bc = rule.getBooleanCondition();
+  return !!(bc && String(bc.getCriteriaType()) === 'NUMBER_EQUAL_TO' &&
+    Number(bc.getCriteriaValues()[0]) === 0.25 &&
+    String(bc.getBackground()).toUpperCase() === POSITION_RULE_COLOR);
 }
 
 // その行・列が、日ブロックの「番号・名前」の列か
@@ -2840,86 +2762,41 @@ function personBlockAt_(row, col) {
 }
 
 // 決めた場所のうち、人がいるマスだけを塗る（ブロックごとにまとめて読み書きする）
+// 選んだマスから右へ、人がいる間ずっと塗る。休憩や退勤でマスが空になるところで止まる。
+// 　例）9:00〜18:00・休憩14:00〜15:00 で 9:00 を選ぶ → 9:00〜14:00 が塗られる
+// 　　　同じ人の 15:00 を選ぶ → 15:00〜18:00 が塗られる
 function paintCells_(week, targets, color) {
   var painted = 0;
   ADJUST_BLOCKS.forEach(function(block) {
-    var hits = [];
+    var seeds = [];
     for (var p = 0; p < ADJUST_ROWS; p++) {
       for (var c = 0; c < ADJUST_GRID_COLS; c++) {
-        if (targets[(block.head + 1 + p) + ',' + (block.col + c)]) hits.push([p, c]);
+        if (targets[(block.head + 1 + p) + ',' + (block.col + c)]) seeds.push([p, c]);
       }
     }
-    if (!hits.length) return;
+    if (!seeds.length) return;
     var range = week.getRange(block.head + 1, block.col, ADJUST_ROWS, ADJUST_GRID_COLS);
     var values = range.getValues();
     var colors = range.getBackgrounds();
-    var changed = 0;
-    hits.forEach(function(h) {
-      if (!(Number(values[h[0]][h[1]]) > 0)) return;      // 人がいないマスは触らない
-      colors[h[0]][h[1]] = color;
-      changed++;
+    var done = {}, changed = 0;
+    seeds.forEach(function(seed) {
+      var p = seed[0];
+      for (var c = seed[1]; c < ADJUST_GRID_COLS; c++) {
+        if (!(Number(values[p][c]) > 0)) break;      // 休憩・退勤でおしまい
+        if (done[p + ',' + c]) continue;             // もう塗ったマスは数えない
+        done[p + ',' + c] = true;
+        colors[p][c] = color;
+        changed++;
+      }
     });
     if (changed) { range.setBackgrounds(colors); painted += changed; }
   });
   return painted;
 }
 
-// ----- ポジションのペン -----
-// ボタンを押すと「ペン」になり、そのあとドラッグして選んだところがその色で塗られる。
-// 同じボタンをもう一度押すと置ける。
-// ペンの中身は控えシート（非表示）の G1＝シート名・G2＝色・G3＝もとのタブの色 に持つ。
-// 週シートのセルは結合されていることがあるので触らない。
-// 持っているかどうかは「シートのタブの色」で分かるようにする。
-var PEN_COL_IN_ADJUST = 7;      // 控えシートの G列
-
-// 今のペン（持っていなければ null）。色と名前をまとめて返す
-function readPenInfo_(week) {
-  var adj = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(ADJUST_SHEET_NAME);
-  if (!adj) return null;
-  var v = adj.getRange(1, PEN_COL_IN_ADJUST, 4, 1).getValues();
-  if (String(v[0][0]) !== week.getName()) return null;
-  var color = String(v[1][0]).trim();
-  if (!/^#[0-9A-Fa-f]{6}$/.test(color)) return null;
-  return { color: color, label: String(v[3][0]) || 'ポジション' };
-}
-
-// 今のペンの色（持っていなければ null）
-function readPen_(week) {
-  var info = readPenInfo_(week);
-  return info ? info.color : null;
-}
-
-// 画面すみに「いまのペン」をずっと出しておく（消えないお知らせ）
-function showPenBanner_(label, extra) {
-  SpreadsheetApp.getActiveSpreadsheet().toast(
-    (extra ? extra + '\n' : '') + '同じボタンをもう一度押すと、ペンを置きます。',
-    '🖊 いまのペン：' + label, -1);
-}
-
-// ペンを持つ／置く（color を渡さなければ置く）
-function setPen_(week, color, label) {
-  var adj = getAdjustSheet_();
-  if (!color) {
-    if (readPen_(week)) {
-      var old = String(adj.getRange(3, PEN_COL_IN_ADJUST).getValue()).trim();
-      try { week.setTabColor(/^#[0-9A-Fa-f]{6}$/.test(old) ? old : null); } catch (e) {}
-    }
-    adj.getRange(1, PEN_COL_IN_ADJUST, 4, 1).setValues([[''], [''], [''], ['']]);
-    return;
-  }
-  if (!readPen_(week)) {                       // 初めて持つとき、今のタブの色を控えておく
-    var tab = '';
-    try { tab = String(week.getTabColor() || ''); } catch (e) { tab = ''; }
-    adj.getRange(3, PEN_COL_IN_ADJUST).setValue(tab);
-  }
-  adj.getRange(1, PEN_COL_IN_ADJUST, 4, 1)
-     .setValues([[week.getName()], [color], [adj.getRange(3, PEN_COL_IN_ADJUST).getValue()], [label || '']]);
-  try { week.setTabColor(color); } catch (e) {}   // タブの色＝いま持っているペン
-}
-
-// 選んだ範囲のうち、塗る場所を決める
-// ・時間帯バーの升目 … そのマス
-// ・名前や出勤の列   … その人の1日ぶん
+// 選んだ範囲のうち、塗りはじめる場所を決める
+// ・時間帯バーの升目 … そのマス（そこから右へ、休憩の直前まで塗る）
+// ・名前や番号の列   … その人の1日ぶん
 function targetsOfRanges_(ranges) {
   var targets = {};
   ranges.forEach(function(range) {
@@ -2939,18 +2816,6 @@ function targetsOfRanges_(ranges) {
   return targets;
 }
 
-// その範囲が、升目や名前の列に少しでもかかっているか（計算だけ・シートは読まない）
-function rangeTouchesGrid_(r0, c0, nr, nc) {
-  var r1 = r0 + nr - 1, c1 = c0 + nc - 1;
-  for (var i = 0; i < ADJUST_BLOCKS.length; i++) {
-    var b = ADJUST_BLOCKS[i];
-    if (r1 <= b.head || r0 > b.head + ADJUST_ROWS) continue;
-    if (c1 < b.col - 6 || c0 >= b.col + ADJUST_GRID_COLS) continue;
-    return true;
-  }
-  return false;
-}
-
 // 今えらんでいる範囲（飛び地に対応）
 function activeRanges_(week) {
   var list = week.getActiveRangeList();
@@ -2960,63 +2825,60 @@ function activeRanges_(week) {
 }
 
 // ポジションのボタンを押したとき
+// ・升目を1マス選んでいたら … そこから右へ、休憩の直前まで（休憩が無ければ退勤まで）塗る
+// ・名前や番号を選んでいたら … その人の1日ぶんを塗る
+// モードもペンも無い。押したときだけ塗るので、触っただけで塗れてしまうことはない。
 function paintSelectedPosition_(color, label) {
   var week = activeWeekSheet_();
   if (!week) return;
   var book = SpreadsheetApp.getActiveSpreadsheet();
-  var ui = SpreadsheetApp.getUi();
-  if (!positionUnlockRow_(week)) {
-    if (ui.alert('「' + week.getName() + '」は、まだポジションの色分けを始めていません。\n\n' +
-        '今すぐ始めますか。（あとで「色分けをやめる」で元に戻せます）',
-        ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
-    if (!startPositionColors_(week)) {
-      ui.alert('水色のルールが見つかりませんでした。何も変えていません。');
-      return;
-    }
-  }
-
-  // 同じボタンをもう一度＝ペンを置く
-  var now = readPen_(week);
-  if (now && isSameColor_(now, color)) {
-    setPen_(week, null);
-    book.toast('ペンを置きました。タブの色も戻します。これで、選んでも色は変わりません。', 'ポジション', 5);
+  ensureGridPaintable_(week);                  // 自動の水色ルールが残っていれば、ここで1回だけ外す
+  var painted = paintCells_(week, targetsOfRanges_(activeRanges_(week)), color);
+  if (!painted) {
+    book.toast('塗るところが見つかりませんでした。\n' +
+      '塗りはじめたい時間のマスを選んでから、もう一度押してください。', 'ポジション', 6);
     return;
   }
-
-  setPen_(week, color, label);
-  var painted = paintCells_(week, targetsOfRanges_(activeRanges_(week)), color);
-  showPenBanner_(label, painted
-    ? '選んでいた ' + painted + 'マスを塗りました。このままドラッグすれば続けて塗れます。'
-    : '塗りたい時間帯や、名前をドラッグしてください。');
-}
-
-// 選んだ瞬間に、ペンの色で塗る（承認のいらない簡易トリガー）
-function onSelectionChange(e) {
-  try {
-    if (!e || !e.range) return;
-    var sheet = e.range.getSheet();
-    if (!isWeekSheetName_(sheet.getName())) return;
-    var r0 = e.range.getRow(), c0 = e.range.getColumn();
-    var nr = e.range.getNumRows(), nc = e.range.getNumColumns();
-    if (nr * nc > 4000) return;                       // 行や列ごと選んだときは何もしない
-    if (!rangeTouchesGrid_(r0, c0, nr, nc)) return;   // 升目にかかっていない
-    var pen = readPenInfo_(sheet);
-    if (!pen) return;                                 // ペンを持っていない
-    var painted = paintCells_(sheet, targetsOfRanges_([e.range]), pen.color);
-    if (painted) {
-      showPenBanner_(pen.label,
-        painted + 'マス（' + (Math.round(painted / 4 * 100) / 100) + '時間）塗りました。');
-    }
-  } catch (err) {
-    Logger.log('onSelectionChange: ' + err.message);
-  }
+  book.toast(painted + 'マス（' + (Math.round(painted / 4 * 100) / 100) + '時間）を塗りました。\n' +
+    '選んだマスから、休憩の直前まで（休憩が無ければ退勤まで）塗ります。', label, 6);
 }
 
 function paintPosition1() { var p = positionList_()[0]; paintSelectedPosition_(p.color, p.name); }
 function paintPosition2() { var p = positionList_()[1]; paintSelectedPosition_(p.color, p.name); }
 function paintPosition3() { var p = positionList_()[2]; paintSelectedPosition_(p.color, p.name); }
 function paintPosition4() { var p = positionList_()[3]; paintSelectedPosition_(p.color, p.name); }
+function paintPosition5() { var p = positionList_()[4]; paintSelectedPosition_(p.color, p.name); }
 function clearPositionPaint() { paintSelectedPosition_(POSITION_BASE_COLOR, 'もとの水色'); }
+
+// メニュー「すべての週シートを手で塗る形にする（臨時用）」
+// ふだんはボタンを押したときに1枚ずつ自動で切り替わる。
+// 先に全部そろえておきたいとき（色が塗れない週が残っているとき）に使う。
+function makeAllWeeksPaintable() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var weeks = ss.getSheets().filter(function(sh) { return isWeekSheetName_(sh.getName()); });
+  var done = [];
+  weeks.forEach(function(sh) { if (ensureGridPaintable_(sh)) done.push(sh.getName()); });
+  SpreadsheetApp.getUi().alert(done.length
+    ? done.length + '枚を手で塗る形にしました。\n\n' + done.join('、') +
+      '\n\n表の見た目は変わりません。これでどの週でもポジションの色が塗れます。'
+    : 'すべての週シートが、すでに手で塗る形になっています。');
+}
+
+// メニュー／ボタン「週ぜんぶ水色にもどす」
+// 「水色にもどす」の、週まるごと版。戻る色はどちらも同じ水色
+function clearAllPositionColors() {
+  var week = activeWeekSheet_();
+  if (!week) return;
+  var ui = SpreadsheetApp.getUi();
+  if (ui.alert('「' + week.getName() + '」で塗ったポジションの色を、週ぜんぶ水色にもどします。\n\n' +
+      '（削った時間の薄いグレーは、そのまま残ります）\nよろしいですか。',
+      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+  ensureGridPaintable_(week);
+  clearOurGridColors_(week);
+  repaintWeekColors_(week);
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    '週ぜんぶを水色にもどしました。（削った時間の薄いグレーは残しています）', 'ポジション', 5);
+}
 
 // メニュー「ポジションの名前と色を変える」
 function openPositionSettings() {
@@ -3060,7 +2922,7 @@ function savePositionSettings(values) {
     if (!name) throw new Error((i + 1) + '番目のポジションの名前を入れてください。');
     rows.push([name, /^#[0-9A-Fa-f]{6}$/.test(color) ? color.toUpperCase() : POSITION_DEFAULTS[i].color]);
   }
-  settings.getRange(POSITION_NAME_ROW, 5, POSITION_COUNT, 2).setValues(rows);
+  POSITION_ROWS.forEach(function(row, i) { settings.getRange(row, 5, 1, 2).setValues([rows[i]]); });
   return '保存しました。メニューの表示は、開き直すと変わります。';
 }
 
@@ -3068,7 +2930,7 @@ function savePositionSettings(values) {
 
 // ----- 色の塗り直し（ここ1か所で色を決める） -----
 // マスの色は、いつでも次のルールで決まる。
-//   今その人がいる … ポジションの色があればそのまま／無ければ 水色（色分け中）・白（通常時は自動の水色に任せる）
+//   今その人がいる … ポジションの色があればそのまま／無ければ水色
 //   今はいない     … 調整前にはいた → 薄いグレー（元の色は控えるので、時間を戻せば返ってくる）
 //                    調整前もいない → 白（ただし自分で付けた色は消さない）
 function isSameColor_(a, b) { return String(a).toLowerCase() === String(b).toLowerCase(); }
@@ -3091,7 +2953,6 @@ function repaintContext_(week) {
   return {
     sheet: sheet,
     map: map,
-    unlocked: !!map[week.getName() + '/cf'],
     ours: ourColors_()
   };
 }
@@ -3128,14 +2989,8 @@ function repaintBlock_(week, blockIndex, persons, ctx) {
           colors[p][c] = color; changed = true; freed++;
           delete keepMap[key]; keepChanged = true;
         }
-        if (isSameColor_(color, ADJUST_COLOR)) {
-          colors[p][c] = ctx.unlocked ? POSITION_BASE_COLOR : '#ffffff'; changed = true;
-        } else if (ctx.unlocked && isSameColor_(color, '#ffffff')) {
-          colors[p][c] = POSITION_BASE_COLOR; changed = true;             // 増えた時間は薄い水色
-        } else if (ctx.unlocked && isSameColor_(color, POSITION_RULE_COLOR)) {
-          colors[p][c] = POSITION_BASE_COLOR; changed = true;             // 前に塗った濃い水色も薄くする
-        } else if (!ctx.unlocked && isOurColor_(color, ctx.ours)) {
-          colors[p][c] = '#ffffff'; changed = true;                        // 通常時は自動の水色に任せる
+        if (isSameColor_(color, ADJUST_COLOR) || isSameColor_(color, '#ffffff')) {
+          colors[p][c] = POSITION_BASE_COLOR; changed = true;   // 戻った時間・増えた時間は水色にする
         }
       } else if (line.charAt(c) === '1') {
         // 今はいないが、調整前にはいた → 薄いグレー
@@ -3187,28 +3042,13 @@ function clearOurGridColors_(week) {
 }
 
 // 次の週シートは、シートごとコピーして作る。
-// 色分け中にコピーすると「水色の自動ルールが外れたまま・先週の色が残ったまま」になるので、
-// 新しいシートだけを、色分けしていない元の状態に戻す（今のシートの色はそのまま残す）。
-function resetPositionColorsOnCopy_(source, newSheet) {
-  var sheet = getAdjustSheet_();
-  var row = adjustRowMap_(sheet)[source.getName() + '/cf'];
-  var saved = row ? String(sheet.getRange(row, 4).getValue()) : '';
-  if (saved) {
-    var removed = [];
-    try { removed = JSON.parse(saved); } catch (e) { removed = []; }
-    var rules = newSheet.getConditionalFormatRules();
-    removed.forEach(function(item) {
-      var builder = SpreadsheetApp.newConditionalFormatRule()
-        .whenNumberEqualTo(item.value)
-        .setBackground(item.bg)
-        .setRanges(item.ranges.map(function(a1) { return newSheet.getRange(a1); }));
-      if (item.fc) builder.setFontColor(item.fc);
-      rules.push(builder.build());
-    });
-    newSheet.setConditionalFormatRules(rules);
-  }
-  clearOurGridColors_(newSheet);
-  try { newSheet.setTabColor(null); } catch (e) {}     // ペンの色も持ち越さない
+// 先週のポジションの色を持ち越さないよう、新しいシートの色だけ消して塗り直す
+// （今のシートの色はそのまま残す）。
+function resetPositionColorsOnCopy_(newSheet) {
+  ensureGridPaintable_(newSheet);      // 自動の水色ルールが残っていれば外す
+  clearOurGridColors_(newSheet);       // 先週のポジションの色を消す
+  repaintWeekColors_(newSheet);        // いる時間を水色に塗り直す
+  try { newSheet.setTabColor(null); } catch (e) {}
 }
 
 // 週シート全体を塗り直す
@@ -3247,7 +3087,7 @@ function repaintEditedRows_(week, range) {
 function refreshWeekColors() {
   var week = activeWeekSheet_();
   if (!week) return;
-  setPen_(week, null);                 // 掃除したらペンは置く
+  ensureGridPaintable_(week);          // 自動の水色ルールが残っていれば、ここでも外す
   var t = repaintWeekColors_(week);
   SpreadsheetApp.getActiveSpreadsheet().toast(
     '色を塗り直しました。削った時間 ' + t.grayed + 'マスを薄いグレーに、' +
@@ -3263,18 +3103,27 @@ var POSITION_BUTTON_COL = 18;
 var POSITION_BUTTON_W = 148;
 var POSITION_BUTTON_H = 34;
 var POSITION_BUTTON_GAP = 6;
-var POSITION_BUTTON_PER_ROW = 4;              // 4個・3個の2段にする
+var POSITION_BUTTON_PER_ROW = 4;              // 4個ずつの2段にする
 var POSITION_BUTTON_ROW_GAP = 2;              // 2段目は2行下
+// 1段目＝ポジション1〜4、2段目＝ポジション5（掃除）・水色にもどす・週ぜんぶ水色に・確定する
+// ※「色を塗り直す」はメニュー（困ったとき・やり直し）に移した
 var POSITION_BUTTON_FUNCS = ['paintPosition1', 'paintPosition2', 'paintPosition3', 'paintPosition4',
-                             'clearPositionPaint', 'refreshWeekColors', 'confirmAdjust'];
+                             'paintPosition5', 'clearPositionPaint', 'clearAllPositionColors', 'confirmAdjust'];
+// 前の版で置いていて、今は使わないボタン。置き直すときに一緒に外す
+// （外さないと、古い「掃除（色を塗り直す）」のボタンが画面に残ってしまう）
+var POSITION_BUTTON_RETIRED = ['refreshWeekColors'];
+function isPositionButtonScript_(fn) {
+  return POSITION_BUTTON_FUNCS.indexOf(fn) >= 0 || POSITION_BUTTON_RETIRED.indexOf(fn) >= 0;
+}
 var POSITION_BUTTON_IMAGES = [
-  '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'
+  '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',   // デシャップ
+  'iVBORw0KGgoAAAANSUhEUgAAAJQAAAAiCAYAAAC5r/C8AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAKWSURBVHhe7Zy/i9RQFEb3TxsQESzd1k5sLKwEaxsbrUTEShDsxMZuG7ESS4ttrEXwB6uiKCJC5AS+4XGTTF42b2Xy8l047Gxykwncw3133sAcXLjxojl/5b4xs8GlA15sNhtjZoNLW6HOXbrWMc6YHHCnIxR/L97+YMxkUocslJmNhTJFsVCmKBbKFMVCmaJULdTVh58b4vHLH51z5myoWqjL9z61Qr16+7tzrgSHdz821x+dtNx6+rV5cPS9OXrzqzl+96d9HfPXQNVCgYKiq+DvT/62/8fcXG4++bK9765AOF2DcIg9532XQHVC0ZUouOQZijvPv3WuBY4jnGRg2eT/uGxyjKAbIYqC90UaniPNf/b65zaH/HheOYgXjy+J6oQaCgqPFBQMSdJrKCTy8VrdR8IhB6HzQyji8RTel+dQRKly7rHvVCeUOobkUWdAlJgrlKMCE5q7JNjYTDRFBp4t3i9X3H2nOqEiFG5MiNiVEAzS67UUqfC5kTszIRkxtBQvheqFkgCaTxCE7sMMlC59RF930Bym7nUWQjGvKeIyuDSqEyoO5enMEiMtNrl9XYxAvng8oojHc1AXVFdcMlUJNdY9JA3C5XQCOhoRP+FF1GFOs9+lzVci55n2naqEAhVWQzmS6SN+zN0Fkui6sUJLvKkdJpVp6dsFojqh+tAclDPPADJpqexbBmOuxMu9P2iZI6aKuM+sQigVL+cTVLpXNFZoOldurvK1carIeaYlsQqhtC0wNgulu9lTcnNkirv2Q7vlS2cVQulL4jFJ6Ba537cx89Bpdm2YpmiW4xlqFEmsQijz/7BQpigWyhTFQpmiWChTFAtlimKhTFF6hfKPZZjT0vtjGcbMpRXKPzhmSoFL/wBMJquinz3vVAAAAABJRU5ErkJggg==',   // キッチン
+  'iVBORw0KGgoAAAANSUhEUgAAAJQAAAAiCAYAAAC5r/C8AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAALLSURBVHhe7Zy9ihRBFEb3neYFxkAQEw1EVDBQlMVAWFBYUBEMBhRkxWwTAzFSMDA1NDP0iVpO47dca6q7q+3CnZr9gsNMd/10NffsvdW9MAfvvj7rnr4+NGYxuHTAl/V6bcxicOlMqDsPbmwZZ0wJuLMlFJ+ff50YM5vokIUyi7FQpioWylTFQpmqWChTlSaFOj457FarVf+ZtpnzxUIt4MOPTXf56qXu0fO73dsvx1vtFxELtQAkunbrSr8WgWRpv4tEE0Ldfnj9r6ANQb90bEQivv/2Yqst8vL0cZ95Pv180x+ffn/VHx9t7m/1BSRibjJV2jaUvVjr1HpbxEL9gcDfO7rZf0cA+iEWx/TnWO1z0NrS87qn9HzrNCVUTgRQwKNQJRLG/gjFOZWs2C7BYomlP+UO6YbK3JCInOccbWQ9UMbiHPMqO7bGXgilgMeSM1eoNCsxl+ZTZtt8fHLWXwKKoXIXxyFJugZBSWU92pNRZtP5WmAvhCrZpKvP2Dy0pdkElE1ymQgRWV+UDaI8MdtwTH/JxtyxHbGA78pwU4zd9/+mCaGmUMCHREEE2hVEZaEU5skFhzEKcimUsalgSy4dIyXnJKeFOgdiJkjb1E4ZAQVoTgAU5KEnvBxRhLG9UNyY6z7mirtrNC/UVCZQVmJPMlcogkyAGZMrdzm4jmTKvS6IaO2si3EINjVm12laKGWP+M5IcKwMkJaQEqGU2Ur7Q9ynpXuqHOmDwD7QpFBkC+2blH3SdmWWGNhSoZhPMuWe3tJrMZ+uV5KZ4lj65x4EWqUpoQhA/FcHGWioFCFCmiVKhIqvA8b2TbEcCsammXKK+FS3DzQlFCARf9FDT3RjSKixrEP54Rol8zMPfcdebk7BvcQnvdZpTiiz21goUxULZapioUxVLJSpioUyVbFQpipZofxjGeZfyf5YhjFL6YXyD46ZWuDSby5kqdQIgvaYAAAAAElFTkSuQmCC',   // ウォッシャー
+  'iVBORw0KGgoAAAANSUhEUgAAAJQAAAAiCAYAAAC5r/C8AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAIYSURBVHhe7Zy9SsRAFIX3nfICKcRGEOxUFGz8qRQUthC2UxBlQUEU1GYL2Uqx0NbS0tLXiZzADdk7czVrxmbuKT42MzszKebj3NkNZHA7fqmOjy4I6Q1cGuCiLEtCegOXGqE213cC4wjpAtwJhMLn6/SLkLlpO0ShSG8oFEkKhSJJoVAkKRSKJIVCKYqiqNH9FtOHj2o0vOrE3eVbMD833AqFzdUbDiDT4sJS0C/E1hEJfyM2PzfcCiXyzIteR4Ta3xvV1xaTm/dgbo64F0qXIUmurgJ0TaiN1d1gbo5QKCWU1W/BhJqFQhlCQRB9ftJjARNqFgplCBUjdqgWoWLfecStUEggiKBLkSWaRlJL1kEC6USz0GvlhFuhIABE0P1dhdLpNQ96rZxwK9TK8lqzue30ENH0GcoSTJe8mJDjk8dqe+uwep58BvNzw6VQ2FhsOqRCWydIDKtUaaGwNv4YRR/K6enovrmXLq854lIoJIakENq4tn6FaWE0+nt5FNOWcXhw5iKdgEuhpKxdnz/VbVxbj1vk0G0JJQmE+ZJMWB9pJG2kEyT2IJU7oZAgIoD0tdPEQguFM5EeA5EgGO6BMRAI6dQek3vpcycUwIYiMaQtMuhxQJc0AfMhx08HdgGCQTSMt+6TCy6FIv8HhSJJoVAkKRSKJIVCkaRQKJIUCkWSEhWKL8sgfyX6sgxC+lILxReOkVTApW/DAHf/kZph/wAAAABJRU5ErkJggg==',   // 店長
+  'iVBORw0KGgoAAAANSUhEUgAAAJQAAAAiCAYAAAC5r/C8AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAJ7SURBVHhe7ZyxaxRBFIfzP11pkQML4YKQkEKUQAiBYBnQPmAnWAjWwVLSBYJgmzIQCDaCpbW19cq33O94vN27JO7YzPyKj5t5ezO7sB/vvduD3bq7Oug+f9g3ZjK4tMVgPp8bMxlcWgl1erIYGGfMQ8CdgVB8dj9PjHk00SELZSZjoUxRLJQpioUyRbFQpijNCvXj20E3m8268/fP+/mf78d9bBNx/fWXF93Fp90V7MMeOs6Y/Y9fbQ/OXTPNC4UMcb6JuP7t66eD4x/PFqvjjBVHvnz+WrFQS6Hg1/XhICsBWSYLRUZS7Ov5fj9mPXPJhHQa8518DTXSpFBIFG+6MshY1onkPRRDuL2dJ32Ze/fm2WpflcB4rt83R4PrqYkmhcqi6ObnzLQpQ0koBOFTIonYXwHC6ZgyWY00KRTkkvfYHkpCqfQhFuLdXr4crBOcI/ZZNWKhlkLljLIOlSwJlfeJECf75XjNNC8UN1xN9UNgHeslFGOVO0pZlI8YpS7Gam/OmxOKDEOZUl8ENOV8xizDPGaXmJHinLHKnGL3ka+pJpoTCripapIlEaIh0LrskkvXmFDIFn/FEdO62n/diSaF4uaO9T45k2TiHhIKmSQnJQ+B9AhBQhFnXHu5gyaFgnVCaR6zS8xGQjH1X5RRZSr9nRP30DOumh8ZgIW6RyiymR5MxvVZMmUhZae4x7rjNdKkUAiiplwCZcEkgzJQ7qGUcTSnsUcWxGGs51NxHXE/h6oQ3WwEiM0yUo1llzGyUBH9aoSW/hiGJoUy/w8LZYpioUxRLJQpioUyRbFQpigWyhRlVCi/LMP8K6MvyzBmKr1QfuGYKQUu/QWEMhXfQCLDYgAAAABJRU5ErkJggg==',   // 掃除
+  'iVBORw0KGgoAAAANSUhEUgAAAJQAAAAiCAYAAAC5r/C8AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAOjSURBVHhe7ZwxixRBEIXvP+0f2NhEjAwvOENRAxO57AIRTAwOjPQy4QTDMxNRDAwODAQjEwMjwcx45S28492b6p3emd7dWa3gY+d6uqqnq15X9+zBHpx//LJ4/PwsSUYDLR3gYj6fJ8looKUrQR3dfdBRXJLUAO10BIXPy9+LJFkb1VAKKhlNCippSgoqaUoKKmlKCmrinJy+WDw9O++0T5VJCwqBnM1my6D6vRoePXm2uH14tHj1/rJzb5PgefHcb7/+6NyLuHd8suz/6eefa22Y/5vP3zr3Ihgr9Pd722QvBDVkhSKZsKUg4YO8+/6r01+BEGHX16/EnfsPl/beXiISw8uLD1c+ahZF5GMX/JOCUjFFIOFuo6wrCLVZRWkeFM/p64tr7Tdu3uoIxH324fabZi8EhYqh7dgOQLQNqJiQKG/Hao/sFPbDNXwgsZ4oT9YYQaES4r7OE77h06uk++zjvxQUtiQET+E2xcBQBGxDkvWMgvvaHz50m2O7b38ecPihvY4X4bZE7WvhnCAgnqmAL6YSueUJpdWtgUWl4NYQVRkKoVRNSnjV4CGY7UiwV4lVsNq43z50rgRiWjU2D/+A805BGUwIRMNVh2sGLhITQcWiILRCuEgAfXvio741lBaFUko2nlvniLFLcySlylkaY1tMTlB8w0I1YtBwWMUnVmFfoMcKimPp+auGoYLSM1/pXBgBAWo8WOH8YL9tJiUoVicECn9r0lne+xJN8cAH7ABFqucqCsAFxTGj5NfAbbnWnpWpb14O5hcJauh3dq2YjKAQGAaX37mooHCf54RVwaegaukTFJ6Jb3w1uD3htqYVBPNEX4jB/fTBReIM8dWSyQiKAdKA+Lak24MLgURb3ip8i3FBrONL7aPDNBeMv7G6+GqADxUVr0tx2RY7F5RWJj9wu6CAigr9PXHrCgpVTyuQJ5lj1Sad9t4e+fa/h6Ixqf13z6aYjKBcTCASFOD2EZV3nsNqBKWJYBu3IY6pr+aOPxfQZ9b5wC+3bCZdvwbp+9eKg3nCxquU99s2OxcUQOC9MulbU/Tm4jYK7ZAo+CkRJcLfCDEGrqPvtyJB9Z3hXOisziW8P5/J++36ME4mISiHKxes8ypNUAFgV5MsrySsWmMShMqhgi2NBShY76927h/ABvPDp2/7u2SSgkr2lxRU0pQUVNKUFFTSlBRU0pQUVNKUFFTSlFBQ+WMZyVDCH8tIkrEsBZU/OJa0Alr6CyqoI0Eopiu/AAAAAElFTkSuQmCC',   // 水色にもどす
+  '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',   // 週ぜんぶ水色に
+  'iVBORw0KGgoAAAANSUhEUgAAAJQAAAAiCAYAAAC5r/C8AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAL+SURBVHhe7ZwxzuIwEEb/o1FR0VFRUtJS0tLSUtPScwB6TsANOMauXqRvNTuxE0Mi/TaakZ4S4sQxzMvEScHPer3+s1qtgmAyuPTDymKxCILJ4NI/oZbLZc+4ICgBd3pCsdxsNkHwNtahECqYTAgVzEoIFcxKCBXMSggVzMpXC0Xc7/fe9hIul0t3/PF47LWVoj4Oh0Ov7VtpViiSNcT1eu2S+Xg8em22H5Lt24HjiNvt1muD0+nUG5OH/UqE0n658PvXTLNCTQnbz1gyc4Fwn47FCzY2hhJ5a6FZoWC/3//3gysx2+22Wz6fz2477WxTu+2jtIpYiDmFSkFlJDjPbrfrtddK00Kdz+fuR0cWPiOObkkEn0kGQYJ0e7N92H39bS0FfSjRfjyeT2QFycT3822107RQr9erq0JKNvIo4Uqk5lIIw2eqmu1DxzD5LglJ5fsROh/B+IhSobgw+D6tVSVLs0KpOtlIbfNRUllAYvqKNoQqko8SoSQToSXBU2pO3hppUijNnQh7G1JFIJCL7SQHWIfclU9CkU3zsU+E4jyMQbdgZNBY/L4WK1MuSqSsgSaFIukKKxTbx6pUThD1wS3LfvavHYaeuJApJZT6TOErkx4gaEN+zaf0gFE7TQrFD64qZYVSFdI6+yJEyW1OIupFpvrxMdSXku8j93LVypQTHVR5/fYaaVIoQZBgJdIK9e4tTy8yp9zyEMRKpfWhPtiHcyKyxGFp39BrbP7YGmleKBtWqFykkuuPQYxPhLLYed7YpFrvzXwglW3zx9VI80KRcBLGVcxyrEKxv+YowLoqg5VAj//vCEX1QwJfpfx+Hjtm+1lzstJ+aqBpoTR/stt8tUmFPcbPYZDKPi2yrnmYxc+LUlVmaDLuGQrGaC+CmmlaqBQSyouWg/lL6urXds1ffHihAClJPsvcXC0HIuupUMG5x1451MbXCRX8LiFUMCshVDArIVQwKyFUMCshVDArIVQwK0mh4s8ygk9J/llGEEylEyr+cCyYC1z6Cyx3/Ul8WimLAAAAAElFTkSuQmCC'   // 確定する
 ];
 
 // すでに置いてあるボタンを外す（同じ命令が付いている絵だけ）
@@ -3285,7 +3134,7 @@ function removePositionButtons_(sheet) {
   images.forEach(function(img) {
     var fn = '';
     try { fn = String(img.getScript() || ''); } catch (e) { fn = ''; }
-    if (POSITION_BUTTON_FUNCS.indexOf(fn) >= 0) { img.remove(); n++; }
+    if (isPositionButtonScript_(fn)) { img.remove(); n++; }
   });
   return n;
 }
@@ -3294,14 +3143,13 @@ function removePositionButtons_(sheet) {
 // （設定とボタンで色が食い違うと、押した色と見た目が変わってしまうため）
 function syncPositionColors_() {
   var settings = getRequestSettingsSheet_();
-  var range = settings.getRange(POSITION_NAME_ROW, 6, POSITION_COUNT, 1);
-  var now = range.getValues();
+  var now = positionCells_(settings);
   var changed = false;
-  var next = POSITION_DEFAULTS.map(function(pos, i) {
-    if (String(now[i][0]).trim().toUpperCase() !== pos.color.toUpperCase()) changed = true;
-    return [pos.color];
+  POSITION_DEFAULTS.forEach(function(pos, i) {
+    if (String(now[i][1]).trim().toUpperCase() === pos.color.toUpperCase()) return;
+    settings.getRange(POSITION_ROWS[i], 6).setValue(pos.color);
+    changed = true;
   });
-  if (changed) range.setValues(next);
   return changed;
 }
 
