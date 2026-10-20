@@ -693,7 +693,7 @@ function getRequestSettingsSheet_() {
   sheet.getRange('E3:E28').setNumberFormat('@');
   sheet.getRange('E42:E47').setNumberFormat('@');   // 「9:00」が時刻に化けないように文字で持つ
   sheet.getRange('F22:F25').setNumberFormat('@');
-  sheet.getRange('E48:F48').setNumberFormat('@');   // ポジション5（E26が埋まっているので離れた行）
+  sheet.getRange('E48:F49').setNumberFormat('@');   // ポジション5と通知先（E26が埋まっているので離れた行）
   [[REQUEST_BASE_CLOSING_CELL, String(REQUEST_DEFAULT_BASE.closingDay)],
    [REQUEST_BASE_WEEKS_CELL, String(REQUEST_DEFAULT_BASE.deadlineWeeks)],
    [REQUEST_BASE_TIME_CELL, REQUEST_DEFAULT_BASE.deadlineTime],
@@ -713,7 +713,7 @@ function getRequestSettingsSheet_() {
   // 前の版で入っていた1〜4以外の数字（14など）は初期値に直す
   var weeksNow = Number(sheet.getRange(REQUEST_BASE_WEEKS_CELL).getDisplayValue());
   if (!(weeksNow >= 1 && weeksNow <= 4)) sheet.getRange(REQUEST_BASE_WEEKS_CELL).setValue(String(REQUEST_DEFAULT_BASE.deadlineWeeks));
-  sheet.getRange('D3:D48').setValues([
+  sheet.getRange('D3:D49').setValues([
     ['基本設定：社員の締め日（毎月この日）'],
     ['基本設定：スタッフ入力締切は募集が始まる何週間前の日曜日'],
     ['基本設定：スタッフ入力締切の時刻'],
@@ -759,7 +759,8 @@ function getRequestSettingsSheet_() {
     ['スタッフが選べる退勤の時間：いちばん遅い'],
     ['このお店のシフト希望ページのアドレス（メニュー「お店のはじめ方」で入れます）'],
     ['このお店のアクセス記録ファイルのID（同上）'],
-    ['ポジション5：名前（E列）と色（F列）']
+    ['ポジション5：名前（E列）と色（F列）'],
+    ['シフト希望が届いたときの通知先（メニュー「LINE通知の設定」で登録。空なら送りません）']
   ]);
   // 欲しい人数の目安。空のときだけ初期値を入れる
   if (String(sheet.getRange(NEED_WEEKDAY_CELL).getDisplayValue()).trim() === '') {
@@ -3253,7 +3254,16 @@ var LINE_REGISTER_CELL = 'E12';     // 送り先の登録を受け付ける期�
 // お試しの送り先。本番のグループとは別のトーク（テスト用のグループなど）を入れておくと、
 // 「お試し公開」のときだけ、そちらへ本物と同じお知らせが届く。本番には行かない
 var LINE_TEST_TARGET_CELL = 'E32';
+var LINE_NOTIFY_TARGET_CELL = 'E49';   // シフト希望が届いたときの通知先（店長が見るトーク）
 var LINE_REGISTER_MINUTES = 10;
+
+// 送り先の登録は3種類ある。期限のうしろに付ける印（|test・|notify）で見分ける
+// ※フォームのGAS（doPost）と同じ決まり。変える時は両方を直すこと
+var LINE_REGISTER_KINDS = {
+  '':       { cell: LINE_TARGET_CELL,        label: 'お知らせの送り先',              where: 'スタッフのグループ' },
+  'test':   { cell: LINE_TEST_TARGET_CELL,   label: 'お試しの送り先',                where: 'テスト用のトーク' },
+  'notify': { cell: LINE_NOTIFY_TARGET_CELL, label: 'シフト希望が届いたときの通知先', where: '店長が見るトーク' }
+};
 // LINE Developers の「Webhook URL」に貼るアドレス（スマホのフォームと同じアドレスで受け取る）
 // LINE Developers の「Webhook URL」に貼るアドレス＝シフト希望ページと同じ
 function lineWebhookUrl_() { return requestFormUrl_(); }
@@ -3289,6 +3299,7 @@ function storeSetupState_() {
     borrowed: !home && (!url || !record),
     store: text(REQUEST_STORE_NAME_CELL),
     token: text(LINE_TOKEN_CELL),
+    notifyTarget: text(LINE_NOTIFY_TARGET_CELL),
     loginId: text(LINE_LOGIN_ID_CELL),
     loginSecret: text(LINE_LOGIN_SECRET_CELL),
     url: url,
@@ -3386,9 +3397,13 @@ function openStoreSetup() {
     '    (D.recordName ? "<p class=\\"note\\">いま見ているファイル：<b>" + esc(D.recordName) + "</b></p>" : ""));',
     '  html += step(4, "LINE通知（お知らせを送る）", !!D.token,',
     '    "<p class=\\"note\\">メニューの「LINEのつなぎこみ」→「LINE通知の設定」で入れます。</p>");',
-    '  html += step(5, "LINEログイン（本人を見分ける）", !!(D.loginId && D.loginSecret),',
+    '  html += step(5, "シフト希望が届いたときの通知先", !!D.notifyTarget,',
+    '    "<p class=\\"note\\">スタッフが希望を送るたびに、店長のトークへ知らせます。' +
+      'メニューの「LINEのつなぎこみ」→「LINE通知の設定」の⑤で登録します。' +
+      '登録しなければ通知は送りません。</p>");',
+    '  html += step(6, "LINEログイン（本人を見分ける）", !!(D.loginId && D.loginSecret),',
     '    "<p class=\\"note\\">メニューの「LINEのつなぎこみ」→「LINEログインの設定」で入れます。</p>");',
-    '  html += step(6, "フォーム側に、このシフト表を教える", true,',
+    '  html += step(7, "フォーム側に、このシフト表を教える", true,',
     '    "<p class=\\"note\\">フォームのGASの <b>SHIFT_SPREADSHEET_ID</b> に、下のIDを入れます。' +
       'ここだけはフォーム側の作業です。</p>" +',
     '    "<input readonly value=\\"" + esc(D.shiftId) + "\\" onclick=\\"this.select()\\">" +',
@@ -3729,6 +3744,7 @@ function openLineSettings() {
   var settings = getRequestSettingsSheet_();
   var line = lineConfig_(settings);
   var testTarget = String(settings.getRange(LINE_TEST_TARGET_CELL).getDisplayValue()).trim();
+  var notifyTarget = String(settings.getRange(LINE_NOTIFY_TARGET_CELL).getDisplayValue()).trim();
   var box = 'width:100%;padding:6px;font-size:12px;';
   var html = '<div style="font-family:sans-serif;padding:4px 8px;font-size:14px;line-height:1.6;">' +
     '<p style="margin:0 0 8px;font-size:12px;color:#555;">LINE公式アカウントから、スタッフのグループへお知らせを送るための設定です。</p>' +
@@ -3753,6 +3769,15 @@ function openLineSettings() {
     '<button onclick="doClearTest()" style="margin-left:6px;padding:5px 10px;">消す</button>' +
     '<p style="margin:2px 0;font-size:12px;color:#555;">' +
     (testTarget ? '登録済み（' + escapeHtml_(testTarget.slice(0, 8)) + '…）' : 'まだ登録されていません。') + '</p>' +
+
+    '<label style="display:block;font-weight:bold;margin-top:12px;">⑤ シフト希望が届いたときの通知先</label>' +
+    '<p style="margin:2px 0;font-size:12px;color:#555;">ここを登録しておくと、<b>スタッフがシフト希望を送るたびに</b>そのトークへ届きます。' +
+    '店長だけが見るトークを登録してください（スタッフのグループに入れると、全員に名前が流れます）。</p>' +
+    '<button onclick="doOpenNotify()" style="padding:5px 10px;">通知先を登録する（' + LINE_REGISTER_MINUTES + '分）</button>' +
+    '<button onclick="doClearNotify()" style="margin-left:6px;padding:5px 10px;">消す</button>' +
+    '<p style="margin:2px 0;font-size:12px;color:' + (notifyTarget ? '#186A3B' : '#555') + ';">' +
+    (notifyTarget ? '登録済み（' + escapeHtml_(notifyTarget.slice(0, 8)) + '…）' :
+      'まだ登録されていません。登録するまで通知は送りません。') + '</p>' +
 
     '<p id="msg" style="margin:10px 0 0;font-size:12px;color:#186A3B;"></p>' +
     '<div style="margin-top:12px;text-align:right;">' +
@@ -3780,6 +3805,18 @@ function openLineSettings() {
     '    .withFailureHandler(function(e){ show(e.message, true); })' +
     '    .openLineRegisterTest();' +
     '}' +
+    'function doOpenNotify(){' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function(t){ show(t); })' +
+    '    .withFailureHandler(function(e){ show(e.message, true); })' +
+    '    .openLineRegisterNotify();' +
+    '}' +
+    'function doClearNotify(){' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function(t){ show(t); })' +
+    '    .withFailureHandler(function(e){ show(e.message, true); })' +
+    '    .clearLineNotifyTarget();' +
+    '}' +
     'function doClearTest(){' +
     '  google.script.run' +
     '    .withSuccessHandler(function(t){ show(t); })' +
@@ -3794,7 +3831,7 @@ function openLineSettings() {
     '    .sendLineTest();' +
     '}' +
     '</script>';
-  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(420), 'LINE通知の設定');
+  SpreadsheetApp.getUi().showModalDialog(HtmlService.createHtmlOutput(html).setWidth(460).setHeight(560), 'LINE通知の設定');
 }
 
 function saveLineSettings(token) {
@@ -3803,25 +3840,38 @@ function saveLineSettings(token) {
 }
 
 // 「送り先の登録を受け付ける」：これから10分の間だけ、LINEから来た連絡の送り先を登録する。
-// forTest＝true なら、本番ではなく「お試しの送り先」として登録する（期限のうしろに |test を付けて見分ける）
-function openLineRegister(forTest) {
+// kind で登録先が変わる（''＝お知らせ／'test'＝お試し／'notify'＝シフト希望が届いたときの通知）
+function openLineRegister(kind) {
+  kind = kind === true ? 'test' : String(kind || '');      // 前の版は true を渡していた
+  if (!LINE_REGISTER_KINDS[kind]) kind = '';
+  var k = LINE_REGISTER_KINDS[kind];
   var until = new Date(Date.now() + LINE_REGISTER_MINUTES * 60000);
-  var value = Utilities.formatDate(until, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') + (forTest ? '|test' : '');
+  var value = Utilities.formatDate(until, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') + (kind ? '|' + kind : '');
   getRequestSettingsSheet_().getRange(LINE_REGISTER_CELL).setValue(value);
-  return LINE_REGISTER_MINUTES + '分の間、' + (forTest ? 'お試しの送り先' : 'お知らせの送り先') +
-    'の登録を受け付けます。\n登録したいトーク（' + (forTest ? 'テスト用のグループなど' : 'スタッフのグループ') +
-    '）で、何か一言送ってください。';
+  return LINE_REGISTER_MINUTES + '分の間、' + k.label + 'の登録を受け付けます。\n' +
+    '登録したいトーク（' + k.where + '）で、何か一言送ってください。';
 }
 
 // 「お試しの送り先を登録する」
 function openLineRegisterTest() {
-  return openLineRegister(true);
+  return openLineRegister('test');
+}
+
+// 「シフト希望が届いたときの通知先を登録する」
+function openLineRegisterNotify() {
+  return openLineRegister('notify');
 }
 
 // お試しの送り先を消す（お試し公開でLINEを送らないように戻す）
 function clearLineTestTarget() {
   getRequestSettingsSheet_().getRange(LINE_TEST_TARGET_CELL).setValue('');
   return 'お試しの送り先を消しました。お試し公開ではLINEを送りません。';
+}
+
+// シフト希望の通知先を消す（通知を止める）
+function clearLineNotifyTarget() {
+  getRequestSettingsSheet_().getRange(LINE_NOTIFY_TARGET_CELL).setValue('');
+  return '通知先を消しました。シフト希望が届いてもLINEは送りません。';
 }
 
 function sendLineTest() {

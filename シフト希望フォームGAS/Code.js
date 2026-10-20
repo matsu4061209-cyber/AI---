@@ -39,7 +39,20 @@ var LINE_TOKEN_CELL = 'E9';         // チャネルアクセストークン
 var LINE_TARGET_CELL = 'E10';       // お知らせを送る先のID
 var LINE_REGISTER_CELL = 'E12';     // 登録を受け付ける期限（シフト表のメニューで開く。うしろに |test が付くとお試し用）
 var LINE_TEST_TARGET_CELL = 'E32';  // お試しの送り先のID（お試し公開のときだけ使われる）
+var LINE_NOTIFY_TARGET_CELL = 'E49';  // シフト希望が届いたときの通知先（空なら通知しない）
 var LINE_REPLY_URL = 'https://api.line.me/v2/bot/message/reply';
+var LINE_PUSH_URL = 'https://api.line.me/v2/bot/message/push';
+
+// 送り先の登録は3種類。期限のうしろに付く印で見分ける
+// ※シフト表のGAS（LINE_REGISTER_KINDS）と同じ決まり。変える時は両方を直すこと
+var LINE_REGISTER_SLOTS = {
+  '':       { cell: LINE_TARGET_CELL,
+              reply: 'シフト希望のお知らせ先として、このトークを登録しました。' },
+  'test':   { cell: LINE_TEST_TARGET_CELL,
+              reply: 'お試しの送り先として、このトークを登録しました。「お試し公開」のときだけ、ここに届きます。' },
+  'notify': { cell: LINE_NOTIFY_TARGET_CELL,
+              reply: 'シフト希望が届いたときの通知先として、このトークを登録しました。\nスタッフが希望を送るたびに、ここへお知らせします。' }
+};
 
 // 記録を書き込むスプレッドシート（14380@hotpalette.com の「ペッパーランチ飯塚店」フォルダ内）
 var STORE_SPREADSHEET_ID = '1tgFvH1k3WxsMb_fG2C_m6vMu_n9KTKGgdScSk7jNxGM'; // シフト希望_アクセス記録（飯塚店）
@@ -310,29 +323,55 @@ function doPost(e) {
     if (!events.length) return ContentService.createTextOutput('OK');
     var settings = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID).getSheetByName(REQUEST_SETTINGS_SHEET);
     if (!settings) return ContentService.createTextOutput('OK');
-    // 期限のうしろに |test が付いていたら、本番ではなく「お試しの送り先」として登録する
+    // 期限のうしろの印（|test・|notify）で、どこに登録するかが変わる
     var raw = String(settings.getRange(LINE_REGISTER_CELL).getDisplayValue()).trim();
     var parts = raw.split('|');
     var until = String(parts[0]).trim();
-    var forTest = String(parts[1] || '').trim() === 'test';
+    var kind = String(parts[1] || '').trim();
+    var slot = LINE_REGISTER_SLOTS[kind] || LINE_REGISTER_SLOTS[''];
     var open = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(until) && jstTime_(until) > Date.now();
     events.forEach(function(event) {
       var source = event.source || {};
       var id = source.groupId || source.roomId || source.userId;
       if (!id || !open) return;
-      settings.getRange(forTest ? LINE_TEST_TARGET_CELL : LINE_TARGET_CELL).setValue(id);
+      settings.getRange(slot.cell).setValue(id);
       settings.getRange(LINE_REGISTER_CELL).setValue('');   // 1回登録したら受付を閉じる
       var token = String(settings.getRange(LINE_TOKEN_CELL).getDisplayValue()).trim();
-      if (token && event.replyToken) {
-        lineReply_(token, event.replyToken, forTest
-          ? 'お試しの送り先として、このトークを登録しました。「お試し公開」のときだけ、ここに届きます。'
-          : 'シフト希望のお知らせ先として、このトークを登録しました。');
-      }
+      if (token && event.replyToken) lineReply_(token, event.replyToken, slot.reply);
     });
   } catch (err) {
     console.error('doPost: ' + err.message);
   }
   return ContentService.createTextOutput('OK');
+}
+
+// スタッフがシフト希望を送ったときに、店長のトークへ知らせる文
+function submitNoticeText_(config, name, now, totals, result) {
+  var lines = ['【シフト希望】' + name + 'さん',
+               Utilities.formatDate(now, 'Asia/Tokyo', 'M/d HH:mm') + ' 受付',
+               totals.days + '日・' + totals.hours + '時間'];
+  var weeks = result.saved.concat(result.waiting);
+  if (weeks.length) lines.push(weeks.join('・') + ' を更新');
+  if (result.notReflected.length) lines.push('※シートに入らない週：' + result.notReflected.join('・'));
+  if (config.deadlineAt) {
+    var left = daysBetween_(Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd'), config.deadlineAt.slice(0, 10));
+    lines.push('締切 ' + config.deadline +
+      (left > 0 ? '（あと' + left + '日）' : left === 0 ? '（今日まで）' : '（締切後）'));
+  }
+  return lines.join('\n');
+}
+
+// 通知先が登録されていれば送る。送れなくても希望の受付は止めない
+function pushSubmitNotice_(notice) {
+  if (!notice || !notice.token || !notice.to) return false;
+  UrlFetchApp.fetch(LINE_PUSH_URL, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + notice.token },
+    payload: JSON.stringify({ to: notice.to, messages: [{ type: 'text', text: notice.text }] }),
+    muteHttpExceptions: true
+  });
+  return true;
 }
 
 function lineReply_(token, replyToken, text) {
@@ -481,8 +520,9 @@ function submitRequest(payload) {
     ip: cleanIp_(payload.ip), model: cleanText_(payload.model, 60), ua: cleanText_(payload.ua, 300)
   };
 
+  var notice = null;        // 店長への通知。鍵の外（通信が遅くても受付を待たせない）で送る
   try {
-    return withLock_(function() {
+    var out = withLock_(function() {
       var shiftSs = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID);
       var config = loadConfig_(shiftSs);
       checkConfig_(config, payload.startDate);
@@ -547,10 +587,20 @@ function submitRequest(payload) {
         })])));
       setOwnerFormula_(sheet, SUBMIT_DEVICE_COL);
 
+      notice = {
+        token: String(settings.getRange(LINE_TOKEN_CELL).getDisplayValue()).trim(),
+        to: String(settings.getRange(LINE_NOTIFY_TARGET_CELL).getDisplayValue()).trim(),
+        text: submitNoticeText_(config, rec.name, now, totals, result)
+      };
+
       result.ok = true;
       result.receivedAt = Utilities.formatDate(now, 'Asia/Tokyo', 'M/d HH:mm');
       return result;
     });
+
+    // LINEが止まっていても、受け付けた希望は消さない
+    try { pushSubmitNotice_(notice); } catch (err) { console.error('通知を送れませんでした: ' + err.message); }
+    return out;
   } catch (e) {
     recordFailure_(rec, e.message);
     throw e;
@@ -588,6 +638,7 @@ function loadConfig_(shiftSs) {
     weekCount: weekCount,
     sheetNames: sheetNames,
     deadline: validDeadline ? deadlineLabel_(deadline) : '',
+    deadlineAt: validDeadline ? deadline : '',   // 'yyyy-MM-dd HH:mm'。あと何日かを数えるのに使う
     pastDeadline: validDeadline && Utilities.parseDate(deadline, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm').getTime() < Date.now(),
     readOnly: !!period.readOnly,          // 締切後の「見るだけ」。送信も時間の確定もできない
     holidays: holidaysInPeriod_(shiftSs, start, weekCount),

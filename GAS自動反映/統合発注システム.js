@@ -457,7 +457,7 @@ const NEWPROD_PROJECT_HORIZON_DAYS = 28;   // 新商品の上乗せ推定を書�
 const NEWPROD_TREND_WINDOW = 56;   // トレンド履歴の平均窓(日)。新商品上乗せの逓減はこの窓に合わせる（CP開始からD日で D/56 を実績が捉える）。MARKER_NEWPROD_COVERAGE_TAPER
 // 発注ロジックの版番号。使用量/トレンドの計算式(コード)を変えたらこれを上げる＝増分ビルドの指紋が変わり
 //   「データ未変更でも次回に必ず全再構築」される。コード変更が反映されない事故を防ぐ。MARKER_ORDER_LOGIC_VERSION
-const ORDER_LOGIC_VERSION = '2026-10-19g-revert-foodspecific-coeff';
+const ORDER_LOGIC_VERSION = '2026-10-21l-demand-cap';
 const WEEK_WEIGHTS       = [5, 3, 1];
 const OUTLIER_IQR_MULTIPLIER = 1.5;
 const OUTLIER_MIN_SAMPLES    = 5;
@@ -7552,25 +7552,30 @@ function buildOrderBufferF_(targetSheet) {
     }
     if (trendHolidaySet.size) console.log('店舗トレンドから特別日(連休・祝日)を除外: ' + trendHolidaySet.size + '日');
   }
-  const foodTrend = {};
+  // code_dow → [日別使用量]。CP除外あり(recent4/past12)／CP日も含む基準線(recent4All/past12All)。MARKER_CP_EXCLUDE_ONEWAY
+  //   ※kOutputで「プール比(合計÷合計)」を出すため関数スコープに置く。MARKER_TREND_COEFF_POOLED
+  const recent4 = {}, past12 = {}, recent4All = {}, past12All = {}, recent4Raw = {}, past12Raw = {};
   const jissekiSheet = ss.getSheetByName('食材日時実績');
   if (jissekiSheet && jissekiSheet.getLastRow() > 1) {
-    const jData = jissekiSheet.getRange(2,1,jissekiSheet.getLastRow()-1,5).getValues().filter(r=>r[0]&&r[2]&&r[4]>0);
-    const recent4 = {}, past12 = {};
+    const jData = jissekiSheet.getRange(2,1,jissekiSheet.getLastRow()-1,6).getValues().filter(r=>r[0]&&r[2]&&r[4]>0);
     jData.forEach(row => {
+      const flag = String(row[5]||'').trim(); if (flag==='推定' || flag==='外れ値') return;   // 推定(CP見積り)・外れ値は実使用でないので伸びの計算から除外（σ/ピーク下限と統一）。MARKER_TREND_EXCLUDE_ESTIMATE
       const d = new Date(row[0]); d.setHours(0,0,0,0); if (d >= today) return;
       const dow=Number(row[1]), rawCode=String(row[2]), code=codeMap[rawCode]||rawCode, qty=Number(row[4]), key=`${code}_${dow}`;
-      // ①CP期間中のCP食材は「伸び(直近÷過去)」の計算から除外（曜日平均は別・触らない）。MARKER_CP_TREND_EXCLUDE
       const dsK = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy/MM/dd');
-      if (trendHolidaySet.has(dsK)) return;                   // 特別日(連休・祝日)は伸びの計算から除外
+      // RAW（何も除外しない正直な基準線）＝係数の上限。MARKER_TREND_RAW_BASELINE
+      //   祝日/CPを“過去の分母”から外すと過去平均が下がり比が持ち上がる（お盆・連休・肉CPが過去窓に入ると横ばいでも1.9等に膨張）。
+      //   除外は本来「直近のスパイクで過大発注する尾」を下げるためのもの。生の比を上限にし、除外は下げる時だけ採用(min)。
+      if (d >= past4wks)       { (recent4Raw[key]=recent4Raw[key]||[]).push(qty); }
+      else if (d >= past12wks) { (past12Raw[key]=past12Raw[key]||[]).push(qty); }
+      if (trendHolidaySet.has(dsK)) return;                   // 以降は特別日(連休・祝日)を除外した系列
+      // 基準線（CP日も含む・祝日のみ除外）。過去窓は直近と重ねない(28〜84日)。MARKER_TREND_WINDOW_NONOVERLAP
+      if (d >= past4wks)       { (recent4All[key]=recent4All[key]||[]).push(qty); }
+      else if (d >= past12wks) { (past12All[key]=past12All[key]||[]).push(qty); }   // 28〜84日前のみ（直近28日は含めない）
+      // ①CP期間中のCP食材は「伸び(直近÷過去)」の計算から除外（曜日平均は別・触らない）。MARKER_CP_TREND_EXCLUDE
       if (cpIngExcl.has(ncF_(code) + '_' + dsK)) return;
-      if (d >= past4wks)  { if(!recent4[key]) recent4[key]=[]; recent4[key].push(qty); }
-      if (d >= past12wks) { if(!past12[key])  past12[key] =[]; past12[key].push(qty);  }
-    });
-    Object.keys(past12).forEach(key => {
-      const p12arr=past12[key], p4arr=recent4[key]||[]; if(!p12arr.length) return;
-      const p12avg=p12arr.reduce((a,b)=>a+b,0)/p12arr.length, p4avg=p4arr.length?p4arr.reduce((a,b)=>a+b,0)/p4arr.length:p12avg;
-      foodTrend[key] = p12avg > 0 ? p4avg/p12avg : 1.0;
+      if (d >= past4wks)       { (recent4[key]=recent4[key]||[]).push(qty); }
+      else if (d >= past12wks) { (past12[key]=past12[key]||[]).push(qty); }
     });
   }
   const salesTrend = {};
@@ -7596,15 +7601,71 @@ function buildOrderBufferF_(targetSheet) {
   if (!trendSheet || trendSheet.getLastRow() < 2) { console.log('「トレンド履歴」シートが見つかりません'); return; }
   const trendData = trendSheet.getRange(2,1,trendSheet.getLastRow()-1,1).getValues();
   const targetDows = [3,4,6,1];
+  // MARKER_TREND_COEFF_FOODFIRST（2026-10-20 経緯を組み直した正しい仕組み）：
+  //   店舗トレンド係数＝「最近の伸び」専用レイヤー（曜日平均C〜Jは“いつもの水準”、ここが拾えない直近の伸びを担う）。
+  //   食材別の伸び(foodCoeff)を主役にする＝個別の売れ行きで予測（店長の理想・食材別は絶対）。
+  //   旧式は foodCoeff×salesCoeff の掛け算で成長を二重計上（+5%×+5%≒+10%）し、1.67等の説明できない膨らみの原因だった。
+  //   当初 salesCoeff(店全体の売上の伸び)を入れた狙い＝「その食材のデータが薄い新/低頻度品を店全体の伸びで補う」は正しいので、
+  //   掛け算でなく“フォールバック(薄い時だけ代わりに使う)”として残す。L〜O列に診断（採用元/各値/サンプル曜日数）を書き出す。
+  const COEFF_MIN = 0.80, COEFF_MAX = 1.30;       // 暴走防止クランプ（後から実データで微調整可）
+  const MIN_FOOD_DOWS = 2;                         // 自前データが targetDows(水木土日) のうち何曜日あれば「食材別」を信用するか
+  const salesCoeff = Math.round((targetDows.reduce((s,dow)=>s+(salesTrend[dow]||1.0),0)/targetDows.length)*1000)/1000;
+  // MARKER_TREND_PERCUSTOMER（2026-10-20）：客数の伸び（直近28日÷その前28〜84日・全日・非重複）。
+  //   発注の倍率(holidayMult=予測客数÷実客数)が「客数ぶんの成長」を既に担うので、トレンド係数は
+  //   「食材の伸び ÷ 客数の伸び ＝ 1人あたりの変化」だけにする＝成長の二重計上(倍率×トレンド)を解消。
+  //   例：米は客数と同じだけ使用も伸びた→1.16÷1.16≒1.0（倍率に任せる）。トップは客数増でも使用横ばい→0.95÷1.16≒0.82。
+  let custGrowth = 1.0;
+  if (salesSheet && salesSheet.getLastRow() > 1) {
+    let rs=0,rc=0,ps=0,pc=0;
+    salesSheet.getRange(2,1,salesSheet.getLastRow()-1,5).getValues().forEach(r=>{
+      if(!r[0]) return; const d=new Date(r[0]); if(isNaN(d.getTime())) return; d.setHours(0,0,0,0); if(d>=today) return;
+      const cust=Number(r[4])||0; if(!(cust>0)) return;
+      if(d>=past4wks) { rs+=cust; rc++; }
+      else if(d>=past12wks) { ps+=cust; pc++; }
+    });
+    if(rc>0 && pc>0 && ps>0) custGrowth = Math.round(((rs/rc)/(ps/pc))*1000)/1000;
+  }
+  const diagOutput = [];                           // L〜O列：おかしい時にすぐ特定できる診断
+  // MARKER_TREND_COEFF_POOLED（2026-10-20）：伸びは「曜日ごとの比の平均」でなく「プール比(合計÷合計)」で出す。
+  //   1曜日2〜4件と少なく、比の平均は小サンプルで上振れしていた（実測トップ/バラ0.95→係数1.37、甘口/辛口 実1.13→1.3超）。
+  //   プール比＝(Σ直近÷直近日数)÷(Σ過去÷過去日数)＝全体の実際の伸びに一致＝安定・正確。CP除外は“下げる時だけ”採用(min)。
+  const ALL_DOWS = [1,2,3,4,5,6,7];   // 全曜日でプール＝1曜日の跳ね(日曜等)に係数全体が引っ張られない。MARKER_TREND_COEFF_POOLED
+  const pooledRatio_ = (code, rMap, pMap) => {
+    let rs=0, rc=0, ps=0, pc=0;
+    ALL_DOWS.forEach(dow => { const k = code + '_' + dow;
+      (rMap[k]||[]).forEach(q=>{ rs+=q; rc++; });
+      (pMap[k]||[]).forEach(q=>{ ps+=q; pc++; }); });
+    if (pc===0 || ps<=0) return null;
+    const pAvg = ps/pc, rAvg = rc>0 ? rs/rc : pAvg;
+    return pAvg>0 ? rAvg/pAvg : 1.0;
+  };
   const kOutput = trendData.map(row => {
-    const code = row[0]; if (!code) return [''];
-    let foodSum=0, foodCount=0;
-    targetDows.forEach(dow => { const key=`${code}_${dow}`; if(foodTrend[key]!==undefined){ foodSum+=foodTrend[key]; foodCount++; } });
-    const foodCoeff = foodCount>0 ? foodSum/foodCount : 1.0;
-    const salesCoeff = targetDows.reduce((s,dow)=>s+(salesTrend[dow]||1.0),0)/targetDows.length;
-    return [Math.round(foodCoeff*salesCoeff*100)/100];
+    const code = row[0];
+    if (!code) { diagOutput.push(['','','','']); return ['']; }
+    const rEx  = pooledRatio_(code, recent4, past12);        // 祝日+CP除外
+    const rAll = pooledRatio_(code, recent4All, past12All);  // 祝日のみ除外
+    const rRaw = pooledRatio_(code, recent4Raw, past12Raw);  // 何も除外しない生の比＝正直な基準線（上限）
+    // 生の比を上限に、除外は“下げる時だけ”採用（min）。祝日/CPを過去から外して比が持ち上がる非対称を封じる。MARKER_TREND_RAW_BASELINE
+    const cand = [rEx, rAll, rRaw].filter(v => v !== null);
+    let foodCoeff = cand.length ? Math.min.apply(null, cand) : null;
+    if (foodCoeff!==null) foodCoeff = Math.round(foodCoeff*1000)/1000;
+    let foodDows=0; ALL_DOWS.forEach(dow=>{ if((recent4Raw[code+'_'+dow]||[]).length) foodDows++; });   // 直近に実績がある曜日数
+    let coeff, source;
+    if (foodCoeff!==null && foodDows >= MIN_FOOD_DOWS) { coeff = foodCoeff; source = '食材別'; }   // 自前データ十分＝個別の売れ行きで予測
+    else { coeff = salesCoeff; source = '店全体(データ薄)'; }                                       // 薄い/新商品＝店全体の伸びで補う
+    // 20k撤回：客数で割る方式は客数横ばい/微減(custGrowth<1)の時に逆に係数を増やし、米を1.12→1.17に悪化させた。
+    //   二重計上(倍率×トレンド)の解消は、発注バッファ側の実需キャップ(MARKER_ORDER_DEMAND_CAP)で正しく行う。
+    //   ここでは食材別の伸び(or店全体)をそのままクランプするだけ。custGrowthは診断表示にだけ残す。
+    coeff = Math.min(COEFF_MAX, Math.max(COEFF_MIN, coeff));                                         // クランプ
+    diagOutput.push([source, foodCoeff!==null?foodCoeff:'', custGrowth, foodDows]);
+    return [Math.round(coeff*100)/100];
   });
   trendSheet.getRange(2, 11, kOutput.length, 1).setValues(kOutput);
+  // 診断列（L=採用元 / M=食材別の伸び / N=店全体の伸び / O=サンプル曜日数）＝次におかしい時すぐ特定できるように常設。
+  if (trendSheet.getMaxColumns() < 15) trendSheet.insertColumnsAfter(trendSheet.getMaxColumns(), 15 - trendSheet.getMaxColumns());
+  trendSheet.getRange(1, 12, 1, 4).setValues([['採用元','食材別の伸び','客数の伸び(参考)','サンプル曜日数']]);
+  trendSheet.getRange(2, 12, diagOutput.length, 4).setValues(diagOutput);
+  console.log('店舗トレンド係数を再計算（食材別の伸びを主役・二重計上は発注バッファの実需キャップで解消）。参考:客数の伸び custGrowth=' + custGrowth + ' / salesCoeff=' + salesCoeff);
 }
 
 function buildOrderBufferF() { buildOrderBufferF_(null); console.log('トレンド履歴K列の再計算が完了しました'); }
@@ -7938,7 +7999,8 @@ function buildHolidayMultByDate_(ss) {
   const actCustDow = {}, actCustCnt = {};
   { let exclSet = {};
     try { getOutlierExcludedDates_().forEach(x => exclSet[x] = true); } catch (e) {}
-    try { getHolidayTaggedDates_(false).forEach(x => exclSet[x] = true); } catch (e) {}   // 真の祝日・連休はトレンドでも除外＝分母からも外して1客あたりを揃える
+    // ★祝日・連休は分母から除外しない（分子＝予測客数は祝日込みの曜日平均ベースなので、分母も祝日込みで揃える）。MARKER_PREP_ACTUAL_BASE_SYMMETRIC
+    //   旧：分母だけ祝日・連休を除外していたため、分子(高・祝日込み)÷分母(低・祝日除外)で倍率が二重に持ち上がった（例：月96→76で倍率1.07→1.35）。異常値(outlier)だけは除外を維持。
     if (dsHist && dsHist.getLastRow() > 1) {
       const aFrom = new Date(todayO); aFrom.setDate(todayO.getDate() - 56);               // トレンド履歴と同じ56日窓
       dsHist.getRange(2, 1, dsHist.getLastRow() - 1, 5).getValues().forEach(r => {
@@ -8315,14 +8377,17 @@ function buildPeakFloorLots_(ss) {
   const PEAK_FLOOR_MIN_LOTS_ = 0.5;   // リードタイム内ピークがこれ未満（半袋未満）＝長持ちする品→最低ストックを付けない（ほぼ0で表示・過剰発注しない）
   // 分位（線形補間）。高回転品は単発の外れ値で過剰にしないよう上位90%を使う。
   const pctl = (a, p) => { const s = a.slice().sort((x, y) => x - y); const n = s.length; if (!n) return 0; const idx = (n - 1) * p, lo = Math.floor(idx), hi = Math.ceil(idx); return lo === hi ? s[lo] : s[lo] + (idx - lo) * (s[hi] - s[lo]); };
-  const floor = {};
+  // MARKER_PEAK_FLOOR_PERDOW（2026-10-20）：ピーク下限は「発注日の曜日ごとの窓」で持つ。
+  //   旧：全曜日の窓をまとめて1つの下限にしていた→週末込みの大きな窓が火曜など低い日にも当たり過剰（例：米火3/実需1.2、ステーキソース火5/実需2）。
+  //   新：火=火水木/水=水木金土/金=金土日月/日=日月火水 の各窓で別々に下限を出す。低い日は低い下限、週末は週末の下限＝欠品保証は維持したまま過剰を解消。
+  const floor = {};   // キー＝ code_od（od＝発注日の曜日コード 1日/3火/4水/6金）
   Object.keys(dayQty).forEach(c => {
     if (freshSet[c]) return;   // 生鮮は持ち越せない＝ピーク(最大)で構えると廃棄になる→対象外。平均×安全係数で薄く持つ
     if (selfJudge[c]) return;  // 自己判断食材＝最低ストックを付けない（生の小数基準で店長が判断）MARKER_SELFJUDGE
     const lot = lotByCode[c] || 1;
-    const wins = [];
+    const winsByOd = {}; const allWins = [];
     Object.keys(COVER).forEach(od => {
-      const cov = COVER[od];
+      const cov = COVER[od]; const arr = [];
       dates.forEach(ds => {
         if (opdays[ds] !== Number(od)) return;
         let sum = 0, ok = true;
@@ -8331,24 +8396,25 @@ function buildPeakFloorLots_(ss) {
           if (!opdays[dk]) { ok = false; break; }   // カバー期間が連続で揃う発注日のみ
           sum += (dayQty[c][dk] || 0);
         }
-        if (ok) wins.push(sum);
+        if (ok) { arr.push(sum); allWins.push(sum); }
       });
+      if (arr.length) winsByOd[od] = arr;
     });
-    if (wins.length === 0) return;
-    const meanV = wins.reduce((a, b) => a + b, 0) / wins.length;
+    if (allWins.length === 0) return;
+    // 低出食数品(meanLots≤2)＝「最大」で守る/高回転品＝「上位90%」。この判定は品全体（全窓）で行う。
+    const meanV = allWins.reduce((a, b) => a + b, 0) / allWins.length;
     const meanLots = Math.ceil(meanV / lot - 1e-9);
-    // 全品に最低ストックを付与＝安全係数に頼らない。
-    //   低出食数品(meanLots≤2)＝直近の「最大」で守る（稀な山も取りこぼさない・店長方針）。
-    //   高回転品(meanLots>2)＝「上位90%」で構える（単発の外れ値でハンバーグ等を過剰にしない）。
-    const refV = (meanLots <= LOWVOL_MAX_LOTS) ? Math.max.apply(null, wins) : pctl(wins, 0.90);
-    // ピークが半袋未満の「ほとんど出ない品（大袋で長持ち＝海苔・スパイス等）」は最低ストックを付けない。
-    //   従来は ceil(0.008)=1 で一律1袋に切り上げ→毎回過剰発注していた。半袋以上のときだけ切り上げて守る。
-    const refLots = lot > 0 ? refV / lot : 0;
-    let floorLots = (refLots < PEAK_FLOOR_MIN_LOTS_) ? 0 : Math.ceil(refLots - 1e-9);
-    floorLots += Math.max(soldOutLiftLots_(soldOutCnt[c]), learnedLift[c] || 0);   // 売切の上乗せ＝短期(28日)反応と長期(180日)恒久学習の大きい方。二重計上せず安全側。MARKER_SOLDOUT_LEARN/MARKER_STOCK_LEARN
-    if (floorLots > 0) floor[c] = floorLots * lot;
+    const liftLots = Math.max(soldOutLiftLots_(soldOutCnt[c]), learnedLift[c] || 0);   // 売切/学習の上乗せ（全曜日共通）。MARKER_SOLDOUT_LEARN/MARKER_STOCK_LEARN
+    Object.keys(winsByOd).forEach(od => {
+      const w = winsByOd[od];
+      const refV = (meanLots <= LOWVOL_MAX_LOTS) ? Math.max.apply(null, w) : pctl(w, 0.90);   // その発注曜日の窓だけで
+      const refLots = lot > 0 ? refV / lot : 0;
+      let floorLots = (refLots < PEAK_FLOOR_MIN_LOTS_) ? 0 : Math.ceil(refLots - 1e-9);
+      floorLots += liftLots;
+      if (floorLots > 0) floor[c + '_' + od] = floorLots * lot;
+    });
   });
-  console.log('リードタイム内ピーク下限: ' + Object.keys(floor).length + '品に適用（うち売切ログ' + Object.keys(soldOutCnt).length + '品）');
+  console.log('リードタイム内ピーク下限(発注曜日別): ' + Object.keys(floor).length + '件に適用（うち売切ログ' + Object.keys(soldOutCnt).length + '品）');
   return floor;
 }
 
@@ -8940,9 +9006,17 @@ const todayO = new Date(); todayO.setHours(0, 0, 0, 0);
   const peakFloorNeed = buildPeakFloorLots_(ss);   // 低出食数品：直近リードタイム内ピークの最低ストック
   const wasteOrderF = wasteReflectFactors_(ss).order;   // 廃棄反映(発注50%)。空=1.0。MARKER_WASTE_REFLECT
   const ingManualPause = buildIngManualPause_(ss);   // 食材マスタ Q=使用休止日/R=使用再開日 → {code:{start,resume}}。MARKER_ING_MANUAL_END
-  const oOutput = data.map(row => {
-    const code=row[0], dt=row[2], dow=row[3], trd=row[5], sft=row[9];
+  const oDiag = new Array(data.length).fill('');   // MARKER_ORDER_DIAG：各発注の計算明細（曜日平均×倍率=寄与）をS列に出す＝数字がおかしい時すぐ特定できる
+  const DOWJA_O_ = ['','日','月','火','水','木','金','土'];
+  const oOutput = data.map((row, _oi) => {
+    const code=row[0], dt=row[2], dow=row[3], sft=row[9];
     if (!code) return [''];
+    // ★廃棄が出る生鮮は「伸び係数」で増やさない（もやし/青葱の綱引き決着）。MARKER_FRESH_WASTE_NO_TREND
+    //   生鮮(日持ちキャップ対象)かつ廃棄反映(発注)が1未満=恒常的に捨てている食材は、店舗トレンド係数(trd)の上限を1.0にする。
+    let trd = row[5];
+    if (freshShelfDays[String(Number(code))] && (wasteOrderF[String(Number(code))] || 1) < 1) {
+      trd = Math.min(Number(trd) || 1, 1.0);
+    }
     if (deadIng[String(code)]) return [0];   // 廃番食材は一切発注しない
     const coverDows=coverDowsMap[dow]; if(!coverDows) return [''];
     const startDateObj=dt instanceof Date ? new Date(dt) : new Date((Number(dt)-25569)*86400000);
@@ -8968,7 +9042,7 @@ const todayO = new Date(); todayO.setHours(0, 0, 0, 0);
       if (pauseWindows.some(w => deliv >= w.start && deliv < w.end)) return [0];
     }
 
-let baseTotal = 0; const dayVals = [];   // dayVals=カバー各日の曜日別需要（生鮮キャップで後ろshelf日を取り出すため）。MARKER_FRESH_SHELF_CAP
+let baseTotal = 0; const dayVals = []; const dayDetail = [];   // dayVals=カバー各日の曜日別需要（生鮮キャップで後ろshelf日を取り出すため）。MARKER_FRESH_SHELF_CAP
   coverDows.forEach((d, idx) => {
     const key = code + '_' + d;
     let dayAvg = trendByDow[key];
@@ -8996,8 +9070,28 @@ let baseTotal = 0; const dayVals = [];   // dayVals=カバー各日の曜日別�
     // イベント日の食材別“構成”係数（例：花火＝バラ多め/ステーキ少なめ）。量は上のholidayRate、構成はここ＝二重計上なし。既定1.0で無影響。MARKER_EVENT_ING_MIX
     const mixRate = (eventIngMix[coverDateStr] && eventIngMix[coverDateStr][String(Number(code))] !== undefined) ? eventIngMix[coverDateStr][String(Number(code))] : 1.0;
     const dv = dayAvg * holidayRate * mixRate; baseTotal += dv; dayVals.push(dv);
+    dayDetail.push(DOWJA_O_[d] + dayAvg.toFixed(2) + '×倍' + holidayRate.toFixed(2) + (mixRate!==1?('×構'+mixRate.toFixed(2)):'') + '=' + dv.toFixed(2));   // MARKER_ORDER_DIAG
   });
     if (baseTotal===0) return [0];
+
+    // ★実需キャップ（MARKER_ORDER_DEMAND_CAP）：倍率(baseTotalに内包)が既に「今の売れ行き」まで引き上げているのに、
+    //   さらに店舗トレンド係数(trd)を掛けると二重計上で膨らむ（米 計2.85×1.17/オニオンソース 計0.61×1.30で実証）。
+    //   → trd を「直近28日の実測カバー需要 ÷ baseTotal」で頭打ちにする。ただし下限は1.0＝baseTotal未満には絶対下げない。
+    //     ・baseTotal(倍率込み)≧実需 … 倍率が実需を満たしている＝trdは1.0まで（伸びは倍率に任せる・二重計上を消す）
+    //     ・baseTotal<実需 … 倍率が足りない＝trdで実需まで引き上げ許容（欠品防止）
+    //   将来の祝日/イベントでbaseTotalが実需超でも「下げない」(Math.max(1.0,…))ので繁忙日の欠品は起きない。
+    //   安全在庫(+SL/×安全)・ピーク下限・イベント/天候/祝日はこの後に別途加算＝実需キャップ後も安全は確保。
+    //   実測データが揃う食材だけ（カバー全曜日に直近28日の実測がある時だけ）適用。薄い食材は従来どおり無キャップ。
+    let demandCapNote = '';
+    {
+      let capSum = 0, capOk = true;
+      coverDows.forEach(d => { const a = ingDowAvg[code + '_' + d]; if (a === undefined) capOk = false; else capSum += a; });
+      if (capOk && capSum > 0) {
+        const trdCapRatio = Math.max(1.0, capSum / baseTotal);     // baseTotal未満には下げない＝倍率/祝日/繁忙を守る
+        const trdBefore = Number(trd) || 1;
+        if (trdBefore > trdCapRatio) { trd = Math.round(trdCapRatio * 1000) / 1000; demandCapNote = '(実需上限' + capSum.toFixed(2) + ')'; }
+      }
+    }
 
     const base=toSerial(dt), days=coverDows.length;
     const isVegFresh = !!vegFreshSet[String(Number(code))];   // 生鮮の野菜＝C対象。MARKER_ASYM_FLUCT
@@ -9041,19 +9135,42 @@ let baseTotal = 0; const dayVals = [];   // dayVals=カバー各日の曜日別�
       const mp = ingManualPause[String(code)];
       if (mp && startDateObj.getTime() < mp.start.getTime() && lastCover.getTime() >= mp.start.getTime() && (!mp.resume || lastCover.getTime() < mp.resume.getTime())) endRundown = true;
     }
+    let flApplied = 0, slAdd = 0, freshWasteNoSafety = false;   // MARKER_ORDER_DIAG：ピーク下限・SL加算の可視化用
     if (!endRundown) {
-      // ②確率＋⑥在庫理論：SL設定食材は「統計の安全在庫 Z×σ×√日数」を加算（安全係数の代わり）。未設定/σ無しは従来の安全係数。MARKER_SERVICE_LEVEL
-      const slKey = slMap[String(Number(code))];
-      const st = statsByCode[String(Number(code))];
-      if (slKey && SERVICE_LEVEL_Z_[slKey] !== undefined && st) {
-        result += SERVICE_LEVEL_Z_[slKey] * (st.sigma * Math.sqrt(effDays));
+      // ★廃棄が出る生鮮(日持ちキャップ対象かつ廃棄反映<1)は安全在庫の上積みをしない＝廃棄削減優先。MARKER_FRESH_WASTE_NO_SAFETY
+      //   日持ち2日で実需ぶんに絞り済み＋予測倍率で繁忙日は既に増える。腐る生鮮に安全在庫を足すと廃棄が出る（店長の実測で確認）。
+      freshWasteNoSafety = !!(freshShelfDays[String(Number(code))] && (wasteOrderF[String(Number(code))] || 1) < 1);
+      if (freshWasteNoSafety) {
+        // 安全在庫(+SL/×安全係数)を乗せない。result＝実需（倍率込み・日持ちキャップ後）のまま。
       } else {
-        result *= (Number(sft) || 1);
+        // ②確率＋⑥在庫理論：SL設定食材は「統計の安全在庫 Z×σ×√日数」を加算（安全係数の代わり）。未設定/σ無しは従来の安全係数。MARKER_SERVICE_LEVEL
+        const slKey = slMap[String(Number(code))];
+        const st = statsByCode[String(Number(code))];
+        if (slKey && SERVICE_LEVEL_Z_[slKey] !== undefined && st) {
+          slAdd = SERVICE_LEVEL_Z_[slKey] * (st.sigma * Math.sqrt(effDays)); result += slAdd;
+        } else {
+          result *= (Number(sft) || 1);
+        }
       }
-      // 低出食数品：直近リードタイム内ピークのロット数を最低保証（平均が上回れば平均を使う）MARKER_PEAK_FLOOR
-      const flNeed = peakFloorNeed[String(Number(code))];
-      if (flNeed && flNeed > result) result = flNeed;
+      // 低出食数品：直近リードタイム内ピークのロット数を最低保証（発注日の曜日ごと）。MARKER_PEAK_FLOOR / MARKER_PEAK_FLOOR_PERDOW
+      const flNeed = peakFloorNeed[String(Number(code)) + '_' + dow];
+      if (flNeed && flNeed > result) { flApplied = flNeed; result = flNeed; }
     }
+    // MARKER_ORDER_DIAG：計算明細（S列）。全係数を表示＝おかしい時すぐ特定できる。
+    const shelfD = freshShelfDays[String(Number(code))];
+    oDiag[_oi] = dayDetail.join(' / ') + ' →計' + baseTotal.toFixed(2)
+      + ' ×ﾄﾚﾝﾄﾞ' + (Number(trd)||1).toFixed(2) + demandCapNote
+      + ' ×ｲﾍﾞﾝﾄ' + (evtSum/days).toFixed(2)
+      + ' ×天候' + (wtrSum/days).toFixed(2)
+      + ' ×祝日' + (hldSum/days).toFixed(2)
+      + ' ×ゆらぎ' + (asymSum/days).toFixed(2)
+      + (corrF!==1?(' ×実測'+corrF.toFixed(2)):'')
+      + (wasteF!==1?(' ×廃棄'+wasteF.toFixed(2)):'')
+      + ((shelfD&&days>shelfD)?(' 日持ち'+shelfD+'日'):'')
+      + (endRundown?' 使切':(freshWasteNoSafety?' 安全なし(生鮮廃棄)':(slAdd?'':(' ×安全'+(Number(sft)||1).toFixed(2)))))
+      + (slAdd?(' +SL'+slAdd.toFixed(2)):'')
+      + (flApplied?(' ⇒ピーク下限'+flApplied.toFixed(2)+'で底上げ'):'')
+      + ' =基準' + result.toFixed(2);
     return [result];
   });
 
@@ -9113,6 +9230,9 @@ let baseTotal = 0; const dayVals = [];   // dayVals=カバー各日の曜日別�
   sheet.getRange(1, 17).setValue('カバー日数');
   sheet.getRange(1, 18).setValue('カバー対象日');
   sheet.getRange(2, 17, coverInfo.length, 2).setValues(coverInfo);
+  // MARKER_ORDER_DIAG：S列に発注基準の計算明細（各日 曜日平均×倍率=寄与／計／×各係数／=基準）。数字がおかしい時すぐ特定できる。
+  sheet.getRange(1, 19).setValue('計算明細');
+  sheet.getRange(2, 19, oDiag.length, 1).setValues(oDiag.map(x => [x]));
 }
 
 function buildOrderBufferO() {
@@ -18667,7 +18787,7 @@ function ingredientDailyStats_(ss, windowDays) {
   rows.forEach(r => { if (!r[0]) return; const d = new Date(r[0]); if (!isNaN(d.getTime())) { d.setHours(0,0,0,0); if (!maxD || d > maxD) maxD = d; } });
   if (!maxD) return empty;
   const fromD = new Date(maxD); fromD.setDate(fromD.getDate() - windowDays + 1);
-  const usage = {}, bizDays = {};
+  const usage = {}, bizDays = {}, dowByDs = {};
   rows.forEach(r => {
     if (!r[0]) return;
     if ((r[5] || '').toString().trim() === '推定') return;   // 推定は除く＝実際のばらつきだけ見る
@@ -18675,7 +18795,7 @@ function ingredientDailyStats_(ss, windowDays) {
     if (d < fromD || d > maxD) return;
     const ds = toDateStr_(d);
     const code = String(Number(r[2])); if (!/^\d+$/.test(code)) return;
-    bizDays[ds] = true;
+    bizDays[ds] = true; dowByDs[ds] = d.getDay();
     if (!usage[code]) usage[code] = {};
     usage[code][ds] = (usage[code][ds] || 0) + (Number(r[4]) || 0);
   });
@@ -18683,10 +18803,18 @@ function ingredientDailyStats_(ss, windowDays) {
   if (nDays < 2) return { data: {}, nDays: nDays, from: fromD, to: maxD };
   const out = {};
   Object.keys(usage).forEach(code => {
-    let sum = 0; const vals = [];
-    days.forEach(ds => { const v = usage[code][ds] || 0; vals.push(v); sum += v; });   // 使わなかった日は0で数える
+    // MARKER_SL_RESIDUAL_SIGMA（2026-10-20）：安全在庫のσは「読めない分=実際−その曜日平均」の残差σにする。
+    //   旧：生の日別使用量のばらつき（平日↔週末の規則的な差を丸ごと含む）→ その差は発注の倍率(曜日平均×予測比)で既に予測済みなので、
+    //   生σを安全在庫に使うと“予測で見ている週末の山”を二重計上し、青葱/もやし/米で安全在庫(+SL)が過大になっていた。
+    //   残差σ＝予測を外れる本当の不確実性だけ。欠品保証(ピーク下限)は別途維持。
+    let sum = 0; const vals = [], dowSum = {}, dowCnt = {};
+    days.forEach(ds => {
+      const v = usage[code][ds] || 0; vals.push({ v: v, w: dowByDs[ds] }); sum += v;
+      const w = dowByDs[ds]; dowSum[w] = (dowSum[w] || 0) + v; dowCnt[w] = (dowCnt[w] || 0) + 1;
+    });
     const mu = sum / nDays;
-    let sq = 0; vals.forEach(v => { sq += (v - mu) * (v - mu); });
+    let sq = 0;
+    vals.forEach(o => { const m = dowCnt[o.w] >= 2 ? dowSum[o.w] / dowCnt[o.w] : mu; sq += (o.v - m) * (o.v - m); });   // 曜日平均まわりの残差（曜日サンプル<2は全体平均で代用）
     out[code] = { mu: mu, sigma: Math.sqrt(sq / (nDays - 1)), nDays: nDays };
   });
   return { data: out, nDays: nDays, from: fromD, to: maxD };

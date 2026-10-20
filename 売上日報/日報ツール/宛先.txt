@@ -1,0 +1,20 @@
+# ===== 日報の送信先リスト =====
+# ・1行に1人。書き方は 「名前 <メールアドレス>」 または メールアドレスだけ。
+# ・消したい人は、その行の先頭に # を付ける（または行ごと削除）。# を外せば復活。
+# ・空の行や、# で始まる行は無視されます。
+# ・メモ帳で開いて編集 → 保存（文字コードは UTF-8 のまま）。
+# ================================
+
+中野会長 <nakano@bun-corp.co.jp>
+中野社長 <k-nakano@bun-corp.co.jp>
+椎原専務 <shiihara@bun-corp.co.jp>
+鶴田さん <tsuruta@bun-corp.co.jp>
+ぶん(下川さん) <info@bun-corp.co.jp>
+オーナーパソコン（下平さん） <owner@bun-corp.co.jp>
+北口次長 <t-kitaguchi@bun-corp.co.jp>
+髙村 伸浩 <takamura@bun-corp.co.jp>
+pl-iizuka@bun-corp.co.jp
+PL佐賀 <pl-saga@bun-corp.co.jp>
+PL八幡東 <pl-yahata@bun-corp.co.jp>
+孫 <sun@bun-corp.co.jp>
+住野次長 <sumino@bun-corp.co.jp>
