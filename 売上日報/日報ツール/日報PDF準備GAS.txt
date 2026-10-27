@@ -1,0 +1,133 @@
+/************************************************************
+ * 日報PDF 準備GAS （14380@hotpalette のアカウントで使う）
+ *
+ * 役割：
+ *   会社PCのDocuments（Google Driveバックアップ）にある
+ *   最新のスキャンPDF「Scan2026-10-23_......pdf」を、
+ *     ① 「売上日報10月23日.pdf」にリネーム（Documents内）
+ *     ② マイドライブの「売上日報送信用」フォルダに同名でコピー
+ *        （＝送信フロー Power Automate が取りに来る置き場）
+ *
+ * 使い方：
+ *   テスト … GASエディタで prepareTodayReport を1回実行（初回は承認が出る）
+ *   本番  … あとでWebアプリとして公開し、送信フローから呼ぶ（token付き）
+ *
+ * ※ Japaneseの名前はここに直接書いてOK（.gsはUTF-8なので文字化けしません）
+ ************************************************************/
+
+// ▼ 設定（基本ここだけ） --------------------------------------
+// Documentsフォルダ（パソコン＞マイ ノートパソコン＞Documents）のID。
+// もしIDが違っても、下の「Drive全体検索」で自動的に探すので動きます。
+var DOCUMENTS_FOLDER_ID = '1NNwnUQSm2X8VWJ8DLVLnxICIZGWyPPna';
+var SEND_FOLDER_NAME    = '売上日報送信用';          // マイドライブに自動作成／再利用
+var WEBHOOK_TOKEN       = 'iizuka-nippou-2026';      // Webアプリ呼び出しの合言葉（フロー側と一致させる）
+// -----------------------------------------------------------
+
+
+/** テスト用：手で実行して結果をログで確認する */
+function prepareTodayReport() {
+  var res = prepareReportCore_();
+  Logger.log(JSON.stringify(res, null, 2));
+  return res;
+}
+
+
+/** 本体：最新スキャンをリネーム＋送信用フォルダへコピー */
+function prepareReportCore_() {
+  var found = findNewestScan_();
+  var scan  = found.file;
+  if (!scan) {
+    return { ok:false, message:'Scanで始まるPDFが見つかりません（もうリネーム済みかも）', from:found.from };
+  }
+
+  var m = scan.getName().match(/^Scan(\d{4})-(\d{2})-(\d{2})_/);
+  if (!m) {
+    return { ok:false, message:'日付の形が読めません：' + scan.getName() };
+  }
+  var mo = parseInt(m[2], 10);
+  var dy = parseInt(m[3], 10);
+  var newName = '売上日報' + mo + '月' + dy + '日.pdf';   // 先頭ゼロなし（例 売上日報4月9日.pdf）
+
+  // ① リネーム（同名がすでにDriveにあれば、安全のため触らずそれを使う）
+  var reportFile;
+  var exists = DriveApp.getFilesByName(newName);
+  if (exists.hasNext()) {
+    reportFile = exists.next();
+  } else {
+    scan.setName(newName);
+    reportFile = scan;
+  }
+
+  // ② マイドライブ「売上日報送信用」へコピー（同名があればスキップ）
+  var sendFolder = getOrCreateFolder_(SEND_FOLDER_NAME);
+  var copy;
+  var dup = sendFolder.getFilesByName(newName);
+  if (dup.hasNext()) {
+    copy = dup.next();
+  } else {
+    copy = reportFile.makeCopy(newName, sendFolder);
+  }
+
+  return {
+    ok: true,
+    newName: newName,
+    from: found.from,
+    sendFolder: SEND_FOLDER_NAME,
+    sendFolderId: sendFolder.getId(),
+    copyId: copy.getId()
+  };
+}
+
+
+/** 最新の Scan*.pdf を探す（まずDocumentsフォルダ、だめならDrive全体） */
+function findNewestScan_() {
+  // 1) Documentsフォルダ内
+  try {
+    var docs = DriveApp.getFolderById(DOCUMENTS_FOLDER_ID);
+    var n = newestScanIn_(docs.getFiles());
+    if (n) return { file:n, from:docs.getName() };
+  } catch (err) {
+    // IDが違う／権限なし → 下の全体検索に進む
+  }
+  // 2) Drive全体
+  var it = DriveApp.searchFiles('title contains "Scan" and mimeType = "application/pdf" and trashed = false');
+  var n2 = newestScanIn_(it);
+  return { file:n2, from:'(Drive全体検索)' };
+}
+
+/** イテレータの中から「Scan日付_」形式のPDFで一番新しいものを返す */
+function newestScanIn_(iter) {
+  var newest = null;
+  while (iter.hasNext()) {
+    var f = iter.next();
+    if (/^Scan\d{4}-\d{2}-\d{2}_.*\.pdf$/i.test(f.getName())) {
+      if (!newest || f.getLastUpdated() > newest.getLastUpdated()) newest = f;
+    }
+  }
+  return newest;
+}
+
+/** 指定名のフォルダを取得（なければマイドライブ直下に作成） */
+function getOrCreateFolder_(name) {
+  var it = DriveApp.getFoldersByName(name);
+  if (it.hasNext()) return it.next();
+  return DriveApp.createFolder(name);
+}
+
+
+/*** ▼ ここから下は、あとで送信フローから呼ぶためのWebアプリ入口（今は触らなくてOK） ***/
+function doGet(e)  { return handle_(e); }
+function doPost(e) { return handle_(e); }
+
+function handle_(e) {
+  var token = (e && e.parameter && e.parameter.token) ? e.parameter.token : '';
+  if (token !== WEBHOOK_TOKEN) {
+    return json_({ ok:false, message:'認証エラー（tokenが違います）' });
+  }
+  return json_(prepareReportCore_());
+}
+
+function json_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
