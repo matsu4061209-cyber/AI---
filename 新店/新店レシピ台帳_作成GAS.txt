@@ -18,7 +18,7 @@
 
 var SUPPLY_SHEET = '仕入先マスタ';
 var BASE_SHEETS  = ['食材マスタ', '仕込み品マスタ', '商品マスタ', 'レシピ明細', '調理手順'];
-var TRIAL_SHEETS = ['試作記録', '試作レシピ明細', '試作比較'];
+var TRIAL_SHEETS = ['試作記録', '試作レシピ明細', '試作手順', '試作比較'];
 var SHEET_NAMES  = [SUPPLY_SHEET].concat(BASE_SHEETS).concat(TRIAL_SHEETS);
 
 // 発注可能曜日の書き方。仕入先マスタで使う
@@ -34,6 +34,67 @@ var OVERALL_FORMULA =
 
 var C_TASTE_CORE = '#9C3F22';   // 評価に入る味の枠（濃い）
 var C_TASTE_REF  = '#B8A98F';   // 参考の味の枠（薄い・破線）
+
+/* =====================================================================
+ *  食材の「味の強さ」＝ 1g がその味をどれだけ出すか（甘・塩・酸・旨・苦・辛）
+ *
+ *  ・塩味／甘味は「塩分%／糖分%」が目安（計算で比較的正確に出せる）
+ *  ・酸味・旨味・苦味・辛味は定量化が難しいので「目安」の経験値
+ *  ・この値から試作の味の初期値（スライダー）を推定します。あくまでたたき台で、
+ *    食べた感覚と違うところは人がスライダーで直す前提です。
+ *  ・名前で引くので、店長が同じ名前の食材を足せば自動で初期値が入ります。
+ * ===================================================================== */
+var TASTE_KEYS = ['甘味度', '塩味度', '酸味度', '旨味度', '苦味度', '辛味度'];
+
+// 「味の強さ」を推定するときの基準の濃さ（この濃さで ちょうど良い=10 になる）
+//   メーター値 = 10 × (料理全体のその味の平均% ÷ 基準)
+var TASTE_BASE = { sweet: 6, salt: 0.9, sour: 1.2, umami: 5, bitter: 1.5, hot: 1.2 };
+
+// 食材名 → [甘, 塩, 酸, 旨, 苦, 辛]（1gあたりの味ポイント）
+var TASTE_DEFAULTS = {
+  // --- 甘味料 ---
+  '砂糖': [100, 0, 0, 0, 0, 0], '上白糖': [100, 0, 0, 0, 0, 0], 'グラニュー糖': [100, 0, 0, 0, 0, 0],
+  'みりん': [43, 0, 0, 2, 0, 0], '本みりん': [43, 0, 0, 2, 0, 0], 'はちみつ': [80, 0, 1, 1, 0, 0],
+  // --- 塩・しょうゆ・みそ ---
+  '塩': [0, 99, 0, 0, 0, 0], '食塩': [0, 99, 0, 0, 0, 0],
+  '醤油': [10, 16, 1, 15, 1, 0], 'しょうゆ': [10, 16, 1, 15, 1, 0], '濃口醤油': [10, 16, 1, 15, 1, 0],
+  '薄口醤油': [8, 18, 1, 13, 1, 0], '味噌': [10, 12, 1, 14, 1, 0], 'みそ': [10, 12, 1, 14, 1, 0],
+  // --- 酒・酢 ---
+  '料理酒': [4, 2, 1, 3, 0, 0], '酒': [2, 0, 1, 2, 0, 0], '日本酒': [2, 0, 1, 2, 0, 0],
+  '酢': [1, 0, 4.5, 1, 0, 0], '米酢': [1, 0, 4.5, 1, 0, 0], '穀物酢': [1, 0, 4, 1, 0, 0],
+  'レモン汁': [2, 0, 6, 0, 1, 0], 'レモン': [2, 0, 6, 0, 1, 0],
+  // --- だし・うま味 ---
+  'だし': [2, 1, 0, 10, 0, 0], 'だしの素': [5, 40, 0, 25, 0, 0], '和風だし': [5, 40, 0, 25, 0, 0],
+  '鶏がらスープの素': [3, 45, 0, 22, 0, 0], 'コンソメ': [4, 43, 0, 20, 0, 0],
+  'オイスターソース': [18, 10, 1, 18, 1, 0],
+  // --- ソース・たれ類 ---
+  'ケチャップ': [25, 3, 8, 6, 0, 0], 'ソース': [20, 6, 5, 6, 1, 1], '中濃ソース': [20, 6, 5, 6, 1, 1],
+  'ウスターソース': [18, 8, 6, 6, 1, 2], 'マヨネーズ': [2, 2, 6, 3, 0, 1],
+  // --- 香味・辛味 ---
+  'にんにく': [2, 0, 0, 5, 1, 4], 'おろしにんにく': [2, 0, 0, 5, 1, 4],
+  '生姜': [1, 0, 0, 1, 2, 6], 'しょうが': [1, 0, 0, 1, 2, 6], 'おろし生姜': [1, 0, 0, 1, 2, 6],
+  '唐辛子': [1, 0, 0, 1, 2, 18], '一味唐辛子': [1, 0, 0, 1, 2, 18], '七味唐辛子': [1, 1, 0, 1, 2, 14],
+  '豆板醤': [2, 10, 2, 6, 1, 12], 'コチュジャン': [20, 8, 2, 8, 1, 10],
+  'こしょう': [0, 0, 0, 1, 3, 7], '黒こしょう': [0, 0, 0, 1, 3, 7], 'ごま油': [1, 0, 0, 3, 1, 0],
+  'バター': [1, 2, 0, 3, 0, 0], 'サラダ油': [0, 0, 0, 0, 0, 0],
+  // --- 素材 ---
+  '豚ロース': [0, 0.1, 0, 8, 0, 0], '豚バラ': [0, 0.1, 0, 8, 0, 0], '鶏もも': [0, 0.1, 0, 8, 0, 0],
+  '牛肉': [0, 0.1, 0, 9, 0, 0], '米': [0.5, 0, 0, 1, 0, 0], '米(精白)': [0.5, 0, 0, 1, 0, 0],
+  'キャベツ': [3, 0, 0, 1, 0.5, 0], '玉ねぎ': [4, 0, 0, 2, 0, 1], 'トマト': [3, 0, 1, 4, 0, 0],
+  '豆腐': [0.5, 0, 0, 2, 0, 0],
+  'ラウンドオイスター': [2, 1, 0, 12, 1, 0], '牡蠣': [2, 1, 0, 12, 1, 0]
+};
+
+/** 食材名から味の初期値 [甘,塩,酸,旨,苦,辛] を引く。無ければ空6個（表記ゆれに強い照合）。 */
+function tasteDefaultFor_(name) {
+  var hit = TASTE_DEFAULTS[String(name || '').trim()];
+  if (hit) return hit.slice();
+  var n = normName_(name);
+  for (var k in TASTE_DEFAULTS) {
+    if (TASTE_DEFAULTS.hasOwnProperty(k) && normName_(k) === n) return TASTE_DEFAULTS[k].slice();
+  }
+  return ['', '', '', '', '', ''];
+}
 
 // 入力候補（プルダウン）。業態に合わせて後から自由に変更できます
 var OPT_分類     = ['肉', '魚介', '野菜', '米・粉', '調味料', '乳製品', 'ドリンク', '資材', 'その他'];
@@ -66,6 +127,7 @@ function 新店レシピ台帳を作成() {
   build調理手順(ss);
   build試作記録(ss);
   build試作レシピ明細(ss);
+  build試作手順(ss);
   build試作比較(ss);
 
   // シートの並び順を整える
@@ -138,9 +200,11 @@ function build食材マスタ(ss) {
     '食材ID', '食材名', '分類', '在庫単位', '保存区分', '日持ち日数', '歩留まり率',
     '仕入先ID', '仕入先商品コード', '発注単位', '入数', '仕入価格', 'kg単価(不定貫)', 'リードタイム(日)',
     '安全係数', '実測補正',
-    '単価(自動)', '実効単価(自動)'
+    '単価(自動)', '実効単価(自動)',
+    TASTE_KEYS[0], TASTE_KEYS[1], TASTE_KEYS[2], TASTE_KEYS[3], TASTE_KEYS[4], TASTE_KEYS[5]
   ];
-  var widths = [90, 160, 90, 80, 80, 90, 90, 100, 120, 90, 80, 90, 120, 110, 90, 90, 110, 120];
+  var widths = [90, 160, 90, 80, 80, 90, 90, 100, 120, 90, 80, 90, 120, 110, 90, 90, 110, 120,
+                64, 64, 64, 64, 64, 64];
   setHeader_(sh, headers, widths);
 
   sh.getRange(1, 11).setNote('定貫 … 1発注単位に入っている量（2kgケースなら 2000）。\n不定貫 … 1箱の「目安」重量（約17kgの箱なら 17000）。発注数の計算にだけ使います。');
@@ -165,6 +229,9 @@ function build食材マスタ(ss) {
   ];
   sh.getRange(2, 1, rows.length, 14).setValues(rows);
 
+  // 味の初期値（甘塩酸旨苦辛）＝ 食材名から引く。たたき台なので後から直せる
+  sh.getRange(2, 19, rows.length, 6).setValues(rows.map(function (r) { return tasteDefaultFor_(r[1]); }));
+
   applyAutoFormulas_(sh);   // 数式は AUTO_FORMULAS にまとめてあります
 
   addList_(sh, 3,  OPT_分類);
@@ -176,7 +243,9 @@ function build食材マスタ(ss) {
   sh.getRange(2, 7,  LAST_ROW, 1).setNumberFormat('0%');
   sh.getRange(2, 12, LAST_ROW, 2).setNumberFormat('¥#,##0');
   sh.getRange(2, 17, LAST_ROW, 2).setNumberFormat('¥#,##0.0000');
+  sh.getRange(2, 19, LAST_ROW, 6).setNumberFormat('0.#').setHorizontalAlignment('center');
   markAuto_(sh, 17, 2);
+  tasteBorders_(sh, 19, 23);   // 甘塩酸旨＝実線／苦辛＝破線
 
   // 発注連結用ゾーンの目印（仕入先〜実測補正）
   sh.getRange(1, 8, 1, 9).setBackground('#EADFCB');
@@ -365,6 +434,7 @@ function onOpen() {
 
   ui.createMenu('🍳 レシピ')
     .addItem('メニューを登録・修正する', 'メニュー登録フォームを開く')
+    .addItem('レシピを見る（カード）', 'レシピを見る')
     .addSeparator()
     .addItem('台帳を整える（色分け・保護・入力ガイド）', '台帳を整える')
     .addSeparator()
@@ -373,6 +443,7 @@ function onOpen() {
 
   ui.createMenu('🧪 試作')
     .addItem('試作をはじめる / 次の回をつくる', '次の回の試作をつくる')
+    .addItem('味を記録・調整する', '味を記録調整する')
     .addItem('採用した試作をレシピへ反映', '採用試作をレシピへ反映')
     .addItem('試作を取り消す（間違えて作った回を消す）', '試作を取り消す')
     .addSeparator()
@@ -380,6 +451,7 @@ function onOpen() {
     .addItem('不定貫の列を追加(初回のみ)', '不定貫の列を追加')
     .addItem('発注準備の列を追加(初回のみ)', '発注準備の列を追加')
     .addItem('辛味の列を追加(初回のみ)', '辛味の列を追加')
+    .addItem('味の列を追加(初回のみ)', '味の列を追加')
     .addItem('総合評価を自動計算にする(初回のみ)', '総合評価を自動計算にする')
     .addSeparator()
     .addItem('試作比較を作り直す', '試作比較を作り直す')
@@ -593,6 +665,67 @@ function 発注準備の列を追加() {
 
 
 /**
+ * 既にある台帳の食材マスタに「味の列（甘・塩・酸・旨・苦・辛）」を6本足す。
+ *   ・実効単価の右に足すので、原価のVLOOKUP（$A:$R の18列目）は動かない＝原価は変わらない
+ *   ・よく使う調味料には名前から初期値を入れる。入力済みの味はそのまま残す
+ */
+function 味の列を追加() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+
+  var ing = ss.getSheetByName('食材マスタ');
+  if (!ing) { ui.alert('食材マスタが見つかりません。'); return; }
+
+  if (String(ing.getRange(1, 19).getValue()).indexOf('甘味度') === 0) {
+    ui.alert('すでに追加済みです。\n\n食材マスタのS列が「甘味度」になっています。');
+    return;
+  }
+  // 実効単価(R=18)の右に足す前提。ここがズレていると原価計算に関わるので止める。
+  if (String(ing.getRange(1, 18).getValue()).indexOf('実効単価') !== 0) {
+    ui.alert('中止しました。\n\n食材マスタのR列が想定(実効単価(自動))と違います。\n' +
+             '先に「発注準備の列を追加」を実行してください。\n' +
+             '（列を手で動かしている場合は、先に元に戻してください）');
+    return;
+  }
+
+  if (ui.alert('確認',
+      '食材マスタの「実効単価」の右に、味の列を6本足します。\n' +
+      '（甘味度・塩味度・酸味度・旨味度・苦味度・辛味度）\n\n' +
+      'よく使う調味料には初期値を入れます。\n' +
+      '入力済みのデータ・原価は変わりません。よろしいですか?',
+      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+
+  ing.insertColumnsAfter(18, 6);                          // R(実効単価) の右に6本
+  for (var i = 0; i < 6; i++) ing.setColumnWidth(19 + i, 64);
+  ing.getRange(1, 19, 1, 6).setValues([TASTE_KEYS])
+    .setFontWeight('bold').setBackground(C_HEADER_BG).setFontColor('#2A2019')
+    .setVerticalAlignment('middle');
+
+  // 既存の食材に、名前から味の初期値を入れる（すでに値がある行はそのまま残す）
+  var last = lastDataRow_(ing);
+  if (last >= 2) {
+    var names = ing.getRange(2, 2,  last - 1, 1).getValues();   // B列 = 食材名
+    var cur   = ing.getRange(2, 19, last - 1, 6).getValues();   // 今の味（ふつう空）
+    var out = names.map(function (nm, r) {
+      var def = tasteDefaultFor_(nm[0]);
+      return cur[r].map(function (v, c) { return (v === '' || v == null) ? def[c] : v; });
+    });
+    ing.getRange(2, 19, last - 1, 6).setValues(out);
+  }
+
+  ing.getRange(2, 19, LAST_ROW, 6).setNumberFormat('0.#').setHorizontalAlignment('center');
+  tasteBorders_(ing, 19, 23);                             // 甘塩酸旨＝実線／苦辛＝破線
+
+  ss.setActiveSheet(ing);
+  ui.alert('味の列を追加しました。\n\n' +
+           '・食材マスタの右に 甘味度〜辛味度 の6列が増えました\n' +
+           '・よく使う調味料には初期値が入っています（空欄＝0 として扱います）\n' +
+           '・原価は変わっていないはずです（実効単価の右に足したため）\n\n' +
+           '仕上げに「🍳 レシピ → 台帳を整える」を1回押すと、色分けと説明が付きます。');
+}
+
+
+/**
  * 既にある台帳の食材マスタに「kg単価(不定貫)」列を足す。
  * 入力済みのデータは消さずに、列を1本差し込んで関係する数式だけ引き直す。
  */
@@ -672,6 +805,7 @@ function 試作シートを追加() {
 
   build試作記録(ss);
   build試作レシピ明細(ss);
+  build試作手順(ss);
   build試作比較(ss);
 
   TRIAL_SHEETS.forEach(function (name) {
@@ -1039,6 +1173,17 @@ function trialStartCreate(p) {
     });
   }
 
+  // 前回の作り方（手順）も引き継ぐ（1回目や手順シートが無ければ空）
+  var steps = [];
+  var stepSh = ss.getSheetByName('試作手順');
+  if (lastId && stepSh) {
+    stepSh.getDataRange().getValues().forEach(function (r, j) {
+      if (j > 0 && String(r[0]).trim() === lastId) {
+        steps.push({ text: String(r[2] || ''), time: String(r[3] || ''), heat: String(r[4] || ''), point: String(r[5] || '') });
+      }
+    });
+  }
+
   var r2 = lastDataRow_(recSh) + 1;
   recSh.getRange(r2, 1, 1, 2).setValues([[newId, target]]);
   recSh.getRange(r2, 4, 1, 2).setValues([[newNo, new Date()]]);
@@ -1055,7 +1200,7 @@ function trialStartCreate(p) {
 
   return {
     tryId: newId, no: newNo, target: target, targetName: targetName,
-    created: created, lastNo: lastNo, lines: lines
+    created: created, lastNo: lastNo, lines: lines, steps: steps
   };
 }
 
@@ -1171,6 +1316,53 @@ function trialLinesSave(p) {
   return { count: lines.length, cost: Math.round(cost * 10) / 10, total: total, unit: unit };
 }
 
+/* ========== 試作手順（作り方＝試作の回ごと） ========== */
+
+/** 試作手順シートが無ければ作って返す（ヘッダー・体裁・役割まで整える） */
+function ensureTrialSteps_(ss) {
+  var sh = ss.getSheetByName('試作手順');
+  if (sh) return sh;
+  sh = newSheet_(ss, '試作手順');
+  var headers = ['試作ID', '手順番号', '手順内容', '所要時間', '温度・火加減', 'ポイント'];
+  var widths  = [90, 70, 380, 90, 110, 240];
+  setHeader_(sh, headers, widths);
+  sh.getRange(2, 2, LAST_ROW, 1).setNumberFormat('0').setHorizontalAlignment('center');
+  sh.getRange(1, 3).setNote('作り方を1行ずつ。番号は自動で振られます。\n試作の回ごとに残るので、前の回とくらべられます。');
+  if (COLUMN_ROLES['試作手順']) { applyRoles_(sh); applyProtection_(sh); }
+  return sh;
+}
+
+/** 試作手順シート（作り方）を作る。サンプル付き（新規台帳・試作シート追加で使う） */
+function build試作手順(ss) {
+  var sh = ensureTrialSteps_(ss);
+  if (lastDataRow_(sh) < 2) {
+    sh.getRange(2, 1, 3, 6).setValues([
+      ['TRY-0002', 1, '醤油・みりん・酒を鍋に合わせる',       '1分', '',     ''],
+      ['TRY-0002', 2, 'ひと煮立ちさせてアルコールを飛ばす',   '3分', '中火', '沸かしすぎない'],
+      ['TRY-0002', 3, 'すりおろした生姜を加えて火を止める',   '1分', '',     '香りを残す']
+    ]);
+  }
+}
+
+/** フォームから作り方を保存する（試作記録の回＝tryId ごとに試作手順へ書く） */
+function trialStepsSave(p) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ensureTrialSteps_(ss);
+
+  var tryId = String(p && p.tryId || '').trim();
+  if (!tryId) throw new Error('試作IDがありません。');
+
+  var steps = (p.steps || [])
+    .filter(function (s) { return String(s.text || '').trim() !== ''; })
+    .map(function (s, i) {
+      return [tryId, i + 1, String(s.text).trim(), String(s.time || ''), String(s.heat || ''), String(s.point || '')];
+    });
+
+  rebuildBlock_(sh, [1, 2, 3, 4, 5, 6], [{ key: tryId, rows: steps }]);
+  SpreadsheetApp.flush();
+  return { count: steps.length };
+}
+
 /** 指定のシートを開く（できました画面の「見に行く」ボタン用） */
 function trialOpenSheet(name) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -1254,12 +1446,32 @@ function trialStartHtml_() {
 '  .msg { font-size: 12px; } .ng { color: #B23B3B; } .ok { color: #4B7B4E; }',
 '  .dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid #C4BCB0; flex: none; }',
 '  .card.on .dot { border-color: #8A6A2A; background: radial-gradient(#8A6A2A 0 5px, #fff 5px); }',
+'  h4 { font-size: 12px; margin: 0 0 6px; color: #5A4A2A; }',
+'  .stepcard { border: 1px solid #E4DED3; border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; background: #fff; }',
+'  .ings { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }',
+'  .ings label { display: inline-flex; align-items: center; gap: 4px; background: #F7F4EE; border: 1px solid #E0D8CC;',
+'                border-radius: 14px; padding: 3px 10px; font-size: 12px; color: #4A423A; cursor: pointer; margin: 0; }',
+'  .ings input { width: auto; margin: 0; }',
+'  .stepline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }',
+'  .stepline select, .stepline input { width: auto; flex: 0 0 auto; }',
+'  .taste { display: flex; align-items: center; gap: 8px; margin: 6px 0; }',
+'  .taste .nm { width: 54px; font-size: 12px; font-weight: bold; }',
+'  .taste.ref .nm { font-weight: normal; color: #9A9189; }',
+'  .taste input[type=range] { flex: 1; accent-color: #8A6A2A; }',
+'  .taste .val { width: 22px; text-align: right; }',
+'  .taste .st { width: 58px; font-size: 11px; text-align: right; }',
+'  .sep { border-top: 1px dashed #D8D0C4; margin: 8px 0 4px; font-size: 11px; color: #9A9189; padding-top: 6px; }',
+'  .score { background: #F3EADB; border-radius: 6px; padding: 8px 12px; margin-top: 8px;',
+'           display: flex; justify-content: space-between; align-items: baseline; }',
+'  .score b { font-size: 20px; color: #8A6A2A; }',
+'  .pricebox { background: #EEF4EC; border: 1px solid #C6DCC0; border-radius: 6px; padding: 8px 12px; margin-top: 10px; font-size: 13px; }',
 '</style></head><body>',
 
 '<div class="steps">',
 '  <div id="s1" class="on">1. 何を試作するか</div>',
 '  <div id="s2">2. 材料と分量</div>',
-'  <div id="s3">3. できました</div>',
+'  <div id="s3">3. 作り方</div>',
+'  <div id="s4">4. できました</div>',
 '</div>',
 
 // ===== 画面1 =====
@@ -1269,8 +1481,8 @@ function trialStartHtml_() {
 '  <div class="card pick on" id="cardExist" onclick="setMode(\'exist\')">',
 '    <div class="head"><div class="dot"></div><b>いまあるものの続きをつくる</b><span id="existHint"></span></div>',
 '    <div class="body">',
-'      <label>どれの試作をしますか</label>',
-'      <select id="target" onchange="showNext()"></select>',
+'      <label>どれの試作をしますか（選ぶとすぐ材料の画面に進みます）</label>',
+'      <select id="target" onchange="onPick()"></select>',
 '      <p class="note" id="nextNote"></p>',
 '    </div>',
 '  </div>',
@@ -1299,7 +1511,7 @@ function trialStartHtml_() {
 '        <th style="width:38%">材料（打ちながら探せます）</th><th style="width:13%">分量</th>',
 '        <th style="width:5%"></th><th style="width:13%">原価</th><th>ひとこと</th><th style="width:28px"></th>',
 '      </tr></thead><tbody id="lines"></tbody></table>',
-'      <button class="add" onclick="addLine()">＋ 材料を追加</button>',
+'      <p class="note" style="margin-top:4px">※一番下の行に入れると、自動で次の行が出ます。間違えた行は × で消せます。</p>',
 '      <datalist id="itemlist"></datalist>',
 '      <div id="newArea"></div>',
 '      <div class="sum">',
@@ -1310,19 +1522,38 @@ function trialStartHtml_() {
 '  </div>',
 '</div>',
 
-// ===== 画面3 =====
+// ===== 画面3：作り方と味 =====
 '<div class="page" id="page3">',
+'  <h2 id="p3title">作り方と味</h2>',
+'  <p class="lead">材料をえらんで動作をえらぶと、作り方の文ができます。味は材料から自動で出しています。</p>',
+'  <div class="card plain"><div class="body">',
+'    <h4>味のバランス（材料からの目安）</h4>',
+'    <div id="tastebox"></div>',
+'    <div class="score"><span>総合評価の目安</span><b id="tscore">—</b></div>',
+'    <p class="note" id="tnote"></p>',
+'    <div class="pricebox" id="pricebox"></div>',
+'  </div></div>',
+'  <div class="card plain"><div class="body">',
+'    <h4>作り方</h4>',
+'    <div id="steps"></div>',
+'    <button class="add" onclick="addStep()">＋ 手順を追加</button>',
+'    <p class="note">材料にチェック→動作をえらぶと文ができます（文は手で直してもOK）。<br>火を使わない工程は火加減を空に。作り方が未定なら空のまま進めます。</p>',
+'  </div></div>',
+'</div>',
+'',
+// ===== 画面4：できました =====
+'<div class="page" id="page4">',
 '  <h2>できました</h2>',
 '  <p class="lead">どこに何が入ったかは、次のとおりです。</p>',
 '  <div class="done" id="doneBox"></div>',
 '  <div class="next">',
 '    <h3>次にやること</h3>',
 '    <ol>',
-'      <li>実際に作ってみる</li>',
-'      <li>食べて、<b>試作記録</b>シートの「甘味・塩味・酸味・旨味」を 1〜20 で入れる（10がちょうど良い）',
-'          <br><button class="link" onclick="openSheet(\'試作記録\')">試作記録を開く</button></li>',
-'      <li>分量を変えて次の回を作るときは、もう一度この「試作をはじめる」を押す',
-'          <br><span class="note">前の回の分量がコピーされるので、変えたいところだけ直せます。</span></li>',
+'      <li>書いた作り方のとおりに、実際に作ってみる</li>',
+'      <li>食べて、<b>🧪 試作 → 味を記録・調整する</b>を押して味をスライダーで記録する',
+'          <br><span class="note">材料から初期値が出るので、違うところだけ直せます。</span></li>',
+'      <li>分量や作り方を変えて次の回を作るときは、もう一度この「試作をはじめる」を押す',
+'          <br><span class="note">前の回の分量と作り方がコピーされるので、変えたいところだけ直せます。</span></li>',
 '      <li>味が決まったら、試作記録の「採用」に ○ を付けて',
 '          <br>「🧪 試作 → 採用した試作をレシピへ反映」を押す</li>',
 '    </ol>',
@@ -1338,12 +1569,13 @@ function trialStartHtml_() {
 '<script>',
 'var MODE = "exist", KIND = "prep", STEP = 1;',
 'var TARGETS = [], ITEMS = [], BYID = {}, OPT = {};',
-'var TRY = null;',
+'var TRY = null, LAST = null, STEPMATS = [], TASTEV = [10,10,10,10,10,10];',
 '',
 'google.script.run.withSuccessHandler(function (d) {',
 '  TARGETS = d.targets; OPT = d;',
 '  setItems(d.items);',
 '  var sel = document.getElementById("target");',
+'  sel.innerHTML = "<option value=\\"\\">▼ 選んでください</option>";',
 '  TARGETS.forEach(function (t) {',
 '    var o = document.createElement("option");',
 '    o.value = t.id;',
@@ -1397,6 +1629,11 @@ function trialStartHtml_() {
 '      (t.no > 0 ? "前の回の分量がコピーされるので、変えたいところだけ直せます。" : "1回目です。")',
 '    : "";',
 '}',
+// 一覧から選んだら、そのまま材料の画面へ進む（選んだ時点で②へ）
+'function onPick() {',
+'  setMode("exist"); showNext();',
+'  if (document.getElementById("target").value) go();',
+'}',
 'function preview() {',
 '  var n = document.getElementById("newName").value.trim();',
 '  document.getElementById("newNote").textContent = n',
@@ -1406,19 +1643,94 @@ function trialStartHtml_() {
 '',
 'function setStep(n) {',
 '  STEP = n;',
-'  [1,2,3].forEach(function (i) {',
+'  [1,2,3,4].forEach(function (i) {',
 '    document.getElementById("page" + i).className = "page" + (i === n ? " on" : "");',
 '    document.getElementById("s" + i).className = (i === n ? "on" : (i < n ? "done" : ""));',
 '  });',
-'  document.getElementById("backBtn").style.display = (n === 2 ? "inline-block" : "none");',
+'  document.getElementById("backBtn").style.display = (n === 2 || n === 3) ? "inline-block" : "none";',
 '  var go = document.getElementById("goBtn");',
 '  if (n === 1) go.textContent = "次へ（材料を入れる）";',
-'  if (n === 2) go.textContent = "保存する";',
-'  if (n === 3) { go.textContent = "閉じる"; document.getElementById("backBtn").style.display = "none"; }',
+'  if (n === 2) go.textContent = "次へ（作り方を入れる）";',
+'  if (n === 3) go.textContent = "保存する";',
+'  if (n === 4) { go.textContent = "閉じる"; document.getElementById("backBtn").style.display = "none"; }',
 '  go.disabled = false;',
 '  window.scrollTo(0, 0);',
 '}',
-'function back() { if (STEP === 2) setStep(1); }',
+'function back() {',
+'  if (STEP === 2) { setStep(1); document.getElementById("target").value = ""; document.getElementById("nextNote").textContent = ""; }',
+'  else if (STEP === 3) setStep(2);',
+'}',
+'',
+'/* ---------- 画面3：作り方（材料をえらぶ＋動作をえらぶ） ---------- */',
+'var DOACTS = ["合わせる","混ぜる","炒める","焼く","煮る","煮詰める","ひと煮立ちさせる","揚げる","ゆでる","蒸す","冷やす","漬ける","和える","味をととのえる","盛り付ける"];',
+'function addStep(v) {',
+'  v = v || {};',
+'  var card = document.createElement("div"); card.className = "stepcard";',
+'  var ings = STEPMATS.map(function (m) {',
+'    return "<label><input type=\\"checkbox\\" class=\\"ing\\" value=\\"" + esc(m.name) + "\\" onchange=\\"mkText(this)\\"> " + esc(m.name) + "</label>";',
+'  }).join("");',
+'  card.innerHTML =',
+'    "<div class=\\"ings\\">" + ings + "<label><input type=\\"checkbox\\" class=\\"ingall\\" onchange=\\"mkText(this)\\"> ぜんぶ</label></div>" +',
+'    "<div class=\\"stepline\\">" +',
+'      "<select class=\\"act\\" onchange=\\"mkText(this)\\"><option value=\\"\\">動作をえらぶ</option>" +',
+'         DOACTS.map(function (a) { return "<option>" + a + "</option>"; }).join("") + "</select>" +',
+'      "<input class=\\"stime\\" placeholder=\\"時間 例:3分\\" style=\\"width:92px\\">" +',
+'      "<select class=\\"sheat\\"><option value=\\"\\">火加減</option><option>弱火</option><option>中火</option><option>強火</option></select>" +',
+'      "<button class=\\"del\\" onclick=\\"this.closest(\'.stepcard\').remove()\\">×</button>" +',
+'    "</div>" +',
+'    "<input class=\\"stext\\" placeholder=\\"ここに作り方の文ができます（手で直してもOK）\\" style=\\"margin-top:6px\\">";',
+'  document.getElementById("steps").appendChild(card);',
+'  if (v.text !== undefined) {',
+'    card.querySelector(".stext").value = v.text || "";',
+'    card.querySelector(".stime").value = v.time || "";',
+'    if (v.heat) card.querySelector(".sheat").value = v.heat;',
+'  }',
+'  return card;',
+'}',
+'function mkText(el) {',
+'  var card = el.closest(".stepcard");',
+'  var all = card.querySelector(".ingall").checked;',
+'  var names = [];',
+'  card.querySelectorAll(".ing").forEach(function (c) { if (all || c.checked) names.push(c.value); });',
+'  var act = card.querySelector(".act").value;',
+'  card.querySelector(".stext").value = names.length ? (names.join("・") + "を" + act) : act;',
+'}',
+'/* ---------- 画面3：味バランス（材料からの目安） ---------- */',
+'function buildTaste() {',
+'  var core = ["甘味","塩味","酸味","旨味"], ref = ["苦味","辛味"];',
+'  document.getElementById("tastebox").innerHTML =',
+'    core.map(function (nm, i) { return trow(nm, i, false); }).join("") +',
+'    "<div class=\\"sep\\">参考（総合評価には入れません）</div>" +',
+'    ref.map(function (nm, i) { return trow(nm, i + 4, true); }).join("");',
+'}',
+'function trow(nm, i, ref) {',
+'  return "<div class=\\"taste" + (ref ? " ref" : "") + "\\"><span class=\\"nm\\">" + nm + "</span>" +',
+'    "<input type=\\"range\\" min=\\"1\\" max=\\"20\\" value=\\"10\\" id=\\"tr" + i + "\\" oninput=\\"tslide(" + i + ")\\">" +',
+'    "<span class=\\"val\\" id=\\"tv" + i + "\\">10</span><span class=\\"st\\" id=\\"ts" + i + "\\"></span></div>";',
+'}',
+'function setTaste(v) { TASTEV = v.slice(); for (var i = 0; i < 6; i++) { document.getElementById("tr" + i).value = v[i]; tpaint(i); } tsc(); }',
+'function tslide(i) { TASTEV[i] = Number(document.getElementById("tr" + i).value); tpaint(i); tsc(); }',
+'function tpaint(i) {',
+'  var v = TASTEV[i], core = i < 4, st = document.getElementById("ts" + i), t, c;',
+'  document.getElementById("tv" + i).textContent = v;',
+'  if (core) { if (v <= 7) { t = "足りない"; c = "#2E6DA4"; } else if (v >= 13) { t = "強すぎ"; c = "#B5482E"; } else { t = "ちょうど"; c = "#3E8E5A"; } }',
+'  else      { if (v <= 7) { t = "弱い";     c = "#8A9199"; } else if (v >= 13) { t = "強い";   c = "#B5482E"; } else { t = "ふつう";   c = "#7A7168"; } }',
+'  st.textContent = t; st.style.color = c;',
+'}',
+'function tsc() {',
+'  var d = Math.abs(TASTEV[0]-10) + Math.abs(TASTEV[1]-10) + Math.abs(TASTEV[2]-10) + Math.abs(TASTEV[3]-10);',
+'  document.getElementById("tscore").textContent = (Math.round((20 - d/4*1.9) * 10) / 10).toFixed(1);',
+'}',
+'function showPrice() {',
+'  var box = document.getElementById("pricebox");',
+'  var cost = LAST ? LAST.cost : 0;',
+'  if (TRY && TRY.target && TRY.target.indexOf("PRE") === 0) {',
+'    box.innerHTML = "これは仕込み品（タレ・ご飯など）なので、売価の目安は出しません。";',
+'    return;',
+'  }',
+'  var price = cost > 0 ? Math.round(cost / 0.30 / 10) * 10 : 0;',
+'  box.innerHTML = "原価 <b>" + cost + "</b> 円　→　売価の目安 <b>" + price + "</b> 円　<span class=\\"note\\">（原価率30%の目安。本番にするとき決められます）</span>";',
+'}',
 '',
 '/* ---------- 画面2：材料 ---------- */',
 'function addLine(v) {',
@@ -1474,6 +1786,9 @@ function trialStartHtml_() {
 '  document.getElementById("sumUnit").textContent = unit;',
 '  document.getElementById("sumCost").textContent = Math.round(cost * 10) / 10;',
 '  showUnknown(unknown);',
+'  var rs = document.querySelectorAll("#lines tr");',
+'  var lastRow = rs[rs.length - 1];',
+'  if (lastRow && lastRow.querySelector(".item").value.trim() !== "") addLine();',
 '}',
 '',
 'var askedFor = "";',
@@ -1596,7 +1911,7 @@ function trialStartHtml_() {
 '',
 '/* ---------- 進む ---------- */',
 'function go() {',
-'  if (STEP === 3) { google.script.host.close(); return; }',
+'  if (STEP === 4) { google.script.host.close(); return; }',
 '',
 '  if (STEP === 1) {',
 '    var p = { mode: MODE };',
@@ -1640,25 +1955,64 @@ function trialStartHtml_() {
 '                   memo: rows[i].querySelector(".memo").value });',
 '    }',
 '    if (bad.length > 0) { say("「" + bad.join("」「") + "」がまだ登録されていません。上の赤い枠から登録するか、行を消してください。", true); return; }',
+'    if (lines.length === 0) { say("材料を1つ以上入れてください。", true); return; }',
 '    document.getElementById("goBtn").disabled = true;',
-'    say("保存しています…");',
+'    say("材料を保存しています…");',
 '    google.script.run.withSuccessHandler(function (r) {',
-'      var box = document.getElementById("doneBox");',
-'      box.innerHTML =',
-'        "<h3>" + esc(TRY.targetName) + "　第" + TRY.no + "回（" + TRY.tryId + "）ができました</h3>" +',
-'        "<table>" +',
-'        (TRY.created ? "<tr><td>" + (TRY.created.indexOf("PRE-") === 0 ? "仕込み品マスタ" : "商品マスタ") +',
-'           "</td><td>" + TRY.created + "「" + esc(TRY.targetName) + "」を登録</td></tr>" : "") +',
-'        "<tr><td>試作記録</td><td>" + TRY.tryId + "（第" + TRY.no + "回）を追加</td></tr>" +',
-'        "<tr><td>試作レシピ明細</td><td>材料 " + r.count + " 件を保存</td></tr>" +',
-'        "<tr><td>材料の合計</td><td>" + r.total + " " + r.unit + "</td></tr>" +',
-'        "<tr><td>この回の原価</td><td>" + r.cost + " 円</td></tr>" +',
-'        "</table>" +',
-'        "<button class=\\"link\\" onclick=\\"openSheet(\'試作レシピ明細\')\\">試作レシピ明細を開く</button>　" +',
-'        "<button class=\\"link\\" onclick=\\"openSheet(\'試作比較\')\\">試作比較を開く</button>";',
+'      LAST = r;',
+'      STEPMATS = lines.map(function (L) { var it = BYID[L.id]; return { id: L.id, name: it ? it.name : L.id }; });',
+'      document.getElementById("p3title").textContent = TRY.targetName + "　第" + TRY.no + "回の作り方と味";',
+'      buildTaste(); setTaste([10,10,10,10,10,10]);',
+'      document.getElementById("tnote").textContent = "味を計算しています…";',
+'      google.script.run.withSuccessHandler(function (res) {',
+'        setTaste(res.values);',
+'        document.getElementById("tnote").textContent = res.count > 0 ? "材料から出した目安です。食べて違うところはスライダーで直せます。" : "材料が読めないので、ぜんぶ10から始めます。";',
+'      }).tasteEstimate(TRY.tryId);',
+'      showPrice();',
+'      var sb = document.getElementById("steps"); sb.innerHTML = "";',
+'      if (TRY.steps && TRY.steps.length > 0) TRY.steps.forEach(addStep);',
+'      else { addStep(); addStep(); }',
 '      setStep(3);',
 '      say("");',
 '    }).withFailureHandler(fail).trialLinesSave({ tryId: TRY.tryId, lines: lines });',
+'    return;',
+'  }',
+'',
+'  if (STEP === 3) {',
+'    var steps = [];',
+'    var srows = document.querySelectorAll("#steps .stepcard");',
+'    for (var i = 0; i < srows.length; i++) {',
+'      var t = srows[i].querySelector(".stext").value.trim();',
+'      if (!t) continue;',
+'      steps.push({ text: t, time: srows[i].querySelector(".stime").value, heat: srows[i].querySelector(".sheat").value });',
+'    }',
+'    document.getElementById("goBtn").disabled = true;',
+'    say("保存しています…");',
+'    google.script.run.withSuccessHandler(function (sres) {',
+'      google.script.run.withSuccessHandler(function () {',
+'        var r = LAST || { count: 0, total: 0, unit: "g", cost: 0 };',
+'        var isMenu = !(TRY.target && TRY.target.indexOf("PRE") === 0);',
+'        var price = (isMenu && r.cost > 0) ? Math.round(r.cost / 0.30 / 10) * 10 : 0;',
+'        document.getElementById("doneBox").innerHTML =',
+'          "<h3>" + esc(TRY.targetName) + "　第" + TRY.no + "回（" + TRY.tryId + "）ができました</h3>" +',
+'          "<table>" +',
+'          (TRY.created ? "<tr><td>" + (TRY.created.indexOf("PRE-") === 0 ? "仕込み品マスタ" : "商品マスタ") +',
+'             "</td><td>" + TRY.created + "「" + esc(TRY.targetName) + "」を登録</td></tr>" : "") +',
+'          "<tr><td>試作記録</td><td>" + TRY.tryId + "（第" + TRY.no + "回）／味も記録</td></tr>" +',
+'          "<tr><td>試作レシピ明細</td><td>材料 " + r.count + " 件</td></tr>" +',
+'          "<tr><td>試作手順</td><td>作り方 " + sres.count + " 手順</td></tr>" +',
+'          "<tr><td>材料の合計</td><td>" + r.total + " " + r.unit + "</td></tr>" +',
+'          "<tr><td>この回の原価</td><td>" + r.cost + " 円</td></tr>" +',
+'          (isMenu ? "<tr><td>売価の目安</td><td>" + price + " 円（原価率30%）</td></tr>" : "") +',
+'          "</table>" +',
+'          "<button class=\\"link\\" onclick=\\"openSheet(\'試作レシピ明細\')\\">材料を見る</button>　" +',
+'          "<button class=\\"link\\" onclick=\\"openSheet(\'試作手順\')\\">作り方を見る</button>　" +',
+'          "<button class=\\"link\\" onclick=\\"openSheet(\'試作比較\')\\">試作比較を開く</button>";',
+'        setStep(4);',
+'        say("");',
+'      }).withFailureHandler(fail).tasteSave({ tryId: TRY.tryId, values: TASTEV });',
+'    }).withFailureHandler(fail).trialStepsSave({ tryId: TRY.tryId, steps: steps });',
+'    return;',
 '  }',
 '}',
 '<\/script></body></html>'
@@ -1672,6 +2026,257 @@ function 次の試作ID_(rec) {
     if (m) max = Math.max(max, Number(m[1]));
   }
   return 'TRY-' + ('0000' + (max + 1)).slice(-4);
+}
+
+
+/* =====================================================================
+ *  味の記録・調整
+ *   材料の「味の強さ」から初期値を出し、食べた感覚で違うところだけ直す。
+ *   保存先は試作記録の F〜K（甘・塩・酸・旨・苦・辛）。総合評価は自動で出る。
+ * ===================================================================== */
+
+/**
+ * 試作の材料（lines=[{id,qty}]）から 6味の初期値 [甘,塩,酸,旨,苦,辛]（1〜20）を推定する。
+ *   料理全体の「その味の平均%」を、基準の濃さ(TASTE_BASE)で割って 10前後になるよう換算。
+ *   仕込み品(PRE)は構成食材から 1gあたりの味を出す（2階層まで。原価の約束と同じ）。
+ */
+function estimateTaste_(lines) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  var ingTaste = {};   // 食材ID → [甘,塩,酸,旨,苦,辛]
+  readRows_(ss, '食材マスタ', 24).forEach(function (r) {
+    if (!r[0]) return;
+    ingTaste[String(r[0]).trim()] = [18, 19, 20, 21, 22, 23].map(function (c) { return Number(r[c]) || 0; });
+  });
+
+  var prepQty = {};    // 仕込み品ID → 出来上がり量（空なら 0）
+  readRows_(ss, '仕込み品マスタ', 8).forEach(function (r) {
+    if (r[0]) prepQty[String(r[0]).trim()] = Number(r[2]) || 0;
+  });
+
+  var recipe = {};     // 親ID → [{id, qty}]
+  readRows_(ss, 'レシピ明細', 10).forEach(function (r) {
+    var p = String(r[0] || '').trim(); if (!p) return;
+    (recipe[p] = recipe[p] || []).push({ id: String(r[2] || '').trim(), qty: Number(r[4]) || 0 });
+  });
+
+  // 仕込み品 1gあたりの味（中の仕込み品は味に含めない＝2階層）
+  function prepPerG(prepId) {
+    var kids = recipe[prepId] || [];
+    var sum = [0, 0, 0, 0, 0, 0], w = 0;
+    kids.forEach(function (k) {
+      if (k.id.indexOf('ING') === 0 && ingTaste[k.id]) {
+        for (var i = 0; i < 6; i++) sum[i] += ingTaste[k.id][i] * k.qty;
+      }
+      w += k.qty;   // PREの子も重さには数える（味だけ含めない）
+    });
+    var denom = prepQty[prepId] > 0 ? prepQty[prepId] : w;
+    if (denom <= 0) return [0, 0, 0, 0, 0, 0];
+    return sum.map(function (x) { return x / denom; });
+  }
+
+  var sum = [0, 0, 0, 0, 0, 0], total = 0;
+  (lines || []).forEach(function (L) {
+    var id = String(L.id || '').trim(), qty = Number(L.qty) || 0;
+    if (!id || qty <= 0) return;
+    var per = (id.indexOf('PRE') === 0) ? prepPerG(id) : (ingTaste[id] || [0, 0, 0, 0, 0, 0]);
+    for (var i = 0; i < 6; i++) sum[i] += per[i] * qty;
+    total += qty;
+  });
+  if (total <= 0) return [10, 10, 10, 10, 10, 10];
+
+  var base = [TASTE_BASE.sweet, TASTE_BASE.salt, TASTE_BASE.sour, TASTE_BASE.umami, TASTE_BASE.bitter, TASTE_BASE.hot];
+  return sum.map(function (s, i) {
+    var v = Math.round(10 * (s / total) / base[i]);
+    return Math.max(1, Math.min(20, v));
+  });
+}
+
+/** 味フォームが最初に読み込むデータ（回の一覧・新しい順） */
+function tasteFormData() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var out = [];
+  readRows_(ss, '試作記録', 15).forEach(function (r) {
+    var id = String(r[0] || '').trim(); if (!id) return;
+    var saved = [5, 6, 7, 8, 9, 10].map(function (c) { var v = r[c]; return (v === '' || v == null) ? '' : Number(v); });
+    out.push({
+      tryId: id,
+      label: (String(r[2] || '').trim() || id) + '（' + (Number(r[3]) || 0) + '回目）',
+      saved: saved,
+      hasSaved: saved.some(function (v) { return v !== ''; })
+    });
+  });
+  out.reverse();
+  return out;
+}
+
+/** ある回の味の初期値を、材料から推定して返す */
+function tasteEstimate(tryId) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var lines = [];
+  readRows_(ss, '試作レシピ明細', 8).forEach(function (r) {
+    if (String(r[0] || '').trim() === String(tryId).trim()) {
+      lines.push({ id: String(r[1] || '').trim(), qty: Number(r[3]) || 0 });
+    }
+  });
+  return { values: estimateTaste_(lines), count: lines.length };
+}
+
+/** スライダーの値を試作記録の F〜K（甘〜辛）に保存する */
+function tasteSave(p) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName('試作記録');
+  if (!sh) throw new Error('試作記録が見つかりません。');
+
+  var tryId = String(p && p.tryId || '').trim();
+  if (!tryId) throw new Error('どの回か分かりません。');
+
+  var vals = (p.values || []).map(function (v) { return Math.max(1, Math.min(20, Math.round(Number(v) || 10))); });
+  if (vals.length !== 6) throw new Error('味の数がそろっていません。');
+
+  var last = lastDataRow_(sh);
+  if (last >= 2) {
+    var ids = sh.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < ids.length; i++) {
+      if (String(ids[i][0]).trim() === tryId) {
+        sh.getRange(i + 2, 6, 1, 6).setValues([vals]);   // F〜K
+        SpreadsheetApp.flush();
+        return { ok: true };
+      }
+    }
+  }
+  throw new Error('試作記録に ' + tryId + ' が見つかりません。');
+}
+
+/** メニュー：味を記録・調整する */
+function 味を記録調整する() {
+  if (!SpreadsheetApp.getActiveSpreadsheet().getSheetByName('試作記録')) {
+    SpreadsheetApp.getUi().alert('試作記録が見つかりません。\n\n先に「試作シートを追加」を実行してください。');
+    return;
+  }
+  var html = HtmlService.createHtmlOutput(tasteFormHtml_()).setWidth(660).setHeight(700);
+  SpreadsheetApp.getUi().showModalDialog(html, '🍯 味を記録・調整する');
+}
+
+function tasteFormHtml_() {
+  return [
+'<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_top">',
+'<style>',
+'  body { font-family: "Meiryo","Hiragino Kaku Gothic ProN",sans-serif; font-size: 13px;',
+'         color: #2A2019; background: #FBF8F3; margin: 0; padding: 14px 18px 80px; }',
+'  h2 { font-size: 15px; margin: 0 0 4px; }',
+'  .lead { color: #7A7168; font-size: 12px; margin: 0 0 12px; line-height: 1.6; }',
+'  label { display: block; font-size: 11px; color: #7A7168; margin-bottom: 3px; }',
+'  select { font-family: inherit; font-size: 13px; padding: 7px 8px; width: 100%;',
+'           border: 1px solid #D8D0C4; border-radius: 4px; background: #fff; box-sizing: border-box; }',
+'  .card { background: #fff; border: 1px solid #E4DED3; border-radius: 8px; padding: 12px 16px; margin: 12px 0; }',
+'  .taste { display: flex; align-items: center; gap: 10px; margin: 10px 0; }',
+'  .taste .nm { width: 62px; font-size: 13px; font-weight: bold; }',
+'  .taste.ref .nm { font-weight: normal; color: #9A9189; }',
+'  .taste input[type=range] { flex: 1; accent-color: #8A6A2A; }',
+'  .taste .val { width: 26px; text-align: right; font-variant-numeric: tabular-nums; }',
+'  .taste .st { width: 64px; font-size: 11px; text-align: right; }',
+'  .sep { border-top: 1px dashed #D8D0C4; margin: 12px 0 6px; font-size: 11px; color: #9A9189; padding-top: 8px; }',
+'  .score { background: #F3EADB; border-radius: 6px; padding: 10px 14px; margin-top: 10px;',
+'           display: flex; align-items: baseline; justify-content: space-between; }',
+'  .score b { font-size: 22px; color: #8A6A2A; } .score span { font-size: 11px; color: #7A7168; }',
+'  .bar { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; border-top: 1px solid #E4DED3;',
+'         padding: 10px 18px; display: flex; gap: 10px; }',
+'  button { font-family: inherit; font-size: 13px; padding: 10px 14px; border-radius: 5px; cursor: pointer; border: 1px solid #D8D0C4; }',
+'  .primary { background: #8A6A2A; color: #fff; border-color: #8A6A2A; flex: 1; }',
+'  .ghost { background: #F7F4EE; color: #5A4A2A; }',
+'  .hint { font-size: 11px; color: #9A9189; margin-top: 6px; }',
+'  .msg { font-size: 12px; margin-left: 4px; align-self: center; }',
+'</style></head><body>',
+'<h2>🍯 味を記録・調整する</h2>',
+'<p class="lead">材料から味の初期値を自動で出しています。<b>食べてみて違うところだけ</b>つまみを動かして直してください。<br>',
+'  まん中(10)＝ちょうど良い／左＝足りない／右＝強すぎ。甘・塩・酸・旨が総合評価に入ります。</p>',
+'<label>どの回の味を入れますか</label>',
+'<select id="pick" onchange="loadRow()"></select>',
+'<div class="card" id="panel">',
+'  <div id="sliders"></div>',
+'  <div class="sep">参考（総合評価には入れません）</div>',
+'  <div id="sliders2"></div>',
+'  <div class="score"><span id="scLabel">総合評価の目安</span><b id="score">—</b></div>',
+'  <div class="hint" id="src"></div>',
+'</div>',
+'<div class="bar">',
+'  <button class="ghost" onclick="reEstimate()">材料から推定し直す</button>',
+'  <button class="primary" onclick="save()">保存する</button>',
+'  <span class="msg" id="msg"></span>',
+'</div>',
+'<script>',
+'var CORE = ["甘味","塩味","酸味","旨味"];',
+'var REF  = ["苦味","辛味"];',
+'var rows = [], cur = null, vals = [10,10,10,10,10,10];',
+'function esc(s){ return String(s).replace(/[<>&]/g,function(c){return {"<":"&lt;",">":"&gt;","&":"&amp;"}[c];}); }',
+'window.onload = function(){',
+'  google.script.run.withSuccessHandler(function(d){',
+'    rows = d || [];',
+'    var sel = document.getElementById("pick");',
+'    if(!rows.length){ sel.innerHTML = "<option>（試作の回がありません）</option>"; return; }',
+'    sel.innerHTML = rows.map(function(r,i){ return "<option value=\\""+i+"\\">"+esc(r.label)+(r.hasSaved?"　✓記録済み":"")+"</option>"; }).join("");',
+'    buildSliders(); loadRow();',
+'  }).tasteFormData();',
+'};',
+'function buildSliders(){',
+'  document.getElementById("sliders").innerHTML = CORE.map(function(nm,i){ return sliderHtml(nm,i,false); }).join("");',
+'  document.getElementById("sliders2").innerHTML = REF.map(function(nm,i){ return sliderHtml(nm,i+4,true); }).join("");',
+'}',
+'function sliderHtml(nm,idx,ref){',
+'  return "<div class=\\"taste"+(ref?" ref":"")+"\\">"+',
+'         "<span class=\\"nm\\">"+nm+"</span>"+',
+'         "<input type=\\"range\\" min=\\"1\\" max=\\"20\\" value=\\"10\\" id=\\"r"+idx+"\\" oninput=\\"onSlide("+idx+")\\">"+',
+'         "<span class=\\"val\\" id=\\"v"+idx+"\\">10</span>"+',
+'         "<span class=\\"st\\" id=\\"s"+idx+"\\"></span></div>";',
+'}',
+'function loadRow(){',
+'  var i = Number(document.getElementById("pick").value) || 0;',
+'  cur = rows[i]; if(!cur) return;',
+'  document.getElementById("msg").textContent = "";',
+'  if(cur.hasSaved){',
+'    vals = cur.saved.map(function(v){ return v===""?10:v; });',
+'    setAll(); setSource("前に記録した値を出しています。");',
+'  } else {',
+'    reEstimate();',
+'  }',
+'}',
+'function reEstimate(){',
+'  if(!cur) return;',
+'  setSource("推定中…");',
+'  google.script.run.withSuccessHandler(function(res){',
+'    vals = res.values.slice(); setAll();',
+'    setSource(res.count>0 ? "材料"+res.count+"種から推定した初期値です。食べて違うところを直してください。" : "材料がまだ入っていないので、ぜんぶ 10 から始めます。");',
+'  }).tasteEstimate(cur.tryId);',
+'}',
+'function setAll(){ for(var i=0;i<6;i++){ document.getElementById("r"+i).value = vals[i]; paint(i); } score(); }',
+'function onSlide(i){ vals[i] = Number(document.getElementById("r"+i).value); paint(i); score(); }',
+'function paint(i){',
+'  var v = vals[i], core = i<4;',
+'  document.getElementById("v"+i).textContent = v;',
+'  var st = document.getElementById("s"+i), txt, col;',
+'  if(core){ if(v<=7){txt="足りない";col="#2E6DA4";} else if(v>=13){txt="強すぎ";col="#B5482E";} else {txt="ちょうど";col="#3E8E5A";} }',
+'  else    { if(v<=7){txt="弱い";col="#8A9199";} else if(v>=13){txt="強い";col="#B5482E";} else {txt="ふつう";col="#7A7168";} }',
+'  st.textContent = txt; st.style.color = col;',
+'}',
+'function score(){',
+'  var d = Math.abs(vals[0]-10)+Math.abs(vals[1]-10)+Math.abs(vals[2]-10)+Math.abs(vals[3]-10);',
+'  var s = Math.round((20 - d/4*1.9)*10)/10;',
+'  document.getElementById("score").textContent = s.toFixed(1);',
+'}',
+'function setSource(t){ document.getElementById("src").textContent = t; }',
+'function save(){',
+'  if(!cur){ return; }',
+'  document.getElementById("msg").textContent = "保存中…";',
+'  google.script.run.withSuccessHandler(function(){',
+'    document.getElementById("msg").textContent = "✓ 保存しました";',
+'    cur.hasSaved = true; cur.saved = vals.slice();',
+'    var sel = document.getElementById("pick"); var i = Number(sel.value)||0;',
+'    if(sel.options[i] && sel.options[i].textContent.indexOf("✓")<0) sel.options[i].textContent += "　✓記録済み";',
+'  }).withFailureHandler(function(e){ document.getElementById("msg").textContent = "エラー: "+(e && e.message || e); }).tasteSave({ tryId: cur.tryId, values: vals });',
+'}',
+'</script></body></html>'
+  ].join('\n');
 }
 
 
@@ -1738,6 +2343,23 @@ function 採用試作をレシピへ反映() {
       summary + '\n\n対象の既存レシピは、この内容で置き換わります。\nよろしいですか?',
       ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
 
+  // 商品(MENU)が対象なら、本番に移すこのタイミングで売価を「原価率◯%」で付ける
+  var menuPicks = picks.filter(function (q) { return q.target.indexOf('MENU') === 0; });
+  var ratePct = 0;
+  if (menuPicks.length > 0) {
+    var res = ui.prompt('売価を決めます（本番の原価率）',
+      '商品の売価を「原価率◯%」から自動で付けます。\n数字を入れてOK（空のままOKで 30%）。\n売価を付けない場合はキャンセル。',
+      ui.ButtonSet.OK_CANCEL);
+    if (res.getSelectedButton() === ui.Button.OK) {
+      var txt = String(res.getResponseText()).trim();
+      ratePct = (txt === '') ? 30 : Number(txt);
+      if (!(ratePct > 0 && ratePct <= 100)) {
+        ui.alert('原価率は 1〜100 の数字で入れてください。\n今回は売価の設定をとばして、レシピだけ反映します。');
+        ratePct = 0;
+      }
+    }
+  }
+
   // 行は削除せず、入力列(A/C/E/J)だけ組み直す。
   // ※ B/D/F/G/H/I 列の2行目には自動計算の数式が入っているため、行削除は厳禁。
   //   この組み直しは rebuildBlock_ が一手に引き受けている（メニュー登録フォームも同じ関数を通る）。
@@ -1751,11 +2373,208 @@ function 採用試作をレシピへ反映() {
   var stamp = Utilities.formatDate(new Date(), 'JST', 'yyyy/MM/dd');
   picks.forEach(function (q) { recSh.getRange(q.row, 15).setValue('反映済 ' + stamp); });
 
+  // 原価率から売価を付ける（原価はレシピ反映で再計算されるので flush してから読む）
+  var priceMsg = '';
+  if (ratePct > 0) {
+    SpreadsheetApp.flush();
+    var pm = ss.getSheetByName('商品マスタ');
+    var pmLast = Math.max(lastDataRow_(pm) - 1, 1);
+    var pmVals = pm.getRange(2, 1, pmLast, 8).getValues();   // A〜H（H=原価(自動)）
+    var map = {};
+    pmVals.forEach(function (r, idx) { if (r[0]) map[String(r[0]).trim()] = { row: idx + 2, cost: Number(r[7]) || 0 }; });
+    menuPicks.forEach(function (q) {
+      var m = map[q.target];
+      if (m && m.cost > 0) {
+        var price = Math.round(m.cost / (ratePct / 100) / 10) * 10;
+        pm.getRange(m.row, 4).setValue(price);             // D列=売価
+        pm.getRange(m.row, 5).setValue(ratePct / 100);     // E列=目標原価率
+        priceMsg += '\n  ' + q.target + ' 原価' + (Math.round(m.cost * 10) / 10) + '円 → 売価' + price + '円（原価率' + ratePct + '%）';
+      }
+    });
+  }
+
   ss.setActiveSheet(repSh);
-  ui.alert('反映しました。\n\n' + summary + '\n\n商品マスタの原価が更新されているか確認してください。');
+  ui.alert('反映しました。\n\n' + summary +
+           (priceMsg ? '\n\n【売価】' + priceMsg : '') +
+           '\n\n商品マスタの原価・売価・原価率を確認してください。');
 }
 
 function q_(v) { return v === null || v === undefined ? '' : String(v).trim(); }
+
+
+/* =====================================================================
+ *  レシピを見る（1品を1枚のカードにまとめて表示・印刷できる）
+ * ===================================================================== */
+
+/** メニュー：レシピを見る（カード） */
+function レシピを見る() {
+  if (!SpreadsheetApp.getActiveSpreadsheet().getSheetByName('試作記録')) {
+    SpreadsheetApp.getUi().alert('試作記録が見つかりません。\n\n先に「試作シートを追加」を実行してください。');
+    return;
+  }
+  var html = HtmlService.createHtmlOutput(recipeViewHtml_()).setWidth(720).setHeight(760);
+  SpreadsheetApp.getUi().showModalDialog(html, '🍳 レシピを見る');
+}
+
+/** 品と回の一覧（新しい順）。試作の回ごとにカードにできる */
+function recipeList() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var out = {}, order = [];
+  readRows_(ss, '試作記録', 15).forEach(function (r) {
+    var id = String(r[0] || '').trim(); if (!id) return;
+    var tgt = String(r[1] || '').trim();
+    var name = String(r[2] || '').trim() || tgt;
+    var no = Number(r[3]) || 0;
+    if (!out[tgt]) { out[tgt] = { target: tgt, name: name, kind: (tgt.indexOf('PRE') === 0 ? '仕込み品' : '商品'), trials: [] }; order.push(tgt); }
+    out[tgt].trials.push({ tryId: id, no: no });
+  });
+  return order.map(function (t) {
+    var o = out[t];
+    o.trials.sort(function (a, b) { return b.no - a.no; });   // 新しい回が先
+    return o;
+  }).reverse();
+}
+
+/** 1つの回（tryId）を、材料・作り方・味・原価・売価をまとめて返す */
+function recipeCard(tryId) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  tryId = String(tryId || '').trim();
+  var card = { tryId: tryId, name: '', no: 0, kind: '', date: '', target: '',
+               tastes: ['', '', '', '', '', ''], hasTaste: false, overall: '',
+               cost: 0, price: 0, lines: [], steps: [] };
+
+  readRows_(ss, '試作記録', 15).forEach(function (r) {
+    if (String(r[0]).trim() !== tryId) return;
+    card.target = String(r[1] || '').trim();
+    card.name = String(r[2] || '').trim() || card.target;
+    card.no = Number(r[3]) || 0;
+    card.kind = (card.target.indexOf('PRE') === 0) ? '仕込み品' : '商品';
+    card.date = r[4] ? Utilities.formatDate(new Date(r[4]), 'JST', 'yyyy/MM/dd') : '';
+    card.tastes = [5, 6, 7, 8, 9, 10].map(function (c) { var v = r[c]; return (v === '' || v == null) ? '' : Number(v); });
+    card.hasTaste = card.tastes.some(function (v) { return v !== ''; });
+    card.overall = (r[11] === '' || r[11] == null) ? '' : Number(r[11]);
+    card.cost = Math.round((Number(r[12]) || 0) * 10) / 10;
+  });
+
+  readRows_(ss, '試作レシピ明細', 8).forEach(function (r) {
+    if (String(r[0]).trim() === tryId && r[1]) {
+      card.lines.push({ name: String(r[2] || '').trim() || String(r[1]).trim(),
+                        qty: Number(r[3]) || 0, unit: String(r[4] || ''),
+                        cost: Math.round((Number(r[6]) || 0) * 10) / 10, memo: String(r[7] || '') });
+    }
+  });
+
+  var stepSh = ss.getSheetByName('試作手順');
+  if (stepSh) {
+    readRows_(ss, '試作手順', 6).forEach(function (r) {
+      if (String(r[0]).trim() === tryId && r[2]) {
+        card.steps.push({ no: Number(r[1]) || 0, text: String(r[2] || ''), time: String(r[3] || ''), heat: String(r[4] || '') });
+      }
+    });
+    card.steps.sort(function (a, b) { return a.no - b.no; });
+  }
+
+  if (card.kind === '商品' && card.cost > 0) card.price = Math.round(card.cost / 0.30 / 10) * 10;
+  return card;
+}
+
+function recipeViewHtml_() {
+  return [
+'<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_top">',
+'<style>',
+'  body { font-family: "Meiryo","Hiragino Kaku Gothic ProN",sans-serif; font-size: 13px;',
+'         color: #2A2019; background: #FBF8F3; margin: 0; padding: 14px 18px 24px; }',
+'  h2 { font-size: 15px; margin: 0 0 10px; }',
+'  .pick { display: flex; gap: 10px; margin-bottom: 12px; }',
+'  select { font-family: inherit; font-size: 13px; padding: 7px 8px; border: 1px solid #D8D0C4; border-radius: 4px; background: #fff; }',
+'  #target { flex: 2; } #no { flex: 1; }',
+'  .card { background: #fff; border: 1px solid #E4DED3; border-radius: 8px; padding: 18px 20px; }',
+'  .ttl { font-size: 18px; font-weight: bold; margin: 0 0 2px; }',
+'  .sub { font-size: 12px; color: #7A7168; margin-bottom: 14px; }',
+'  .sec { margin: 14px 0 6px; font-size: 12px; font-weight: bold; color: #8A6A2A; border-bottom: 1px solid #EEE6D8; padding-bottom: 3px; }',
+'  table { width: 100%; border-collapse: collapse; }',
+'  td, th { padding: 4px 6px; font-size: 13px; text-align: left; }',
+'  th { color: #7A7168; font-weight: normal; font-size: 11px; border-bottom: 1px solid #EEE6D8; }',
+'  td.r, th.r { text-align: right; white-space: nowrap; }',
+'  ol { margin: 4px 0; padding-left: 22px; line-height: 1.9; }',
+'  .tag { font-size: 11px; color: #7A7168; }',
+'  .tr { display: flex; align-items: center; gap: 8px; margin: 3px 0; }',
+'  .tr .nm { width: 48px; font-size: 12px; }',
+'  .bar { flex: 1; height: 12px; background: #EFEAE0; border-radius: 6px; position: relative; }',
+'  .bar i { position: absolute; top: -2px; width: 8px; height: 16px; border-radius: 3px; background: #8A6A2A; transform: translateX(-50%); }',
+'  .bar u { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: #C4BCB0; }',
+'  .tr .vv { width: 24px; text-align: right; font-size: 12px; }',
+'  .price { background: #EEF4EC; border: 1px solid #C6DCC0; border-radius: 6px; padding: 10px 14px; margin-top: 8px; }',
+'  .price b { font-size: 16px; }',
+'  .empty { color: #9A9189; font-size: 12px; }',
+'  .bar2 { margin-top: 14px; display: flex; gap: 10px; }',
+'  button { font-family: inherit; font-size: 13px; padding: 9px 16px; border-radius: 5px; cursor: pointer; border: 1px solid #D8D0C4; background: #F7F4EE; color: #5A4A2A; }',
+'  .msg { font-size: 12px; color: #7A7168; align-self: center; }',
+'  @media print { .pick, .bar2, h2 { display: none; } body { background: #fff; padding: 0; } .card { border: none; } }',
+'</style></head><body>',
+'<h2>🍳 レシピを見る</h2>',
+'<div class="pick">',
+'  <select id="target" onchange="onTarget()"></select>',
+'  <select id="no" onchange="show()"></select>',
+'</div>',
+'<div class="card" id="card"><p class="empty">品をえらぶと、ここにレシピが出ます。</p></div>',
+'<div class="bar2">',
+'  <button onclick="window.print()">印刷する</button>',
+'  <span class="msg" id="msg">読み込んでいます…</span>',
+'</div>',
+'<script>',
+'var LIST = [], CUR = null;',
+'function esc(s){ return String(s==null?"":s).replace(/[<>&]/g,function(c){return {"<":"&lt;",">":"&gt;","&":"&amp;"}[c];}); }',
+'window.onload = function(){',
+'  google.script.run.withSuccessHandler(function(d){',
+'    LIST = d || [];',
+'    var sel = document.getElementById("target");',
+'    if(!LIST.length){ sel.innerHTML = "<option>（まだ試作がありません）</option>"; document.getElementById("msg").textContent=""; return; }',
+'    sel.innerHTML = LIST.map(function(o,i){ return "<option value=\\""+i+"\\">"+esc(o.name)+"（"+o.kind+"）</option>"; }).join("");',
+'    onTarget();',
+'    document.getElementById("msg").textContent = "";',
+'  }).recipeList();',
+'};',
+'function onTarget(){',
+'  var o = LIST[Number(document.getElementById("target").value)||0]; if(!o) return;',
+'  var sel = document.getElementById("no");',
+'  sel.innerHTML = o.trials.map(function(t){ return "<option value=\\""+t.tryId+"\\">第"+t.no+"回</option>"; }).join("");',
+'  show();',
+'}',
+'function show(){',
+'  var tryId = document.getElementById("no").value; if(!tryId) return;',
+'  document.getElementById("msg").textContent = "読み込んでいます…";',
+'  google.script.run.withSuccessHandler(draw).recipeCard(tryId);',
+'}',
+'function tasterow(nm, v){',
+'  if(v==="") return "<div class=\\"tr\\"><span class=\\"nm\\">"+nm+"</span><div class=\\"bar\\"><u></u></div><span class=\\"vv\\">-</span></div>";',
+'  var pos = Math.max(0, Math.min(100, (v-1)/19*100));',
+'  return "<div class=\\"tr\\"><span class=\\"nm\\">"+nm+"</span><div class=\\"bar\\"><u></u><i style=\\"left:"+pos+"%\\"></i></div><span class=\\"vv\\">"+v+"</span></div>";',
+'}',
+'function draw(c){',
+'  CUR = c;',
+'  document.getElementById("msg").textContent = "";',
+'  var names = ["甘味","塩味","酸味","旨味","苦味","辛味"];',
+'  var taste = c.hasTaste ? names.map(function(nm,i){ return tasterow(nm, c.tastes[i]); }).join("")',
+'                        : "<p class=\\"empty\\">まだ味は記録されていません（🧪試作→味を記録・調整する）。</p>";',
+'  var overall = (c.overall==="") ? "-" : c.overall;',
+'  var lines = c.lines.length ? ("<table><tr><th>材料</th><th class=\\"r\\">分量</th><th class=\\"r\\">原価</th></tr>" +',
+'       c.lines.map(function(L){ return "<tr><td>"+esc(L.name)+(L.memo?" <span class=\\"tag\\">"+esc(L.memo)+"</span>":"")+"</td><td class=\\"r\\">"+L.qty+" "+esc(L.unit)+"</td><td class=\\"r\\">"+L.cost+"円</td></tr>"; }).join("") +',
+'       "</table>") : "<p class=\\"empty\\">材料がまだありません。</p>";',
+'  var steps = c.steps.length ? ("<ol>" + c.steps.map(function(s){ var ex=[]; if(s.time)ex.push(s.time); if(s.heat)ex.push(s.heat); return "<li>"+esc(s.text)+(ex.length?" <span class=\\"tag\\">（"+esc(ex.join("・"))+"）</span>":"")+"</li>"; }).join("") + "</ol>") : "<p class=\\"empty\\">作り方がまだありません。</p>";',
+'  var price = (c.kind==="商品") ? ("<div class=\\"price\\">原価 <b>"+c.cost+"</b> 円　売価の目安 <b>"+(c.price||"-")+"</b> 円 <span class=\\"tag\\">（原価率30%の目安）</span></div>")',
+'                               : ("<div class=\\"price\\">原価 <b>"+c.cost+"</b> 円 <span class=\\"tag\\">（仕込み品なので売価は出しません）</span></div>");',
+'  document.getElementById("card").innerHTML =',
+'    "<p class=\\"ttl\\">"+esc(c.name)+"</p>" +',
+'    "<p class=\\"sub\\">"+esc(c.kind)+"　第"+c.no+"回"+(c.date?"　"+esc(c.date):"")+"　総合評価 "+overall+"</p>" +',
+'    "<div class=\\"sec\\">味のバランス</div>" + taste +',
+'    "<div class=\\"sec\\">材料</div>" + lines +',
+'    "<div class=\\"sec\\">作り方</div>" + steps +',
+'    price;',
+'}',
+'</script></body></html>'
+  ].join('\n');
+}
 
 
 /* =====================================================================
@@ -1780,9 +2599,11 @@ var COLUMN_ROLES = {
   '仕入先マスタ': [ROLE_ID, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_AUTO],
 
   // 食材ID / 食材名 / 分類 / 在庫単位 / 保存区分 / 日持ち日数 / 歩留まり率 / 仕入先ID / 仕入先商品コード /
-  // 発注単位 / 入数 / 仕入価格 / kg単価 / リードタイム / 安全係数 / 実測補正 / 単価 / 実効単価
+  // 発注単位 / 入数 / 仕入価格 / kg単価 / リードタイム / 安全係数 / 実測補正 / 単価 / 実効単価 /
+  // 甘味度 / 塩味度 / 酸味度 / 旨味度 / 苦味度 / 辛味度（味は手入力＝初期値を人が直せる）
   '食材マスタ': [ROLE_ID, ROLE_IN, ROLE_PICK, ROLE_PICK, ROLE_PICK, ROLE_IN, ROLE_IN, ROLE_PICK, ROLE_IN,
-                 ROLE_PICK, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_AUTO, ROLE_AUTO],
+                 ROLE_PICK, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_AUTO, ROLE_AUTO,
+                 ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN],
 
   // 仕込みID / 仕込み品名 / 出来上がり量 / 単位 / 保存区分 / 日持ち日数 / 原価合計 / 単位原価 / チェック
   '仕込み品マスタ': [ROLE_ID, ROLE_IN, ROLE_IN, ROLE_PICK, ROLE_PICK, ROLE_IN, ROLE_AUTO, ROLE_AUTO, ROLE_AUTO],
@@ -1801,7 +2622,10 @@ var COLUMN_ROLES = {
                ROLE_IN, ROLE_AUTO, ROLE_AUTO, ROLE_IN, ROLE_PICK],
 
   // 試作ID / 子ID / 子名 / 使用量 / 単位 / 単価 / 原価 / 備考
-  '試作レシピ明細': [ROLE_PICK, ROLE_PICK, ROLE_AUTO, ROLE_IN, ROLE_AUTO, ROLE_AUTO, ROLE_AUTO, ROLE_IN]
+  '試作レシピ明細': [ROLE_PICK, ROLE_PICK, ROLE_AUTO, ROLE_IN, ROLE_AUTO, ROLE_AUTO, ROLE_AUTO, ROLE_IN],
+
+  // 試作ID / 手順番号 / 手順内容 / 所要時間 / 温度・火加減 / ポイント（作り方＝試作の回ごと）
+  '試作手順': [ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN]
 };
 
 /**
@@ -1897,7 +2721,18 @@ var EXTRA_NOTES = {
        '★ここに入るのは必ず100%以下です。\n' +
        '　「炊くと2倍になる」「茹でると増える」ものは、ここでは表せません。\n' +
        '　ここに 50% などと入れると、原価が2倍になってしまいます。\n\n' +
-       '　ご飯・茹でた麺・戻した乾物は「仕込み品マスタ」に登録してください。'
+       '　ご飯・茹でた麺・戻した乾物は「仕込み品マスタ」に登録してください。',
+    19: '★味の強さ＝この食材 1g がその味をどれだけ出すか（甘味）。\n' +
+        '　試作の味の初期値（スライダー）を自動で出すために使います。\n' +
+        '　甘味・塩味は「糖分%・塩分%」が目安（例：砂糖100／醤油の塩味16）。\n' +
+        '　酸味・旨味・苦味・辛味は“おおよその目安”で構いません。\n\n' +
+        '　空欄＝0 として扱います。よく使う調味料は最初から入れてあります。\n' +
+        '　実際に作って味が違えば、ここを直すと次からの初期値が賢くなります。',
+    20: '塩味の強さ（1gあたり）。塩分% が目安。例：塩99／醤油16／味噌12。空欄＝0。',
+    21: '酸味の強さ（1gあたり）。酢・レモンなど。空欄＝0。',
+    22: '旨味の強さ（1gあたり）。だし・醤油・肉・貝など。空欄＝0。',
+    23: '苦味の強さ（1gあたり）。※総合評価の計算には入りません。空欄＝0。',
+    24: '辛味の強さ（1gあたり）。唐辛子・こしょうなど。※総合評価には入りません。空欄＝0。'
   },
   '仕込み品マスタ': {
     3: '★ふつうは空のままで構いません。\n' +
