@@ -123,6 +123,8 @@
   .ev-list li{display:flex; align-items:center; gap:8px; background:var(--chip); border-radius:8px; padding:7px 10px; margin-bottom:6px;}
   .ev-list li span{flex:1; font-size:14px; word-break:break-word;}
   .ev-list li button{border:none; background:transparent; color:var(--sun); font-size:18px; cursor:pointer; line-height:1; padding:2px 6px;}
+  .ev-list li button.cp-edit{color:var(--accent); font-size:15px;}
+  .ev-list li.editing{outline:2px solid var(--accent); outline-offset:-2px;}
   .ev-empty{color:var(--muted); font-size:13px; margin:0 0 14px;}
   .add-row{display:flex; gap:8px;}
   .add-row input{flex:1; font:inherit; font-size:14px; padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink);}
@@ -233,6 +235,7 @@
       <div class="cp-colors" id="cpColors"></div>
       <div class="dialog-foot">
         <button class="btn primary" id="cpAdd" style="margin-right:auto;">追加</button>
+        <button class="btn" id="cpCancel" style="display:none;">新規に戻す</button>
         <button class="btn" id="cpClose">閉じる</button>
       </div>
     </div>
@@ -714,7 +717,10 @@
   var cpEnd = document.getElementById("cpEnd");
   var cpText = document.getElementById("cpText");
   var cpColors = document.getElementById("cpColors");
+  var cpAddBtn = document.getElementById("cpAdd");
+  var cpCancelBtn = document.getElementById("cpCancel");
   var cpSelColor = COLORS[4]; // 既定は青
+  var cpEditId = null;        // 編集中のキャンペーンid（null＝新規追加）
 
   function pad2(n){ return (n<10?"0":"")+n; }
   function toInput(dt){ return dt.getFullYear()+"-"+pad2(dt.getMonth()+1)+"-"+pad2(dt.getDate()); }
@@ -727,14 +733,18 @@
       var b=document.createElement("button");
       b.className="swatch" + (c===cpSelColor?" sel":"");
       b.style.background=c;
-      b.addEventListener("click", function(){
-        cpSelColor=c;
-        Array.prototype.forEach.call(cpColors.children, function(el){ el.classList.remove("sel"); });
-        b.classList.add("sel");
-      });
+      b.setAttribute("data-color", c);
+      b.addEventListener("click", function(){ setCpColor(c); });
       cpColors.appendChild(b);
     });
   })();
+  // 色を選ぶ（クリックでも、編集の読み込みでも使う）
+  function setCpColor(c){
+    cpSelColor = c;
+    Array.prototype.forEach.call(cpColors.children, function(el){
+      el.classList.toggle("sel", el.getAttribute("data-color")===c);
+    });
+  }
 
   // 年・月・日 のプルダウンを作る（矢印なし）
   function buildYmd(container){
@@ -751,6 +761,7 @@
   var ymdStart = buildYmd(cpStart);
   var ymdEnd = buildYmd(cpEnd);
   function ymdSet(ymd, dt){ ymd.y.value=dt.getFullYear(); ymd.m.value=dt.getMonth()+1; ymd.d.value=dt.getDate(); }
+  function ymdSetStr(ymd, s){ var a=String(s).split("-"); ymd.y.value=+a[0]; ymd.m.value=+a[1]; ymd.d.value=+a[2]; }
   function ymdGet(ymd){
     var y=+ymd.y.value, m=+ymd.m.value, d=+ymd.d.value;
     var last=new Date(y, m, 0).getDate();   // m月の最終日
@@ -759,12 +770,34 @@
   }
 
   function openCp(){
-    ymdSet(ymdStart, today);
-    ymdSet(ymdEnd, today);
+    cancelEditCp();          // 新規追加モードで開く
     refreshCp();
     cpOverlay.classList.add("open");
   }
   function closeCp(){ cpOverlay.classList.remove("open"); }
+
+  // 編集をやめて「新規追加」モードに戻す
+  function cancelEditCp(){
+    cpEditId = null;
+    cpText.value = "";
+    ymdSet(ymdStart, today);
+    ymdSet(ymdEnd, today);
+    setCpColor(COLORS[4]);
+    cpAddBtn.textContent = "追加";
+    cpCancelBtn.style.display = "none";
+  }
+
+  // 一覧で選んだキャンペーンをフォームに読み込む（編集モード）
+  function startEditCp(p){
+    cpEditId = p.id;
+    ymdSetStr(ymdStart, p.start);
+    ymdSetStr(ymdEnd, p.end);
+    cpText.value = p.text;
+    setCpColor(p.color || COLORS[4]);
+    cpAddBtn.textContent = "更新";
+    cpCancelBtn.style.display = "";
+    cpText.focus();
+  }
 
   function refreshCp(){
     cpList.innerHTML = "";
@@ -772,16 +805,21 @@
     cpEmpty.style.display = sorted.length ? "none" : "block";
     sorted.forEach(function(p){
       var li = document.createElement("li");
+      if(p.id===cpEditId) li.classList.add("editing");
       var dot = document.createElement("span");
       dot.className = "color-dot"; dot.style.background = p.color || "#3f7fd6";
       var span = document.createElement("span");
       span.textContent = mdLabel(p.start) + "〜" + mdLabel(p.end) + "　" + p.text;
+      var edit = document.createElement("button");
+      edit.textContent = "✏"; edit.title = "変更"; edit.className = "cp-edit";
+      edit.addEventListener("click", function(){ startEditCp(p); });
       var del = document.createElement("button");
       del.textContent = "×"; del.title = "削除";
       del.addEventListener("click", function(){
+        if(p.id===cpEditId) cancelEditCp();
         callServer("apiDeletePeriod", [p.id], refreshCp);
       });
-      li.appendChild(dot); li.appendChild(span); li.appendChild(del);
+      li.appendChild(dot); li.appendChild(span); li.appendChild(edit); li.appendChild(del);
       cpList.appendChild(li);
     });
   }
@@ -791,12 +829,20 @@
     if(!t){ cpText.focus(); return; }
     var s = ymdGet(ymdStart), e = ymdGet(ymdEnd);
     if(toNum(e) < toNum(s)){ var tmp=s; s=e; e=tmp; } // 逆なら入れ替え
-    cpText.value = "";
-    callServer("apiAddPeriod", [s, e, t, cpSelColor], refreshCp);
+    if(cpEditId){
+      // 選んだキャンペーンを上書き更新
+      callServer("apiUpdatePeriod", [cpEditId, s, e, t, cpSelColor], function(){
+        cancelEditCp(); refreshCp();
+      });
+    }else{
+      cpText.value = "";
+      callServer("apiAddPeriod", [s, e, t, cpSelColor], refreshCp);
+    }
   }
 
   document.getElementById("cpBtn").addEventListener("click", openCp);
   document.getElementById("cpAdd").addEventListener("click", addCp);
+  cpCancelBtn.addEventListener("click", cancelEditCp);
   cpText.addEventListener("keydown", function(e){ if(e.key==="Enter") addCp(); });
   document.getElementById("cpClose").addEventListener("click", closeCp);
   cpOverlay.addEventListener("click", function(e){ if(e.target===cpOverlay) closeCp(); });

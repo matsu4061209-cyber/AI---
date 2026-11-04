@@ -111,6 +111,8 @@ function createWeekSheetFrom_(ss, currentSheet) {
     var s = ss.getSheetByName(name);
     if (s) trimSheetSize_(s);
   });
+  // 名簿が増減していることがあるので、日別の表も作り直す（シートを作ってある時だけ）
+  if (ss.getSheetByName(DAILY_SHEET_NAME)) refreshDailyHours_();
 
   // 12. 直近の週だけを残し、古い週は書庫ファイルへ移す（ファイルが重くならないようにする）
   archiveOldWeeks_(true);
@@ -213,6 +215,7 @@ function onOpen() {
     .addSeparator()
     // ----- 月ごと -----
     .addItem('月次集計を開く', 'openMonthlySummary')
+    .addItem('日別の勤務時間を開く', 'openDailyHours')
     .addItem('毎月のおしらせ', 'openMonthlyNotice')
     .addItem('古い週を書庫へ移す', 'archiveOldWeeks')
     .addSeparator()
@@ -246,7 +249,6 @@ function onOpen() {
       .addItem('名前と色を変える', 'openPositionSettings')
       .addSeparator()
       .addItem('ボタンを画面に置く', 'placePositionButtons')
-      .addItem('すべての週シートにボタンを置く', 'placePositionButtonsAllWeeks')
       .addItem('ボタンを消す', 'clearPositionButtons'))
     .addItem('お店のはじめ方（新しい店舗）', 'openStoreSetup')
     .addSubMenu(ui.createMenu('LINEのつなぎこみ')
@@ -254,7 +256,6 @@ function onOpen() {
       .addItem('LINEログインの設定（はじめて入れる・入れ替える）', 'openLiffSettings'))
     .addSubMenu(ui.createMenu('困ったとき・やり直し')
       .addItem('色を塗り直す（臨時用）', 'refreshWeekColors')
-      .addItem('すべての週シートを手で塗る形にする（臨時用）', 'makeAllWeeksPaintable')
       .addItem('出勤履歴を作り直す（臨時用）', 'rebuildAttendanceHistory')
       .addSeparator()
       .addItem('自動でシート作成・お知らせを再開する', 'startShiftAutomation')
@@ -1132,6 +1133,7 @@ function saveShiftRequestSettings(settings) {
   // 月次集計の見出し・締め期間も新しい設定に合わせる
   try {
     if (SpreadsheetApp.getActiveSpreadsheet().getSheetByName(MONTHLY_SHEET_NAME)) refreshMonthlySummary_();
+    if (SpreadsheetApp.getActiveSpreadsheet().getSheetByName(DAILY_SHEET_NAME)) refreshDailyHours_();
   } catch (e) {
     Logger.log('月次集計の更新に失敗: ' + e.message);
   }
@@ -1148,6 +1150,12 @@ var BUDGET_HEAD_ROW = 7;       // 日別の一覧の見出し（A=日付、B=予
 var BUDGET_FIRST_ROW = 8;      // 日別の一覧の1行目
 var BUDGET_WEEK_ROW = 5;       // 週シートの予算の行
 var BUDGET_DEFAULT_DOW = [90000, 90000, 90000, 90000, 100000, 200000, 200000];
+// 日別の予算の「日付」は、いつも先の月末まで並べておく（店長は金額を入れるだけで済む）。
+// 2か月先＝11月なら1月31日まで。毎日の自動とメニュー「売上予算を入れ直す」のたびに、
+// 足りないぶんだけうしろに足す。金額は空のままなので、入っていない日のお知らせは今までどおり出る。
+// MARKER_BUDGET_DATE_ROWS
+var BUDGET_AHEAD_MONTHS = 2;
+var BUDGET_DATE_FORMAT = 'yyyy/mm/dd"("ddd")"';   // 土日が一目で分かるように曜日も出す
 
 // 「売上予算」シートを取得（無ければ作る）。曜日別の基準額は、今ある一番新しい週シートの5行目から写す
 function getBudgetSheet_() {
@@ -1167,7 +1175,7 @@ function getBudgetSheet_() {
   sheet.getRange('A6').setValue('日別の予算（入れた日は、上の基準額より優先します）');
   sheet.getRange(BUDGET_HEAD_ROW, 1, 1, 2).setValues([['日付', '予算']]).setFontWeight('bold').setBackground('#EFF0ED');
   sheet.setFrozenRows(BUDGET_HEAD_ROW);
-  sheet.getRange('A:A').setNumberFormat('yyyy/mm/dd');
+  sheet.getRange('A:A').setNumberFormat(BUDGET_DATE_FORMAT);
   sheet.getRange('B:B').setNumberFormat('#,##0');
   sheet.setColumnWidth(1, 150);
   ss.setActiveSheet(active);
@@ -1181,6 +1189,55 @@ function newestWeekBudget_(ss) {
     var value = newest ? Number(newest.getRange(block.col + BUDGET_WEEK_ROW).getValue()) : 0;
     return value > 0 ? value : BUDGET_DEFAULT_DOW[i];
   });
+}
+
+// その年月の末日。月が12を超えたら翌年として数える
+function monthEndYmd_(year, month) {
+  var d = new Date(Date.UTC(year, month, 0));
+  return d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + d.getUTCDate()).slice(-2);
+}
+
+// 日別の予算の「日付」の行を、先の月末まで用意する（金額は空のまま＝店長が入れる）。
+// すでにある行のうしろに足すだけなので、入れた数字も並びも触らない。足した日数を返す。
+// 「来月ぶんを入れたいのに行が無い」を無くすため、毎日の自動とメニューの両方から呼ぶ
+function ensureBudgetDateRows_(ss, throughYmd) {
+  var sheet = getBudgetSheet_();
+  var tz = ss.getSpreadsheetTimeZone();
+  var todayYmd = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  var to = monthEndYmd_(Number(todayYmd.slice(0, 4)), Number(todayYmd.slice(5, 7)) + BUDGET_AHEAD_MONTHS);
+  // 募集期間がそれより先まで続くときは、その月の末日まで伸ばす
+  if (throughYmd && throughYmd > to) to = monthEndYmd_(Number(throughYmd.slice(0, 4)), Number(throughYmd.slice(5, 7)));
+
+  // すでに入っている日付（二重に足さないため）と、最後に日付が入っている行
+  var have = {}, lastRow = BUDGET_HEAD_ROW, lastYmd = '';
+  var last = sheet.getLastRow();
+  if (last >= BUDGET_FIRST_ROW) {
+    sheet.getRange(BUDGET_FIRST_ROW, 1, last - BUDGET_FIRST_ROW + 1, 1).getValues().forEach(function(r, i) {
+      if (!(r[0] instanceof Date)) return;
+      var ymd = Utilities.formatDate(r[0], tz, 'yyyy-MM-dd');
+      have[ymd] = true;
+      lastRow = BUDGET_FIRST_ROW + i;
+      lastYmd = ymd;
+    });
+  }
+  // 足しはじめるのは「最後の日付の翌日」から。終わった月までさかのぼらない
+  var from = todayYmd.slice(0, 8) + '01';
+  if (lastYmd && addDaysYmd_(lastYmd, 1) > from) from = addDaysYmd_(lastYmd, 1);
+  if (from > to) return 0;
+
+  var rows = [];
+  for (var ymd = from; ymd <= to; ymd = addDaysYmd_(ymd, 1)) {
+    if (have[ymd]) continue;
+    // このファイルの時間帯で0時にする（ずれるとシートの日付が1日前になる）
+    rows.push([Utilities.parseDate(ymd + ' 00:00', tz, 'yyyy-MM-dd HH:mm')]);
+  }
+  if (!rows.length) return 0;
+
+  var need = lastRow + rows.length;
+  if (need > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), need - sheet.getMaxRows());
+  sheet.getRange(lastRow + 1, 1, rows.length, 1).setValues(rows);
+  sheet.getRange('A:A').setNumberFormat(BUDGET_DATE_FORMAT);
+  return rows.length;
 }
 
 // 「売上予算」シートを読む。{ dow: 月〜日の基準額, byDate: { 'yyyy-MM-dd': 金額 } }
@@ -1227,9 +1284,11 @@ function refreshWeekBudgets() {
   var ui = SpreadsheetApp.getUi();
   var created = !ss.getSheetByName(BUDGET_SHEET_NAME);
   var sheet = getBudgetSheet_();
+  var added = ensureBudgetDateRows_(ss);   // 先の月末までの日付を用意してから案内する
   if (created) {
     ss.setActiveSheet(sheet);
-    ui.alert('「売上予算」シートを作りました。\n\n曜日別の基準額（4行目）と、変える日だけ日別の予算（8行目から）を入れてください。\n次に週シートを作るときから、5行目の予算に自動で入ります。');
+    ui.alert('「売上予算」シートを作りました。\n\n曜日別の基準額（4行目）と、変える日だけ日別の予算（8行目から）を入れてください。\n日付は' +
+      BUDGET_AHEAD_MONTHS + 'か月先の月末まで並べてあります（金額だけ入れてください）。\n次に週シートを作るときから、5行目の予算に自動で入ります。');
     return;
   }
 
@@ -1248,7 +1307,8 @@ function refreshWeekBudgets() {
     var n = applyWeekBudget_(week, budgets);
     if (n) { changed += n; sheets++; }
   });
-  ui.alert(changed ? sheets + '枚のシートで、' + changed + '日ぶんの予算を入れ直しました。' : '入れ直す予算はありませんでした（すでに同じ数字です）。');
+  ui.alert((changed ? sheets + '枚のシートで、' + changed + '日ぶんの予算を入れ直しました。' : '入れ直す予算はありませんでした（すでに同じ数字です）。') +
+    (added ? '\n\n※「売上予算」シートに、' + added + '日ぶんの日付を用意しました。金額を入れてください。' : ''));
 }
 
 // ===================== 目安人数 =====================
@@ -2851,20 +2911,6 @@ function paintPosition4() { var p = positionList_()[3]; paintSelectedPosition_(p
 function paintPosition5() { var p = positionList_()[4]; paintSelectedPosition_(p.color, p.name); }
 function clearPositionPaint() { paintSelectedPosition_(POSITION_BASE_COLOR, 'もとの水色'); }
 
-// メニュー「すべての週シートを手で塗る形にする（臨時用）」
-// ふだんはボタンを押したときに1枚ずつ自動で切り替わる。
-// 先に全部そろえておきたいとき（色が塗れない週が残っているとき）に使う。
-function makeAllWeeksPaintable() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var weeks = ss.getSheets().filter(function(sh) { return isWeekSheetName_(sh.getName()); });
-  var done = [];
-  weeks.forEach(function(sh) { if (ensureGridPaintable_(sh)) done.push(sh.getName()); });
-  SpreadsheetApp.getUi().alert(done.length
-    ? done.length + '枚を手で塗る形にしました。\n\n' + done.join('、') +
-      '\n\n表の見た目は変わりません。これでどの週でもポジションの色が塗れます。'
-    : 'すべての週シートが、すでに手で塗る形になっています。');
-}
-
 // メニュー／ボタン「週ぜんぶ水色にもどす」
 // 「水色にもどす」の、週まるごと版。戻る色はどちらも同じ水色
 function clearAllPositionColors() {
@@ -3176,30 +3222,6 @@ function placePositionButtons() {
     (placed < POSITION_BUTTON_FUNCS.length ? '足りないときはもう一度押してください。'
                                            : '画面に出ないときは、ページを再読み込みしてください。'),
     'ポジション', 8);
-}
-
-// メニュー「すべての週シートにボタンを置く」
-// 週シートは1枚ずつ作られてきたため、あとからボタンを足したいときに使う
-function placePositionButtonsAllWeeks() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var weeks = ss.getSheets().filter(function(sh) { return isWeekSheetName_(sh.getName()); });
-  if (!weeks.length) {
-    ss.toast('週シートが見つかりませんでした。', 'ポジション', 5);
-    return;
-  }
-  var ui = SpreadsheetApp.getUi();
-  if (ui.alert(weeks.length + '枚の週シートすべてに、ポジションのボタンを置き直します。\n' +
-      '少し時間がかかります。よろしいですか。', ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
-  syncPositionColors_();
-  var done = 0, short = [];
-  weeks.forEach(function(sh) {
-    var placed = putPositionButtons_(sh);
-    if (placed >= POSITION_BUTTON_FUNCS.length) done++;
-    else short.push(sh.getName() + '（' + placed + '個）');
-  });
-  ss.toast(weeks.length + '枚のうち' + done + '枚にボタンを置きました。' +
-    (short.length ? '足りないシート：' + short.join('・') + '。もう一度押すと足せます。'
-                  : 'ページを再読み込みすると出てきます。'), 'ポジション', 10);
 }
 
 // 1枚のシートにボタンを置き直す（置けた数を返す）
@@ -3530,6 +3552,7 @@ function dailyShiftCheck() {
   if (!period) return { created: [], missingBudget: [], notice: '', holiday: holiday };
 
   var created = ensurePeriodSheets_(ss, period);
+  ensureBudgetDateRows_(ss, addDaysYmd_(period.start, period.weeks * 7 - 1));   // 入れる欄を先の月まで用意しておく
   var missing = missingBudgetDays_(ss, period);
   var notice = sendDeadlineNotice_(ss, settings, period, today);
 
@@ -3573,7 +3596,8 @@ function noticeMissingBudget_(ss, period, missing, settings, today) {
   var key = 'budget/' + period.start + '/' + today;
   if (noticeAlreadySent_(settings, key)) return;
   var body = '「売上予算」シートに、日別の予算が入っていない日があります。\n' +
-    '（入っていない日は、曜日別の基準額がそのまま入ります）\n\n' +
+    '（入っていない日は、曜日別の基準額がそのまま入ります）\n' +
+    '日付の行は先の月末まで用意してありますので、B列に金額を入れてください。\n\n' +
     '募集期間：' + ymdLabel_(period.start) + '〜' + ymdLabel_(addDaysYmd_(period.start, period.weeks * 7 - 1)) + '\n' +
     '足りない日（' + missing.length + '日）：\n' + missing.map(ymdLabel_).join('、') + '\n\n' + ss.getUrl();
   MailApp.sendEmail(Session.getEffectiveUser().getEmail(), '【シフト表】売上予算が入っていない日があります', body);
@@ -3928,8 +3952,9 @@ var NOTICE_DEFAULT_FIRST = 'シフト希望の入力をお願いします。\n�
 var NOTICE_DEFAULT_LATER = '【あと{残り日数}日】シフト希望のスタッフ入力締切が近づいています。\n期間 {期間}\nスタッフ入力締切 {締切}\n{入力状況}\n\n{人手不足}\n{リンク}';
 // 締切の当日に送る文。{お礼}と{人手不足}は必ずどちらか片方だけが出る
 var NOTICE_DEFAULT_LAST = '【本日が締切】シフト希望のスタッフ入力締切は今日 {締切} です。\n期間 {期間}\n{入力状況}\n\n{お礼}{人手不足}\n{リンク}';
-// 「まだ出していない人：◯人」を出すのは、締切までこの日数以内になってから。
-// それより前は早すぎて急かすだけなので、{入力状況}は何も出さない
+// 入力の様子をお知らせに出すのは、締切までこの日数以内になってから。
+// それより前はまだほとんど入力が無く、急かすだけになるので
+// {入力状況} も {人手不足}（人が少なめの日・とくに少ない日）も {お礼} も出さない
 var NOTICE_STATUS_WITHIN_DAYS = 5;
 // {リンク}{パソコン}を消したあと、残りがこの文字数までならその行ごと消す（「パソコンから→」など）
 var NOTICE_LINK_LINE_MAX = 12;
@@ -5114,11 +5139,17 @@ function fillNoticeText_(template, ss, period, left, ready, card) {
     }
   }
   if (/\{人手不足\}|\{お礼\}/.test(text)) {
-    if (!done.info) done.info = shortStaffInfo_(ss, period);       // 数えるのは1回だけ
-    var short = shortStaffTextFrom_(done.info, left <= NEED_HARD_WITHIN_DAYS);
-    map['{人手不足}'] = short;
-    // 人が足りている時だけお礼。足りない日がある時は {人手不足} のほうが出る
-    map['{お礼}'] = short ? '' : NOTICE_THANKS_TEXT;
+    if (left > NOTICE_STATUS_WITHIN_DAYS) {
+      // まだ日があるうちは、ほとんど入力が無くて「少なめの日」だらけになるので出さない
+      map['{人手不足}'] = '';
+      map['{お礼}'] = '';
+    } else {
+      if (!done.info) done.info = shortStaffInfo_(ss, period);     // 数えるのは1回だけ
+      var short = shortStaffTextFrom_(done.info, left <= NEED_HARD_WITHIN_DAYS);
+      map['{人手不足}'] = short;
+      // 人が足りている時だけお礼。足りない日がある時は {人手不足} のほうが出る
+      map['{お礼}'] = short ? '' : NOTICE_THANKS_TEXT;
+    }
   }
   Object.keys(map).forEach(function(key) { text = text.split(key).join(map[key]); });
   return text.replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '');   // 中身が空だった差し込みの空行を詰める
@@ -5184,9 +5215,11 @@ function openNoticeSettings() {
     '{入力状況}＝「まだ出していない人：◯人」などを自動で作ります（全員そろっていればお礼の文になります）。<br>' +
     '　出るのは<b>締切まであと' + NOTICE_STATUS_WITHIN_DAYS + '日以内</b>のときだけです。それより前の日は何も出ません。<br>' +
     '{人手不足}＝人が少なめの日を知らせます（少ない日が4日以上なら曜日でまとめます）。足りている時は何も出ません。<br>' +
+    '　これも出るのは<b>締切まであと' + NOTICE_STATUS_WITHIN_DAYS + '日以内</b>のときだけです（それより前はまだ入力が少ないため）。<br>' +
     '　「このままでは運営に支障が出ます」という強めの言い方になるのは、<b>締切まであと3日以内</b>で、なおかつ<br>' +
     '　ひとりあと1日以上足りないときだけです。それより前の日は「入れそうな方がいたら」の軽い声かけになります。<br>' +
     '{お礼}＝人がそろっている時だけ出ます（足りない日がある時は{人手不足}のほうが出ます）。締切当日の文に向いています。<br>' +
+    '　{入力状況}{人手不足}と同じで、<b>締切まであと' + NOTICE_STATUS_WITHIN_DAYS + '日以内</b>の回だけ出ます。<br>' +
     '　欲しい人数の目安は「シフト希望設定」シートのE29（平日）・E30（土日祝）で変えられます。</p>' +
     '<p id="msg" style="margin:8px 0 0;font-size:12px;color:#186A3B;"></p>' +
     '<div style="margin-top:10px;text-align:right;">' +
@@ -6063,8 +6096,20 @@ function rebuildAttendanceHistory() {
   writeHistoryRows_(historySheet, sortHistoryRows_(kept.concat(rows)));
 
   refreshMonthlySummary_();
+  if (ss.getSheetByName(DAILY_SHEET_NAME)) refreshDailyHours_();
   SpreadsheetApp.getUi().alert('出勤履歴を作り直しました。\n週シート ' + weekSheets.length + '枚から ' + rows.length + '行' +
     (kept.length ? '（書庫へ移した週の ' + kept.length + '行はそのまま残しています）' : ''));
+}
+
+// 対象年月の選択肢（1年前〜来月まで。13番目＝今月）
+function monthChoices_() {
+  var months = [];
+  var ym = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM').split('-').map(Number);
+  for (var back = 12; back >= -1; back--) {
+    var d = new Date(Date.UTC(ym[0], ym[1] - 1 - back, 1));
+    months.push(d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2));
+  }
+  return months;
 }
 
 // 「月次集計」シートを取得（無ければ作る）
@@ -6096,13 +6141,7 @@ function refreshMonthlySummary_() {
     .setFontWeight('bold').setBackground('#EFF0ED');
 
   // 対象年月は、今月の前後から選べるようにする
-  var tz = ss.getSpreadsheetTimeZone();
-  var months = [];
-  var todayYm = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM').split('-').map(Number);
-  for (var back = 12; back >= -1; back--) {
-    var d = new Date(Date.UTC(todayYm[0], todayYm[1] - 1 - back, 1));
-    months.push(d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2));
-  }
+  var months = monthChoices_();
   var current = String(sheet.getRange('B2').getDisplayValue()).trim();
   sheet.getRange('B2').setNumberFormat('@')
     .setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(months, true).setAllowInvalid(false).build());
@@ -6142,6 +6181,290 @@ function openMonthlySummary() {
   refreshMonthlySummary_();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   ss.setActiveSheet(getMonthlySheet_());
+}
+
+/* ================= 日別の勤務時間（1か月・店長社員とそれ以外に分ける） =================
+   「出勤履歴」（1人1日ぶん）を、名前×日の表に並べ直して見るためのシート。
+   月次集計は合計だけなので、どの日に誰が何時間入っているかを一覧で見たいときに使う。
+   期間は給与の締めと同じ。店長・社員は「前月16日〜当月15日」、
+   それ以外（キャスト）は「前月21日〜当月20日」のように、区分ごとに区切りが違う。
+   中身はぜんぶ数式なので、対象年月を変えればその場で入れ替わる。              */
+var DAILY_SHEET_NAME = '日別勤務時間';
+var DAILY_DAYS = 31;                       // 1か月でいちばん長い日数ぶんの列を用意する
+var DAILY_FIRST_COL = 2;                   // B列から日が並ぶ
+var DAILY_COUNT_COL = DAILY_FIRST_COL + DAILY_DAYS;   // 出勤日数（表の見出しの行では「期間の開始」も置く）
+var DAILY_HOURS_COL = DAILY_COUNT_COL + 1;            // 合計時間（　　　〃　　　　「期間の終了」）
+var DAILY_FIRST_BLOCK_ROW = 5;             // 1つめの表の見出し行
+var DAILY_BLOCK_GAP = 2;                   // 表と表のあいだの空き行
+var DAILY_RANGE_CELL = 'B3';               // 区切り方を選ぶところ
+// 日別の表は「暦（1日〜末日）」が既定。店長社員もそれ以外も同じ列（1日〜末日）で並べる。
+// 給与の締めで見たいときだけ、もう一方に切り替える
+var DAILY_RANGE_CALENDAR = '暦（1日〜末日）';
+var DAILY_RANGE_CLOSING = '給与の締め期間';
+var DAILY_SUNDAY_BG = '#FDEDEC';
+var DAILY_SATURDAY_BG = '#EAF2F8';
+// 運営ジャーナル用の縦の表（左に1日〜末日・右にパートと社員の時間）
+var DAILY_JOURNAL_TITLE = '【運営ジャーナル用（縦）】';
+var DAILY_JOURNAL_DOW_COL = 2;          // B列＝曜日
+var DAILY_JOURNAL_PART_COL = 3;         // C列＝パート（それ以外）→ 運営ジャーナルのR列
+var DAILY_JOURNAL_EMP_COL = 4;          // D列＝社員 → 運営ジャーナルのS列
+var DAILY_JOURNAL_SUM_COL = 5;          // E列＝合計（見るだけ）
+
+function getDailySheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(DAILY_SHEET_NAME);
+  if (sheet) return sheet;
+  var active = ss.getActiveSheet();   // シート作成で表示中のシートが変わるので先に覚えておく
+  sheet = ss.insertSheet(DAILY_SHEET_NAME);
+  ss.setActiveSheet(active);
+  return sheet;
+}
+
+// 日別の表を作り直す
+function refreshDailyHours_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = getDailySheet_();
+  var set = "'" + REQUEST_SETTINGS_SHEET + "'!";
+  var hist = "'" + HISTORY_SHEET_NAME + "'!";
+  var keepYm = String(sheet.getRange('B2').getDisplayValue()).trim();
+  var keepRange = String(sheet.getRange(DAILY_RANGE_CELL).getDisplayValue()).trim();
+
+  // 手で書き込むところが無いシートなので、毎回まるごと作り直す。
+  // 結合は、部分的に選んでほどこうとするとエラーになるので1つずつほどく
+  sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).getMergedRanges()
+    .forEach(function(m) { try { m.breakApart(); } catch (e) {} });
+  sheet.clear();
+  sheet.setConditionalFormatRules([]);
+  sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns()).clearDataValidations();
+
+  sheet.getRange('A1')
+    .setFormula('=IF(' + set + REQUEST_STORE_NAME_CELL + '="","日別の勤務時間",' +
+      set + REQUEST_STORE_NAME_CELL + '&" 日別の勤務時間")')
+    .setFontWeight('bold').setFontSize(14);
+
+  // 対象年月
+  var months = monthChoices_();
+  sheet.getRange('A2').setValue('対象年月').setFontWeight('bold');
+  sheet.getRange('B2:F2').merge();
+  sheet.getRange('B2').setNumberFormat('@')
+    .setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(months, true).setAllowInvalid(false).build())
+    .setValue(months.indexOf(keepYm) >= 0 ? keepYm : months[12]);
+  sheet.getRange('H2').setValue('← シフトができている分だけ出ます');
+
+  // 区切り方（締め期間／暦の1日〜末日）
+  sheet.getRange('A3').setValue('区切り方').setFontWeight('bold');
+  sheet.getRange('B3:F3').merge();
+  sheet.getRange(DAILY_RANGE_CELL).setNumberFormat('@')
+    .setDataValidation(SpreadsheetApp.newDataValidation()
+      .requireValueInList([DAILY_RANGE_CALENDAR, DAILY_RANGE_CLOSING], true).setAllowInvalid(false).build())
+    .setValue(keepRange === DAILY_RANGE_CLOSING ? DAILY_RANGE_CLOSING : DAILY_RANGE_CALENDAR);
+
+  var calRef = '$' + DAILY_RANGE_CELL.charAt(0) + '$' + DAILY_RANGE_CELL.slice(1) + '="' + DAILY_RANGE_CALENDAR + '"';
+  sheet.getRange('H3').setFormula('=IF(' + calRef +
+    ',"← その月の1日〜末日で出します（店長・社員もそれ以外も同じ列）",' +
+    '"← 給与の締めで区切ります（店長・社員は16日〜15日のように、区分で始まりが変わります）")');
+
+  // 名簿の名前を、区分で2つに分ける
+  var newest = newestWeekSheet_(ss);
+  var names = (newest ? getRosterNames_(newest) : [])
+    .map(function(n) { return String(n).trim(); }).filter(function(n) { return n; });
+  var roles = getStaffRoles_();
+  function isEmployee(name) {
+    var kind = String(roles[name] || '').trim();
+    return kind === ROLE_MANAGER || kind === ROLE_EMPLOYEE;
+  }
+  var blocks = [
+    { title: '【' + ROLE_MANAGER + '・' + ROLE_EMPLOYEE + '】', closing: set + REQUEST_BASE_CLOSING_CELL,
+      names: names.filter(isEmployee) },
+    { title: '【それ以外（キャスト）】', closing: set + REQUEST_CAST_CLOSING_CELL,
+      names: names.filter(function(n) { return !isEmployee(n); }) }
+  ];
+
+  var year = 'VALUE(LEFT($B$2,4))', month = 'VALUE(MID($B$2,6,2))';
+  var rules = [];
+  var row = DAILY_FIRST_BLOCK_ROW;
+  blocks.forEach(function(b) {
+    b.nameTop = row + 3;                            // 名前が並びはじめる行（縦の表がここを見る）
+    b.nameEnd = row + 3 + b.names.length - 1;
+    row = writeDailyBlock_(sheet, b, row, hist, rules, year, month, calRef) + DAILY_BLOCK_GAP;
+  });
+  writeDailyJournalBlock_(sheet, blocks, row, hist, rules, year, month);
+  sheet.setConditionalFormatRules(rules);
+
+  sheet.setFrozenColumns(1);
+  sheet.setColumnWidth(1, 110);
+  sheet.setColumnWidths(DAILY_FIRST_COL, DAILY_DAYS, 34);
+  sheet.setColumnWidth(DAILY_COUNT_COL, 62);
+  sheet.setColumnWidth(DAILY_HOURS_COL, 70);
+  return sheet;
+}
+
+// 1つぶんの表を書く。返り値は、その表の最後の行
+// 期間（開始・終了）は、その表の見出しの行の右はし2マスに入れる。
+// 区切り方が「暦」なら その月の1日〜末日、「締め期間」なら 前月の締め日の翌日〜当月の締め日。
+function writeDailyBlock_(sheet, block, top, hist, rules, year, month, calRef) {
+  var startRef = '$' + colLetter_(DAILY_COUNT_COL) + '$' + top;
+  var endRef = '$' + colLetter_(DAILY_HOURS_COL) + '$' + top;
+  var dateRow = top + 1, dowRow = top + 2, firstRow = top + 3;
+  var count = block.names.length;
+  var totalRow = firstRow + count;
+
+  sheet.getRange(top, DAILY_COUNT_COL).setFormula('=IF(' + calRef +
+    ',DATE(' + year + ',' + month + ',1),DATE(' + year + ',' + month + '-1,VALUE(' + block.closing + '))+1)');
+  sheet.getRange(top, DAILY_HOURS_COL).setFormula('=IF(' + calRef +
+    ',EOMONTH(DATE(' + year + ',' + month + ',1),0),DATE(' + year + ',' + month + ',VALUE(' + block.closing + ')))');
+  sheet.getRange(top, DAILY_COUNT_COL, 1, 2)
+    .setNumberFormat('m/d').setFontColor('#777777').setHorizontalAlignment('center');
+
+  sheet.getRange(top, 1).setValue(block.title).setFontWeight('bold').setFontSize(12);
+  sheet.getRange(top, 2).setFormula('="期間 "&TEXT(' + startRef + ',"yyyy/m/d")&"〜"&TEXT(' + endRef + ',"yyyy/m/d")');
+
+  // 日付の行（本物の日付を入れて、表示は「日」だけにする）
+  var dateF = [], dowF = [];
+  for (var i = 0; i < DAILY_DAYS; i++) {
+    var here = colLetter_(DAILY_FIRST_COL + i);
+    var prev = colLetter_(DAILY_FIRST_COL + i - 1);
+    dateF.push(i === 0 ? '=' + startRef
+      : '=IF(' + prev + dateRow + '="","",IF(' + prev + dateRow + '+1>' + endRef + ',"",' + prev + dateRow + '+1))');
+    dowF.push('=IF(' + here + dateRow + '="","",CHOOSE(WEEKDAY(' + here + dateRow + '),"日","月","火","水","木","金","土"))');
+  }
+  sheet.getRange(dateRow, 1).setValue('名前');
+  sheet.getRange(dowRow, 1).setValue('曜日');
+  sheet.getRange(dateRow, DAILY_FIRST_COL, 1, DAILY_DAYS).setFormulas([dateF]).setNumberFormat('d');
+  sheet.getRange(dowRow, DAILY_FIRST_COL, 1, DAILY_DAYS).setFormulas([dowF]);
+  sheet.getRange(dateRow, DAILY_COUNT_COL).setValue('出勤日数');
+  sheet.getRange(dateRow, DAILY_HOURS_COL).setValue('合計時間');
+  sheet.getRange(dateRow, 1, 2, DAILY_HOURS_COL)
+    .setFontWeight('bold').setBackground('#EFF0ED').setHorizontalAlignment('center');
+  sheet.getRange(dateRow, 1, 2, 1).setHorizontalAlignment('left');
+
+  if (count) {
+    sheet.getRange(firstRow, 1, count, 1).setValues(block.names.map(function(n) { return [n]; }));
+    var body = block.names.map(function(name, k) {
+      var r = firstRow + k, out = [];
+      for (var i = 0; i < DAILY_DAYS; i++) {
+        var c = colLetter_(DAILY_FIRST_COL + i);
+        out.push('=IF(' + c + '$' + dateRow + '="","",SUMIFS(' + hist + '$H:$H,' +
+          hist + '$C:$C,$A' + r + ',' + hist + '$A:$A,' + c + '$' + dateRow + '))');
+      }
+      out.push('=COUNTIFS(' + hist + '$C:$C,$A' + r + ',' + hist + '$A:$A,">="&' + startRef +
+        ',' + hist + '$A:$A,"<="&' + endRef + ',' + hist + '$H:$H,">0")');
+      out.push('=SUMIFS(' + hist + '$H:$H,' + hist + '$C:$C,$A' + r + ',' +
+        hist + '$A:$A,">="&' + startRef + ',' + hist + '$A:$A,"<="&' + endRef + ')');
+      return out;
+    });
+    sheet.getRange(firstRow, DAILY_FIRST_COL, count, DAILY_DAYS + 2).setFormulas(body);
+  } else {
+    sheet.getRange(firstRow, 1).setValue('（この区分の人は名簿にいません）').setFontColor('#888888');
+  }
+
+  // いちばん下の合計（その日に店全体で何時間入っているか）
+  sheet.getRange(totalRow, 1).setValue('合計').setFontWeight('bold');
+  if (count) {
+    var totals = [];
+    for (var j = 0; j < DAILY_DAYS + 2; j++) {
+      var tc = colLetter_(DAILY_FIRST_COL + j);
+      totals.push('=SUM(' + tc + firstRow + ':' + tc + (totalRow - 1) + ')');
+    }
+    sheet.getRange(totalRow, DAILY_FIRST_COL, 1, DAILY_DAYS + 2).setFormulas([totals]);
+  }
+  sheet.getRange(totalRow, 1, 1, DAILY_HOURS_COL).setFontWeight('bold').setBackground('#F7F7F7');
+
+  // 0は出さない（空いている日が見てすぐ分かるように）
+  var bodyRows = totalRow - firstRow + 1;
+  sheet.getRange(firstRow, DAILY_FIRST_COL, bodyRows, DAILY_DAYS).setNumberFormat('0.0;-0.0;');
+  sheet.getRange(firstRow, DAILY_COUNT_COL, bodyRows, 1).setNumberFormat('0;-0;');
+  sheet.getRange(firstRow, DAILY_HOURS_COL, bodyRows, 1).setNumberFormat('0.0;-0.0;');
+  sheet.getRange(dateRow, 1, totalRow - dateRow + 1, DAILY_HOURS_COL)
+    .setBorder(true, true, true, true, true, true, '#CCCCCC', SpreadsheetApp.BorderStyle.SOLID);
+
+  // 土日に色を付ける（日付の行を見るので、対象年月や区切り方を変えても自動で付け替わる）
+  var area = sheet.getRange(dateRow, DAILY_FIRST_COL, totalRow - dateRow + 1, DAILY_DAYS);
+  var head = colLetter_(DAILY_FIRST_COL) + '$' + dateRow;
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND(' + head + '<>"",WEEKDAY(' + head + ')=1)')
+    .setBackground(DAILY_SUNDAY_BG).setRanges([area]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND(' + head + '<>"",WEEKDAY(' + head + ')=7)')
+    .setBackground(DAILY_SATURDAY_BG).setRanges([area]).build());
+
+  return totalRow;
+}
+
+/* 運営ジャーナル用の縦の表。
+   左に1日〜末日が並び、右に「パート（それ以外）」と「社員」の時間が出る。
+   運営ジャーナルは R=パート・S=社員 の順なので、C列とD列を2列まとめてそのまま写せる。
+   運営ジャーナルは暦の月で付けるので、区切り方（B3）に関係なく いつも1日〜末日で出す。 */
+function writeDailyJournalBlock_(sheet, blocks, top, hist, rules, year, month) {
+  var head = top + 1, firstRow = top + 2, lastRow = firstRow + DAILY_DAYS - 1;
+  var first = 'DATE(' + year + ',' + month + ',1)';
+  var last = 'EOMONTH(' + first + ',0)';
+  var emp = blocks[0];
+
+  sheet.getRange(top, 1).setValue(DAILY_JOURNAL_TITLE +
+    '　← パート（C列）を運営ジャーナルのR列、社員（D列）をS列へ。いつも1日〜末日で出します')
+    .setFontWeight('bold').setFontSize(12);
+
+  sheet.getRange(head, 1).setValue('日');
+  sheet.getRange(head, DAILY_JOURNAL_DOW_COL).setValue('曜日');
+  sheet.getRange(head, DAILY_JOURNAL_PART_COL).setValue('パート');
+  sheet.getRange(head, DAILY_JOURNAL_EMP_COL).setValue('社員');
+  sheet.getRange(head, DAILY_JOURNAL_SUM_COL).setValue('合計');
+  sheet.getRange(head, 1, 1, DAILY_JOURNAL_SUM_COL)
+    .setFontWeight('bold').setBackground('#EFF0ED').setHorizontalAlignment('center').setWrap(true);
+
+  // 社員（店長・社員）は人数が少ないので、名前ごとのSUMIFSを足していく
+  function empFormula(r) {
+    if (!emp.names.length) return '=IF($A' + r + '="","",0)';
+    var terms = [];
+    for (var k = 0; k < emp.names.length; k++) {
+      terms.push('SUMIFS(' + hist + '$H:$H,' + hist + '$C:$C,$A$' + (emp.nameTop + k) +
+        ',' + hist + '$A:$A,$A' + r + ')');
+    }
+    return '=IF($A' + r + '="","",' + terms.join('+') + ')';
+  }
+
+  var pc = colLetter_(DAILY_JOURNAL_PART_COL), ec = colLetter_(DAILY_JOURNAL_EMP_COL);
+  var sc = colLetter_(DAILY_JOURNAL_SUM_COL);
+  var body = [];
+  for (var i = 0; i < DAILY_DAYS; i++) {
+    var r = firstRow + i;
+    body.push([
+      '=IF(' + first + '+' + i + '>' + last + ',"",' + first + '+' + i + ')',
+      '=IF($A' + r + '="","",CHOOSE(WEEKDAY($A' + r + '),"日","月","火","水","木","金","土"))',
+      '=IF($A' + r + '="","",' + sc + r + '-' + ec + r + ')',          // パート＝その日ぜんぶ−社員
+      empFormula(r),
+      '=IF($A' + r + '="","",SUMIFS(' + hist + '$H:$H,' + hist + '$A:$A,$A' + r + '))'   // その日ぜんぶ
+    ]);
+  }
+  sheet.getRange(firstRow, 1, DAILY_DAYS, DAILY_JOURNAL_SUM_COL).setFormulas(body);
+  sheet.getRange(firstRow, 1, DAILY_DAYS, 2).setHorizontalAlignment('center');
+  sheet.getRange(firstRow, 1, DAILY_DAYS, 1).setNumberFormat('d');
+  sheet.getRange(firstRow, DAILY_JOURNAL_PART_COL, DAILY_DAYS, 3).setNumberFormat('0.0;-0.0;');
+  sheet.getRange(head, 1, DAILY_DAYS + 1, DAILY_JOURNAL_SUM_COL)
+    .setBorder(true, true, true, true, true, true, '#CCCCCC', SpreadsheetApp.BorderStyle.SOLID);
+
+  // 月の合計は、マスが細いと ##### になってしまうので、文字で下に出す
+  sheet.getRange(lastRow + 1, 1).setFormula('="月合計　パート "&TEXT(SUM(' + pc + firstRow + ':' + pc + lastRow +
+    '),"0.0")&" 時間　／　社員 "&TEXT(SUM(' + ec + firstRow + ':' + ec + lastRow + '),"0.0")&" 時間"')
+    .setFontWeight('bold');
+
+  // 土日に色を付ける（日付のマスを見るので、対象年月を変えても自動で付け替わる）
+  var area = sheet.getRange(firstRow, 1, DAILY_DAYS, DAILY_JOURNAL_SUM_COL);
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND($A' + firstRow + '<>"",WEEKDAY($A' + firstRow + ')=1)')
+    .setBackground(DAILY_SUNDAY_BG).setRanges([area]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND($A' + firstRow + '<>"",WEEKDAY($A' + firstRow + ')=7)')
+    .setBackground(DAILY_SATURDAY_BG).setRanges([area]).build());
+
+  return lastRow + 1;
+}
+
+// メニュー「日別の勤務時間を開く」
+function openDailyHours() {
+  var sheet = refreshDailyHours_();
+  SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(sheet);
 }
 
 function newestWeekSheet_(ss) {

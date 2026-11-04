@@ -1,0 +1,365 @@
+/*************************************************************
+ * 売上日報 月次シート 自動作成（仕事用Googleアカウントで使用）
+ *
+ * やること：毎月1日に「新しい月の空シート」を自動作成する。
+ *   ① 前月ファイル（＝売上日報フォルダの最新ファイル）をコピー
+ *      ※フォルダが空のときは SOURCE_FILE_ID（今の10月ファイル）を使う
+ *   ② 入力した数値をすべて消す（数式・ラベル・リストタブは残す）
+ *   ③ タブ「1」のA7に「その月の1日」を入れる（他タブは +1 で自動連動）
+ *   ④ 名前「売上日報(PL飯塚)○期○月」にしてマイドライブ「売上日報」へ保存
+ *
+ * ★事前準備（1回だけ）：
+ *   (1) エディタ左「サービス ＋」で「Drive API」を追加
+ *   (2) ⚙ プロジェクトの設定 → タイムゾーン を「(GMT+09:00) 東京」に
+ *       （毎月1日に正しく動かすため）
+ *
+ * 使い方：
+ *   今あるズレた11月を作り直す … rebuildThisMonth を1回実行
+ *   毎月の自動化              … installMonthlyTrigger を1回実行
+ *   （通常の今月作成は createThisMonth）
+ *************************************************************/
+
+// ▼ 設定（基本ここだけ） ---------------------------------------
+var STORE_LABEL    = 'PL飯塚';
+var FOLDER_NAME    = '売上日報';   // マイドライブ直下に作成／再利用
+var SOURCE_FILE_ID = '1ALONhSB3tb0SvkTtAK47jxX0yVRkBwak'; // 初回コピー元（10月ファイル）
+var TZ             = 'Asia/Tokyo'; // タイムゾーン（日付ズレ防止）
+// -----------------------------------------------------------
+
+// ▼ PDF印刷ボタン設定（会社で実物を見て微調整するのはここだけ） -----
+var PDF_RANGE     = 'A1:M44';  // 印刷する範囲。A〜I=日報本体 / J〜M=レシート貼付スペース。44=一番下の罫線まで含める。
+                               //   ★大きさ調整：右端の文字(M)を L寄りにすると本体が大きく(2ページに割れやすい)、
+                               //     N・O寄りにすると本体が小さく(確実に1ページ)なる。下の罫線が切れたら 44→45 に。
+var PDF_PORTRAIT  = true;      // 縦向き=true ／ 横向き=false。この日報は縦長なので縦向きが大きく出る
+var PDF_MARGIN    = 0.05;      // 余白(インチ)。四辺とも同じ。縦に収めるため詰めている。広げたい→0.1〜0.2
+var PDF_LINK_CELL = 'A47';     // 「クリックでPDF」リンクを置くセル。フォームの下(印刷範囲A1:S45の外)なので印刷物には写らない
+// -----------------------------------------------------------
+
+// 毎日「入力する」セル（＝ここを空にする）。数式・ラベルは触りません
+var CLEAR_RANGES = [
+  'C6',        // 作成者
+  'H6',        // 天気
+  'D9:D10',    // 税抜売上・消費税
+  'D13',       // 現金
+  'D15:D16',   // クレジット・電子マネー
+  'D19:D24',   // UberEats・出前館・（空欄）・500円金券の枚数
+  'D25:F30',   // ギフト券など
+  'D31',       // 掛売（最終行）
+  'D33',       // 銀行入金額（イオンへの実入金）
+  'C37',       // 客数
+  'D40:D41'    // ゆめポイント・8%対象額（値だけ。ラベルC40/C41は残す）
+];
+
+// 日付タブ（1〜31）。「ﾘｽﾄ」タブは対象外
+var DAY_TABS = (function(){ var a=[]; for (var i=1;i<=31;i++) a.push(String(i)); return a; })();
+
+
+/** 今、日本時間での「年・月」を返す（タイムゾーンのズレを防ぐ） */
+function ymNow_(){
+  var now = new Date();
+  return {
+    y: Number(Utilities.formatDate(now, TZ, 'yyyy')),
+    m: Number(Utilities.formatDate(now, TZ, 'M'))
+  };
+}
+
+/** 今月分を作る */
+function createThisMonth(){
+  var t = ymNow_();
+  var r = buildMonth_(t.y, t.m);
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
+/** 来月分を先に作りたいとき用 */
+function createNextMonth(){
+  var t = ymNow_();
+  var y = t.y, m = t.m + 1;
+  if (m > 12){ m = 1; y++; }
+  var r = buildMonth_(y, m);
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
+/** 【1回だけ使う】今月分の同名ファイルを一度ゴミ箱に入れ、作り直す（ズレ修正用） */
+function rebuildThisMonth(){
+  var t = ymNow_();
+  var name = fileNameFor_(t.y, t.m);
+  var files = DriveApp.getFilesByName(name);   // 同名を全部ゴミ箱へ
+  while (files.hasNext()) files.next().setTrashed(true);
+  var r = buildMonth_(t.y, t.m);
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
+/** 本体：指定した年月の「空シート」を作る */
+function buildMonth_(y, m){
+  var folder = getOrCreateFolder_(FOLDER_NAME);
+  var name   = fileNameFor_(y, m);
+
+  var exist = folder.getFilesByName(name);
+  if (exist.hasNext()){
+    return { ok:false, message:'すでに存在します：' + name, id:exist.next().getId() };
+  }
+
+  // コピー元（フォルダ内の最新 → 無ければ初回の10月ファイル）
+  var sourceId = latestFileIdInFolder_(folder) || SOURCE_FILE_ID;
+
+  // Googleスプレッドシートとしてコピー（共有ドライブ対応）
+  var copyId = Drive.Files.copy(
+    { name: name, parents: [folder.getId()], mimeType: 'application/vnd.google-apps.spreadsheet' },
+    sourceId,
+    { supportsAllDrives: true }
+  ).id;
+
+  var ss = SpreadsheetApp.openById(copyId);
+  ss.setSpreadsheetTimeZone(TZ);   // ★日付ズレ防止：シートの時間帯を東京に固定
+
+  // タブ「1」のゆめポイント/8%対象額の色を見本にして、全タブへそろえる
+  var s1ref = ss.getSheetByName('1');
+  var bg40 = s1ref ? s1ref.getRange('D40').getBackground() : null;
+  var bg41 = s1ref ? s1ref.getRange('D41').getBackground() : null;
+
+  for (var i=0; i<DAY_TABS.length; i++){
+    var sh = ss.getSheetByName(DAY_TABS[i]);
+    if (!sh) continue;
+    for (var j=0; j<CLEAR_RANGES.length; j++){
+      sh.getRange(CLEAR_RANGES[j]).clearContent();
+    }
+    sh.getRange('C40').setValue('ゆめﾎﾟｲﾝﾄ');
+    sh.getRange('C41').setValue('8%対象額');
+    if (bg40 && bg41) applyYumeOnSheet_(sh, bg40, bg41);  // D・E結合＋色を毎回そろえる
+    setJournalHelper_(sh);                                 // 運営ジャーナル転記用の1マス(Z1)
+    setPdfLink_(sh);                                        // 「クリックでPDF」リンク(A47)
+  }
+
+  // タブ「1」のA7に「その月の1日」を数式で入れる（タイムゾーンに左右されず確実）
+  var s1 = ss.getSheetByName('1');
+  if (s1){
+    s1.getRange('A7').setFormula('=DATE(' + y + ',' + m + ',1)');
+  }
+  SpreadsheetApp.flush();
+
+  return { ok:true, name:name, id:copyId, fromId:sourceId, folder:FOLDER_NAME };
+}
+
+/** マイドライブ直下のフォルダを取得（なければ作成） */
+function getOrCreateFolder_(nm){
+  var root = DriveApp.getRootFolder();      // ＝マイドライブ直下
+  var it = root.getFoldersByName(nm);
+  if (it.hasNext()) return it.next();
+  return root.createFolder(nm);
+}
+
+/** フォルダ内で「更新が一番新しい」GoogleスプレッドシートのIDを返す（無ければ null） */
+function latestFileIdInFolder_(folder){
+  var it = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+  var newest = null;
+  while (it.hasNext()){
+    var f = it.next();
+    if (!newest || f.getLastUpdated() > newest.getLastUpdated()) newest = f;
+  }
+  return newest ? newest.getId() : null;
+}
+
+/** ファイル名「売上日報(PL飯塚)○期○月」 */
+function fileNameFor_(y, m){
+  return '売上日報(' + STORE_LABEL + ')' + periodNum_(y, m) + '期' + m + '月';
+}
+
+/** 期（38期＝2026年10月〜2027年9月。毎年10月で +1） */
+function periodNum_(y, m){
+  var startYear = (m >= 10) ? y : y - 1;
+  return 38 + (startYear - 2026);
+}
+
+/** 毎月1日に自動実行するトリガーを設置（1回だけ実行すればOK） */
+function installMonthlyTrigger(){
+  var all = ScriptApp.getProjectTriggers();
+  for (var i=0; i<all.length; i++){
+    if (all[i].getHandlerFunction() === 'monthlyJob') ScriptApp.deleteTrigger(all[i]);
+  }
+  ScriptApp.newTrigger('monthlyJob').timeBased().onMonthDay(1).atHour(1).create();
+  return 'OK：毎月1日の午前1時台に、自動で新しい月を作ります';
+}
+
+/** トリガーから呼ばれる本番処理 */
+function monthlyJob(){
+  var t = ymNow_();
+  return buildMonth_(t.y, t.m);
+}
+
+
+/*************************************************************
+ * 【1回だけ使う】今あるファイルの全タブ(2〜31)に、
+ *   タブ「1」と同じ「ゆめポイント・8%対象額」の
+ *   D・E結合＋色 をそろえる。
+ *   ※タブ「1」を見本にするので、先にタブ「1」を手で仕上げておくこと。
+ *************************************************************/
+function applyYumeFormatToAllTabs(){
+  var t = ymNow_();
+  var name = fileNameFor_(t.y, t.m);
+  var folder = getOrCreateFolder_(FOLDER_NAME);
+  var it = folder.getFilesByName(name);
+  if (!it.hasNext()) return 'ファイルが見つかりません：' + name;
+
+  var ss  = SpreadsheetApp.openById(it.next().getId());
+  var s1  = ss.getSheetByName('1');
+  if (!s1) return 'タブ「1」が見つかりません';
+  var bg40 = s1.getRange('D40').getBackground();   // 見本の色
+  var bg41 = s1.getRange('D41').getBackground();
+
+  var n = 0;
+  for (var i=2; i<=31; i++){
+    var sh = ss.getSheetByName(String(i));
+    if (!sh) continue;
+    applyYumeOnSheet_(sh, bg40, bg41);
+    n++;
+  }
+  SpreadsheetApp.flush();
+  var msg = 'OK：' + n + 'タブに反映しました（' + name + '）';
+  Logger.log(msg);
+  return msg;
+}
+
+/** 1枚のタブに D40:E40 / D41:E41 の結合＋色を付ける（共通部品） */
+function applyYumeOnSheet_(sh, bg40, bg41){
+  var r40 = sh.getRange('D40:E40');
+  var r41 = sh.getRange('D41:E41');
+  r40.breakApart();            // 二重結合エラー防止（未結合でも無害）
+  r41.breakApart();
+  r40.merge().setBackground(bg40);
+  r41.merge().setBackground(bg41);
+}
+
+
+/*************************************************************
+ * 運営ジャーナル 転記用の「1マス」(Z1) をタブに付ける（共通部品）
+ *   Z1 に、その日の数値を「|」で1本につないだ文字列を作る。
+ *   並び順： 日 | 天候 | 税抜売上 | 客数 | 現金過不足 | UberEats | 出前館 | ゆめ | 8%対象額
+ *   使い方： このZ1をコピー → 運営ジャーナルの空きマスに貼付 → 記入スクリプトを実行。
+ *   ※Z列は印刷範囲の外（右のほう）なので、見た目・印刷に影響しません。
+ *************************************************************/
+function setJournalHelper_(sh){
+  sh.getRange('Z1').setFormula(
+    '=DAY($A$7)&"|"&$H$6&"|"&$D$9&"|"&$C$37&"|"&$D$35&"|"&$D$19&"|"&$D$20&"|"&$D$40&"|"&$D$41'
+  );
+}
+
+/** 【1回だけ使う】今あるファイルの全タブ(1〜31)にZ1の転記用1マスを付ける */
+function addJournalHelperToAllTabs(){
+  var t = ymNow_();
+  var name = fileNameFor_(t.y, t.m);
+  var folder = getOrCreateFolder_(FOLDER_NAME);
+  var it = folder.getFilesByName(name);
+  if (!it.hasNext()) return 'ファイルが見つかりません：' + name;
+
+  var ss = SpreadsheetApp.openById(it.next().getId());
+  var n = 0;
+  for (var i=1; i<=31; i++){
+    var sh = ss.getSheetByName(String(i));
+    if (!sh) continue;
+    setJournalHelper_(sh);
+    n++;
+  }
+  SpreadsheetApp.flush();
+  var msg = 'OK：' + n + 'タブにZ1(転記用1マス)を付けました（' + name + '）';
+  Logger.log(msg);
+  return msg;
+}
+
+
+/*************************************************************
+ * 「クリックでPDF（印刷用）」リンク（各タブの A47＝フォームの下）
+ *   クリックすると、そのタブを「決まった範囲・余白」でPDF化して開く。
+ *   ・範囲を PDF_RANGE(A1:S45) に固定するので、右のZ1(転記用)等は入らない
+ *   ・ログイン中のブラウザで開くので、承認画面は出ない
+ *   ・リンクは印刷範囲(A1:S45)の外に置くので、PDF・印刷物には写りません
+ *************************************************************/
+
+/** PDF書き出しURLを作る（このファイル自身の・指定タブgidの・固定範囲） */
+function buildPdfUrl_(ssId, gid){
+  var p = {
+    format:'pdf', gid:String(gid), range:PDF_RANGE, size:'A4',
+    portrait: PDF_PORTRAIT ? 'true' : 'false',
+    fitw:'true',            // 幅をページに合わせる（毎回同じ大きさ）
+    gridlines:'false', printtitle:'false', sheetnames:'false',
+    pagenumbers:'false', fzr:'false',
+    top_margin:String(PDF_MARGIN), bottom_margin:String(PDF_MARGIN),
+    left_margin:String(PDF_MARGIN), right_margin:String(PDF_MARGIN),
+    horizontal_alignment:'CENTER', vertical_alignment:'TOP'
+  };
+  var parts = [];
+  for (var k in p) parts.push(k + '=' + encodeURIComponent(p[k]));
+  return 'https://docs.google.com/spreadsheets/d/' + ssId + '/export?' + parts.join('&');
+}
+
+/** 1枚のタブの指定セルに「クリックでPDF」リンクを置く（共通部品） */
+function setPdfLink_(sh){
+  // 以前の置き場所(M1)に残った古いリンクを消す（新しい印刷範囲A1:S45の中に入って写ってしまうため）
+  sh.getRange('M1').clearContent();
+  var url = buildPdfUrl_(sh.getParent().getId(), sh.getSheetId());
+  sh.getRange(PDF_LINK_CELL)
+    .setFormula('=HYPERLINK("' + url + '","クリックでPDF（印刷用）")');
+}
+
+/** 【1回だけ使う】今あるファイルの全タブ(1〜31)にPDFリンクを付ける */
+function addPdfLinkToAllTabs(){
+  var t = ymNow_();
+  var name = fileNameFor_(t.y, t.m);
+  var folder = getOrCreateFolder_(FOLDER_NAME);
+  var it = folder.getFilesByName(name);
+  if (!it.hasNext()) return 'ファイルが見つかりません：' + name;
+
+  var ss = SpreadsheetApp.openById(it.next().getId());
+  var n = 0;
+  for (var i=1; i<=31; i++){
+    var sh = ss.getSheetByName(String(i));
+    if (!sh) continue;
+    setPdfLink_(sh);
+    n++;
+  }
+  SpreadsheetApp.flush();
+  var msg = 'OK：' + n + 'タブにPDFリンク(' + PDF_LINK_CELL + ')を付けました（' + name + '）';
+  Logger.log(msg);
+  return msg;
+}
+
+
+/*************************************************************
+ * 【ウェブアプリ】開くと必ず「今月の売上日報」に飛ぶ入口。
+ *   このURLをお気に入りに1個だけ入れておけば、毎月の入れ替え不要。
+ *   クリックすると、その月のファイルが自動で開く。
+ *   （今月ファイルがまだ無いときは「売上日報」フォルダを開く）
+ *
+ * ★使うには「デプロイ → 新しいデプロイ → ウェブアプリ」でURLを発行する。
+ *   実行ユーザー＝自分／アクセスできるユーザー＝自分のみ でOK。
+ *************************************************************/
+function doGet(e){
+  var t = ymNow_();
+  var name = fileNameFor_(t.y, t.m);
+  var folder = getOrCreateFolder_(FOLDER_NAME);
+  var it = folder.getFilesByName(name);
+
+  var url;
+  if (it.hasNext()){
+    url = it.next().getUrl();                                   // 今月のファイルを開く
+  } else {
+    url = 'https://drive.google.com/drive/folders/' + folder.getId(); // 無ければフォルダ
+  }
+  var safe = String(url).replace(/"/g, '');
+
+  var html = '<!DOCTYPE html><html><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    + '<script>try{window.top.location.href="' + safe + '";}catch(e){}</script>'
+    + '<style>body{font-family:sans-serif;margin:0;min-height:100vh;display:flex;'
+    + 'flex-direction:column;align-items:center;justify-content:center;background:#f7f7f7}'
+    + 'a.btn{display:inline-block;padding:20px 32px;background:#1a73e8;color:#fff;'
+    + 'text-decoration:none;border-radius:12px;font-size:20px;font-weight:bold}'
+    + 'p{color:#666;font-size:14px;margin-top:16px}</style></head>'
+    + '<body><a class="btn" href="' + safe + '" target="_top">今月の売上日報を開く</a>'
+    + '<p>タップで開きます</p></body></html>';
+
+  return HtmlService.createHtmlOutput(html)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}

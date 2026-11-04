@@ -233,11 +233,11 @@ function onOpen() {
     .addSubMenu(uiCost.createMenu('月次の保存・履歴')
       .addItem('先月分の理論原価を今すぐ保存する', 'saveLastMonthCostSnapshotNow')
       .addItem('過去の全月をまとめて保存する（コード削除の前に推奨）', 'saveAllMonthlyCostSnapshots')
-      .addItem('履歴の理論原価を再計算して上書きする（食材の復元後・実原価は保持）', 'refreshTheoreticalCostHistory')
-      .addItem('毎月1日の自動保存をONにする', 'installMonthlyCostSnapshotTrigger'))
+      .addItem('履歴の理論原価を再計算して上書きする（食材の復元後・実原価は保持）', 'refreshTheoreticalCostHistory'))
     .addSubMenu(uiCost.createMenu('実際原価（納品データ）')
       .addItem('★今月やる原価作業をチェックする（不足＋手順を表示）', 'checkMonthlyCostTasksNow')
-      .addItem('納品データCSVを取り込む（商品別棚卸高→納品実績）', 'importDeliveryInventoryCsv')
+      .addItem('納品データCSVを取り込む（商品別棚卸高→納品実績。取込だけで実際原価率まで自動更新）', 'importDeliveryInventoryCsv')
+      .addItem('★取込のあとの更新をまとめて実行する（実際原価率＋実損＋ドリンク）', 'runPostDeliveryUpdates')
       .addItem('実際原価率を反映する（納品実績→原価月次履歴）', 'updateActualCostFromDelivery')
       .addItem('CPから原価戻し対象を取り込む（対象商品を自動登録）', 'importCpRebateTargets')
       .addItem('原価戻しの予測を更新する（実額が無い月の当たりを付ける）', 'updatePredictedRebateNow')
@@ -258,7 +258,6 @@ function onOpen() {
       .addItem('商品マスタを商品コード順に整える＋罫線（食材マスタも罫線）', 'tidyMasterSheets')
       .addItem('コードの稼働を点検する（旧コード・再利用・切替を検出）', 'buildCodeUsageCheck')
       .addItem('整合性チェック（断線を全件検出）を今すぐ実行する', 'buildIntegrityAudit')
-      .addItem('クロ・バラの旧コード取り残しを直す（重大断線の修復）', 'repairMeatBaraClodRefs_2026')
       .addItem('本部のメニューコード振り直しを登録する（新コードを旧からコピー）', 'registerMenuCodeSwitch2026_10')
       // 予測と発注の見張りは毎朝8:10に自動実行（dailyForecastOrderWatchdog）＝メニューには出さない。結果は『見張りログ』。MARKER_FORECAST_ORDER_WATCHDOG
       .addItem('仕込みマスタの参照を切替に合わせて修復する（合算コード・品目コードの取り残し）', 'repairPrepComposites')
@@ -311,7 +310,6 @@ function onOpen() {
     { name: '⚠️ 今すぐデータ復旧（天候・売上・予測が止まった時）', functionName: 'recoverDailyJobsNow' },
     { name: '取込漏れを復旧する（過去の売上1位など欠落分をCSVから補完）', functionName: 'reimportMissingDetailRows' },
     { name: '大口（単一客の大量注文）を予測から除外する設定', functionName: 'registerBulkExclusion' },
-    { name: '食材マスタに使用休止日/再開日の欄を用意＋今回の改定分を記入（QP胡麻ドレ・さつまいも）', functionName: 'registerDiscontinuedIngredients' },
     { name: 'データの新しさを今すぐチェック', functionName: 'checkDataFreshnessAlert' },
     { name: '未登録通知をリセット（登録済みなのに通知が来る時）', functionName: 'resetUnregisteredMenuWatch' },
     { name: '未登録通知の原因を診断する（登録済みなのに通知が続く時）', functionName: 'debugUnregisteredNow' },
@@ -3764,7 +3762,9 @@ function buildSalesForecast() {
   try { if (ss.getSheetByName(SEASONAL_HIST_SHEET_)) calendarAutoStep_(ss); } catch (e) { console.log('カレンダー検定をスキップ: ' + e); }   // 給料日/月末等を自動検定→有意なら通知。MARKER_CALENDAR_EFFECT
   try { buildCpProductActualsCore_(ss); } catch (e) { console.log('CP商品実績の自動更新をスキップ: ' + e); }   // CP商品実績シートを毎日の予測更新で自動最新化(直近90日)。MARKER_CP_PRODUCT_ACTUALS
   try { if (ss.getSheetByName('商品分析')) buildProductAnalysisCore_(ss, false); } catch (e) { console.log('商品分析の自動更新をスキップ: ' + e); }   // 既に商品分析があれば毎朝の予測更新で当月/前月を最新化。MARKER_PRODUCT_ANALYSIS
-  try { const dsh = ss.getSheetByName(DASHBOARD_SHEET_); if (dsh) buildDashboardData_(ss, dsh); } catch (e) { console.log('ダッシュボードの自動更新をスキップ: ' + e); }   // 既にダッシュボードがあれば毎朝の予測更新で数値を最新化(グラフは範囲追従)。MARKER_DASHBOARD
+  // 数値を最新化し、グラフも毎朝作り直して“自己修復”する。月初に実績列が空のままグラフが作られると実績累計の系列設定(右軸)が外れ、
+  //   以後は数値を更新してもグラフがズレたまま固定される（毎朝はデータしか直さなかった）。毎朝作り直せば翌朝には必ず直る。MARKER_DASH_CHART_SELFHEAL
+  try { const dsh = ss.getSheetByName(DASHBOARD_SHEET_); if (dsh) { const _dm = buildDashboardData_(ss, dsh); try { buildDashboardCharts_(dsh, _dm); } catch (e3) { console.log('ダッシュボードのグラフ自己修復をスキップ: ' + e3); } } } catch (e) { console.log('ダッシュボードの自動更新をスキップ: ' + e); }   // MARKER_DASHBOARD
 
   if (newProductList.length > 0) writeNewProductEstimates_(ss, newProductList, estDailyDishes, today, avgCustomers);
 
@@ -4363,6 +4363,19 @@ function buildDashboardData_(ss, sh) {
   });
   const spdYtd = ytdCust > 0 ? ytdSales / ytdCust : 0, spdLyYtd = lyYtdCust > 0 ? lyYtdSales / lyYtdCust : 0;
 
+  // 前年同月の売上（丸ごと・暦月）＝過去売上履歴を優先、無ければ日次実績。先月の前年同月・今月の前年同月（着地と比べる）。MARKER_DASH_PREV_YEAR_MONTH
+  const sumPrevYearMonth_ = (targetYear, targetMonth0) => {
+    const py = targetYear - 1; const dim = new Date(py, targetMonth0 + 1, 0).getDate(); let t = 0, has = false;
+    for (let dd = 1; dd <= dim; dd++) {
+      const key = dstr(new Date(py, targetMonth0, dd));
+      if (histByDate[key] != null) { t += histByDate[key] || 0; has = true; }
+      else if (salesByDate[key] != null) { t += salesByDate[key] || 0; has = true; }
+    }
+    return has ? t : '';
+  };
+  const lyLastMo = sumPrevYearMonth_(lastMoDate.getFullYear(), lastMoDate.getMonth());   // 先月(例2026/10)の前年同月(2025/10)
+  const lyThisMo = sumPrevYearMonth_(y, moIdx);                                          // 今月(例2026/11)の前年同月(2025/11)
+
   // 原価率（原価月次履歴：A年月 / D理論原価率 / L実際原価率）
   const costTrend = []; let theoRate = '', actRate = '', costYm = '';
   const ch = ss.getSheetByName('原価月次履歴');
@@ -4393,7 +4406,7 @@ function buildDashboardData_(ss, sh) {
     let curName = null;
     cp.getRange(2, 1, cp.getLastRow() - 1, 9).getValues().forEach(r => {
       const a = String(r[0] || '').trim();
-      if (a.indexOf('CP計') >= 0) { if (curName) cpRatio[curName] = Number(r[6]) || 0; curName = null; } else if (a) curName = a;
+      if (a.indexOf('CP計') >= 0) { if (curName) { const rv = Number(r[6]) || 0; cpRatio[curName] = rv; cpRatio[cpGroupKey_(curName)] = rv; } curName = null; } else if (a) curName = a;   // くくりキーでも引けるようにMARKER_DASH_CAMP_GROUP
     });
   }
   const fomStr = dstr(new Date(y, moIdx, 1)), eomStr = dstr(new Date(y, moIdx + 1, 0));
@@ -4404,25 +4417,34 @@ function buildDashboardData_(ss, sh) {
   { const t29 = new Date(y, moIdx, 29); t29.setHours(0, 0, 0, 0); if (t29 < today) nikuCand.push(ym); }
   const nikuYms = nikuCand.slice(-2);
   let nikuRatios = {}; try { nikuRatios = nikuDayRatios_(ss, nikuYms); } catch (e) { console.log('肉の日(月別)の算出をスキップ: ' + e); }
-  // 今月のキャンペーン：フィレ3サイズは1つに合算・肉の日は29日の月別で別掲
-  const campList = [];
-  const fillet = { has: false, ratio: 0, s: null, e: null };
-  const gari = { has: false, n: 0, ratio: 0, s: null, e: null };   // スーパーガリマヨPRはサイズ違いで4行→1行に合算。MARKER_DASH_GARI_COMBINE
+  // 今月のキャンペーン：同じくくり（サイズ・盛り違い）は1行に合算（cpGroupKey_で判定）・肉の日は29日の月別で別掲。MARKER_DASH_CAMP_GROUP
+  const campGroups = {};
   const cpset = ss.getSheetByName('CP設定');
   if (cpset && cpset.getLastRow() > 1) cpset.getRange(2, 1, cpset.getLastRow() - 1, 9).getValues().forEach(r => {
     const name = String(r[0] || '').trim(); if (!name) return;
     const kind = String(r[8] || '').trim(); if (kind === '除外' || kind === '休止') return;
     if (name.indexOf('肉の日') === 0) return;   // 肉の日は29日の月別で別掲（下で追加）
     const s = toStr(r[1]), e = toStr(r[2]), repeat = String(r[6] || '').trim();
+    // 新商品（恒久メニュー）はキャンペーンではない。発注・予測・仕込みに乗せるためCP設定へ登録しているが、終了日を遠い未来(例2030年)にした“終わらないCP”＝実質恒久商品。
+    //   「(新商品)」命名、または終了日が約1年より先のものは『今月のキャンペーン』一覧から除外（表示だけ・発注等には引き続き効かせる）。MARKER_DASH_CAMP_EXCLUDE_NEWPROD
+    const longFutureStr = dstr(new Date(y, moIdx + 13, 0));   // 今月末の約1年後
+    if (name.indexOf('(新商品)') >= 0 || name.indexOf('（新商品）') >= 0 || (e && e > longFutureStr)) return;
     const inMonth = (repeat && !s && !e) ? true : ((!s || s <= eomStr) && (!e || e >= fomStr));
     if (!inMonth) return;
-    const ratio = (cpRatio[name] !== undefined ? cpRatio[name] : '');
-    if (/ﾌｨﾚｽﾃｰｷ|フィレステーキ/.test(name)) { fillet.has = true; fillet.ratio += (Number(ratio) || 0); if (s && (!fillet.s || s < fillet.s)) fillet.s = s; if (e && (!fillet.e || e > fillet.e)) fillet.e = e; return; }
-    if (/ｶﾞﾘﾏﾖ|ガリマヨ/.test(name)) { gari.has = true; gari.n++; gari.ratio += (Number(ratio) || 0); if (s && (!gari.s || s < gari.s)) gari.s = s; if (e && (!gari.e || e > gari.e)) gari.e = e; return; }   // ガリマヨ各サイズを合算。MARKER_DASH_GARI_COMBINE
-    campList.push([name, (s || (repeat ? repeat : '—')) + (e ? ('〜' + e) : (s ? '〜' : '')), ratio]);
+    const gk = cpGroupKey_(name);
+    const g = campGroups[gk] || (campGroups[gk] = { names: [], n: 0, s: null, e: null, repeat: '' });
+    g.names.push(name); g.n++;
+    if (s && (!g.s || s < g.s)) g.s = s;
+    if (e && (!g.e || e > g.e)) g.e = e;
+    if (repeat && !g.repeat) g.repeat = repeat;
   });
-  if (fillet.has) campList.push(['フィレステーキ(3種合計)', (fillet.s || '—') + '〜' + (fillet.e || ''), fillet.ratio]);
-  if (gari.has) campList.push(['スーパーガリマヨPR(' + gari.n + '種合計)', (gari.s || '—') + '〜' + (gari.e || ''), gari.ratio]);
+  const campList = Object.keys(campGroups).map(gk => {
+    const g = campGroups[gk];
+    const label = g.n >= 2 ? (gk + '(' + g.n + '種合計)') : g.names[0];   // 2種以上だけ「くくり(N種合計)」・単独は元の名前のまま
+    const ratio = (cpRatio[gk] !== undefined ? cpRatio[gk] : (cpRatio[g.names[0]] !== undefined ? cpRatio[g.names[0]] : ''));
+    const period = (g.s || (g.repeat ? g.repeat : '—')) + (g.e ? ('〜' + g.e) : (g.s ? '〜' : ''));
+    return [label, period, ratio];
+  });
   campList.sort((a, b) => (Number(b[2]) || 0) - (Number(a[2]) || 0));
   const nikuRows = nikuYms.map(m => ['肉の日(' + Number(m.slice(5, 7)) + '月29日)', m + '/29', (nikuRatios[m] !== undefined && nikuRatios[m] !== '' ? nikuRatios[m] : '')]);
 
@@ -4459,13 +4481,20 @@ function buildDashboardData_(ss, sh) {
   sh.getRange('A2').setValue('更新: ' + Utilities.formatDate(new Date(), tz, 'yyyy/MM/dd HH:mm') + '　金額は千円単位' + (noBudget ? '　※当月の予算が未登録（月予算配分で対象月を' + ym + 'にして実行すると予算比が出ます）' : '（予算：' + budgetSrc + '）'));
 
   // 左（A〜D）：売上（今月＋先月を横並び／直近1週間／区分別＝1日平均）＋廃棄。すべて表形式・千円。MARKER_DASH_THIS_LAST_MONTH
+  const pyLastLabel = (lastMoDate.getFullYear() - 1) + '/' + ('0' + (lastMoDate.getMonth() + 1)).slice(-2);   // 先月の前年同月ラベル(例 2025/10)
+  const pyThisLabel = (y - 1) + '/' + ('0' + (moIdx + 1)).slice(-2);                                          // 今月の前年同月ラベル(例 2025/11)
+  const yoyLast = (lyLastMo !== '' && lyLastMo > 0) ? lastMoSales / lyLastMo : '';   // 先月 前年比(実績/前年)
+  const yoyThis = (lyThisMo !== '' && lyThisMo > 0) ? landing / lyThisMo : '';       // 今月 前年比(着地/前年)
   const blkA = [
     ['【先月（' + lastMoLabel + '）】', '', '【今月（' + moLabel + '）】', ''],
     ['予算', (budgetLastTotal > 0 ? k(budgetLastTotal) : ''), '予算', (noBudget ? '' : k(budgetTotal))],
     ['実績(全日)', k(lastMoSales), '実績(〜昨日)', k(mtdSales)],
     ['達成率(実績/予算)', (budgetLastTotal > 0 ? lastMoSales / budgetLastTotal : ''), '予測着地', k(landing)],
-    ['', '', '達成率(着地/予算)', (noBudget ? '' : landing / budgetTotal)],
+    ['前年同月(' + pyLastLabel + ')', (lyLastMo === '' ? '' : k(lyLastMo)), '達成率(着地/予算)', (noBudget ? '' : landing / budgetTotal)],
+    ['前年比(実績/前年)', yoyLast, '前年同月(' + pyThisLabel + ')', (lyThisMo === '' ? '' : k(lyThisMo))],
+    ['', '', '前年比(着地/前年)', yoyThis],
     ['', '', '当月累計予算比(〜昨日)', (noBudget ? '' : mtdBudgetRatio)],
+    ['', '', '', ''],
     ['【直近1週間】', '', '', ''],
     ['予算', (noBudget ? '' : k(wkBud)), '', ''],
     ['実績', k(wkAct), '', ''],
@@ -4479,26 +4508,30 @@ function buildDashboardData_(ss, sh) {
   ];
   sh.getRange(4, 1, blkA.length, 4).setValues(blkA);
   sh.getRange(4, 1).setFontWeight('bold'); sh.getRange(4, 3).setFontWeight('bold');
-  [10, 15].forEach(rr => sh.getRange(rr, 1).setFontWeight('bold'));
-  sh.getRange(16, 1, 1, 4).setFontWeight('bold').setBackground('#e8eaed');   // 区分別ヘッダ
-  sh.getRange(5, 2, 2, 1).setNumberFormat('#,##0');      // 先月 予算/実績（左）
-  sh.getRange(7, 2).setNumberFormat('0.0%');             // 先月 達成率(実績/予算)（左）
-  sh.getRange(5, 4, 3, 1).setNumberFormat('#,##0');      // 今月 予算/実績/着地（右）
-  sh.getRange(8, 4).setNumberFormat('0.0%');             // 今月 達成率(着地/予算)（右）
-  sh.getRange(9, 4).setNumberFormat('0.0%');             // 今月 当月累計予算比(〜昨日)（右）
-  sh.getRange(11, 2, 2, 1).setNumberFormat('#,##0');     // 直近1週間 予算/実績
-  sh.getRange(13, 2).setNumberFormat('0.0%');            // 予算比
-  sh.getRange(17, 2, 3, 3).setNumberFormat('#,##0');     // 区分別 昨年/予算/実績（1日平均）
+  sh.getRange(13, 1).setFontWeight('bold'); sh.getRange(18, 1).setFontWeight('bold');   // 直近1週間／区分別タイトル
+  sh.getRange(19, 1, 1, 4).setFontWeight('bold').setBackground('#e8eaed');   // 区分別ヘッダ
+  sh.getRange(5, 2, 2, 1).setNumberFormat('#,##0');      // 先月 予算/実績
+  sh.getRange(7, 2).setNumberFormat('0.0%');             // 先月 達成率(実績/予算)
+  sh.getRange(8, 2).setNumberFormat('#,##0');            // 先月 前年同月
+  sh.getRange(9, 2).setNumberFormat('0.0%');             // 先月 前年比
+  sh.getRange(5, 4, 3, 1).setNumberFormat('#,##0');      // 今月 予算/実績/着地
+  sh.getRange(8, 4).setNumberFormat('0.0%');             // 今月 達成率(着地/予算)
+  sh.getRange(9, 4).setNumberFormat('#,##0');            // 今月 前年同月
+  sh.getRange(10, 4).setNumberFormat('0.0%');            // 今月 前年比(着地/前年)
+  sh.getRange(11, 4).setNumberFormat('0.0%');            // 今月 当月累計予算比(〜昨日)
+  sh.getRange(14, 2, 2, 1).setNumberFormat('#,##0');     // 直近1週間 予算/実績
+  sh.getRange(16, 2).setNumberFormat('0.0%');            // 予算比
+  sh.getRange(20, 2, 3, 3).setNumberFormat('#,##0');     // 区分別 昨年/予算/実績（1日平均）
   // 左下：廃棄（円）＝今月・先月の月単位＋理由別。MARKER_DASH_WASTE_MONTHLY
-  sh.getRange(21, 1).setValue('【廃棄】').setFontWeight('bold');
-  sh.getRange(22, 1, 8, 2).setValues([
+  sh.getRange(24, 1).setValue('【廃棄】').setFontWeight('bold');
+  sh.getRange(25, 1, 8, 2).setValues([
     ['先月（' + lastMoLabel + '）', wasteLastMonth],
     ['　期限切れ', wasteReason['期限切れ'] || 0], ['　筋取り', wasteReason['筋取り'] || 0], ['　調理ミス', wasteReason['調理ミス'] || 0],
     ['今月（' + moLabel + '）', wasteMonth],
     ['　期限切れ', wasteReasonThis['期限切れ'] || 0], ['　筋取り', wasteReasonThis['筋取り'] || 0], ['　調理ミス', wasteReasonThis['調理ミス'] || 0]
   ]);
-  sh.getRange(22, 2, 8, 1).setNumberFormat('#,##0"円"');
-  sh.getRange(22, 1).setFontWeight('bold'); sh.getRange(26, 1).setFontWeight('bold');
+  sh.getRange(25, 2, 8, 1).setNumberFormat('#,##0"円"');
+  sh.getRange(25, 1).setFontWeight('bold'); sh.getRange(29, 1).setFontWeight('bold');
 
   // 右（F〜I）：予測精度・原価率・客数客単価(昨年比・今月＋今年累計)・今月のキャンペーン・その他イベント
   sh.getRange(4, 6).setValue('予測精度(直近7日)').setFontWeight('bold'); sh.getRange(4, 7).setValue(errAvg).setNumberFormat('0.0%');
@@ -4530,8 +4563,9 @@ function buildDashboardData_(ss, sh) {
   // ▼ グラフの元データ（通常は見なくてOK）＝80行目以降にまとめる。上部には出さない＝“2か所表示”を解消。
   const D0 = DASH_DATA_TOP_;   // 元データ先頭行（全グラフより下）
   sh.getRange(D0 - 1, 1).setValue('▼ 以下はグラフの元データです（通常は見なくてOK）').setFontColor('#999999').setFontStyle('italic');
-  // 補助表①：当月 日別（予算/実績/実績累計/予算累計）＝A〜E(D0行目〜)。単位は千円(÷1000)＝「85」の形。実績=青ヘッダ。
-  const dayTab = [['日', '予算(千円)', '実績(千円)', '予測(千円)', '実績累計(千円)', '予算累計(千円)', '予測累計(千円)']];   // 予測＋予測累計を追加。MARKER_DASH_DAILY_FORECAST
+  // 補助表①：当月 日別。列順＝日/予算/予測/予算累計/予測累計/実績/実績累計。単位は千円(÷1000)＝「85」の形。
+  //   ★実績・実績累計は月初は空。空列が途中にあるとSheetsが系列を詰めて色設定がズレるので、空になりがちな実績系を末尾に置く。MARKER_DASH_ACTUAL_LAST
+  const dayTab = [['日', '予算(千円)', '予測(千円)', '予算累計(千円)', '予測累計(千円)', '実績(千円)', '実績累計(千円)']];   // 予測＋予測累計を追加。MARKER_DASH_DAILY_FORECAST
   let cumA = 0, cumB = 0, cumF = 0;
   for (let dn = 1; dn <= daysInMonth; dn++) {
     const ds = dstr(new Date(y, moIdx, dn));
@@ -4541,19 +4575,26 @@ function buildDashboardData_(ss, sh) {
     if (a !== '') cumA += a;
     if (bud !== '') cumB += bud;
     if (fcv !== '') cumF += fcv;
-    dayTab.push([String(dn), kt(bud), kt(a), kt(fcv), (a !== '' ? kt(cumA) : ''), (bud !== '' ? kt(cumB) : ''), (fcv !== '' ? kt(cumF) : '')]);   // 日は文字＝横軸を分類扱いにして毎日ラベルを出す(数値だと連続軸で間引かれる)。MARKER_DASH_XAXIS_EVERYDAY。kt()=千円単位(÷1000)
+    // 列順：日, 予算, 予測, 予算累計, 予測累計, 実績, 実績累計
+    dayTab.push([String(dn), kt(bud), kt(fcv), (bud !== '' ? kt(cumB) : ''), (fcv !== '' ? kt(cumF) : ''), kt(a), (a !== '' ? kt(cumA) : '')]);   // 日は文字＝横軸を分類扱いにして毎日ラベルを出す(数値だと連続軸で間引かれる)。MARKER_DASH_XAXIS_EVERYDAY。kt()=千円単位(÷1000)
   }
   sh.getRange(D0, 1, dayTab.length, 1).setNumberFormat('@');   // 先に日列を文字書式(@)に固定＝「1」が数値に戻らず分類軸になる（毎日ラベルが出る）。MARKER_DASH_XAXIS_EVERYDAY
   sh.getRange(D0, 1, dayTab.length, 7).setValues(dayTab);
   sh.getRange(D0 + 1, 2, daysInMonth, 6).setNumberFormat('#,##0');
   sh.getRange(D0, 1, 1, 7).setFontWeight('bold');
-  sh.getRange(D0, 3).setBackground('#cfe2f3');   // 実績＝青
+  sh.getRange(D0, 6).setBackground('#cfe2f3');   // 実績＝青（列順変更で6列目に移動）
   // 補助表②：原価率の推移（2026/05以降）＝I〜K(D0行目〜)。日別表がA〜Gに拡張したため右へずらす。
   const ymNum = s => { const m = String(s).replace(/-/g, '/').match(/(\d{4})\/(\d{1,2})/); return m ? Number(m[1]) * 100 + Number(m[2]) : 0; };
   const costTab = [['月', '理論原価率', '実際原価率']].concat(costTrend.filter(r => ymNum(r[0]) >= 202605));
   sh.getRange(D0, 9, costTab.length, 3).setValues(costTab);
   if (costTab.length > 1) sh.getRange(D0 + 1, 10, costTab.length - 1, 2).setNumberFormat('0.0%');
   sh.getRange(D0, 9, 1, 3).setFontWeight('bold');
+  // グラフ縦軸は固定35〜45%だと、実際原価率が45%を超えた月(8月45.9%/9月45.5%)が天井で切れて赤線が消える。
+  //   データの最小・最大から自動で窓を決める＝今後どんな値でも切れない“自己修復”。0.05刻みに丸め、±0.02の余白で点やラベルがはみ出さない。MARKER_DASH_COST_AXIS_AUTO
+  let costMin = 1, costMax = 0;
+  costTab.slice(1).forEach(r => { [r[1], r[2]].forEach(v => { if (v !== '' && v !== null && !isNaN(v)) { if (v < costMin) costMin = v; if (v > costMax) costMax = v; } }); });
+  if (costMax <= costMin) { costMin = 0.35; costMax = 0.45; }   // データ無し等の保険
+  else { costMin = Math.max(0, Math.floor((costMin - 0.02) * 20) / 20); costMax = Math.ceil((costMax + 0.02) * 20) / 20; }
   // 補助表③：廃棄の品目別内訳（直近28日・円）＝M列〜(D0行目〜)。品目(行)×理由(列)の積み上げ用。（日別表拡張で右へずらす）
   //   品目を「行(＝グラフの縦軸ラベル)」にする＝食材名が軸ラベルとして必ず表示される（右凡例だと文字が切れて出ないSheetsの癖を回避）。棒の色=理由。MARKER_DASH_WASTE_ITEM_ROWS
   //   先頭セルは空＝グラフが「1行目＝系列名(理由)」「1列目＝分類(品目)」と正しく認識する。MARKER_DASH_WASTE_HEADER_CORNER
@@ -4620,7 +4661,7 @@ function buildDashboardData_(ss, sh) {
   if (custTab.length > 1) sh.getRange(D0 + 1, CUST_COL + 1, custTab.length - 1, 4).setNumberFormat('#,##0');
   sh.getRange(D0, CUST_COL, 1, 5).setFontWeight('bold');
 
-  return { dayRows: dayTab.length, costRows: costTab.length, wasteRows: wasteTab.length, wasteCols: wasteCols, custRows: custTab.length, custCol: CUST_COL };
+  return { dayRows: dayTab.length, costRows: costTab.length, costMin: costMin, costMax: costMax, wasteRows: wasteTab.length, wasteCols: wasteCols, custRows: custTab.length, custCol: CUST_COL };
 }
 
 // 廃棄品目の正式名を凡例向けに短縮（原産地の接頭・サイズ/荷姿の後ろ・_HP等を落とす）。【A】【B】等の区別タグは残す。MARKER_DASH_WASTE_SHORTNAME
@@ -4678,18 +4719,18 @@ function buildDashboardCharts_(sh, meta) {
   sh.getCharts().forEach(c => sh.removeChart(c));
   // ① 当月 日別売上（赤=予算／青=実績／緑点線=予測＝左軸・日別、累計＝右軸の点線）。横長で1か月を日単位で。数値は予算・実績のみ表示。
   sh.insertChart(sh.newChart().asLineChart()
-    .addRange(sh.getRange(DASH_DATA_TOP_, 1, meta.dayRows, 7))   // A日 B予算 C実績 D予測 E実績累計 F予算累計 G予測累計(元データ・千円単位)
-    .setOption('title', '当月 日別売上（赤=予算／青=実績／緑点線=予測・右軸=累計 実績＝濃い青の太線/予算桃点線/予測薄緑点線）※単位：千円')
+    .addRange(sh.getRange(DASH_DATA_TOP_, 1, meta.dayRows, 7))   // A日 B予算 C予測 D予算累計 E予測累計 F実績 G実績累計(元データ・千円単位。実績系は末尾＝空でも色ズレしない)
+    .setOption('title', '当月 日別売上（赤=予算／緑点線=予測／青=実績・右軸=累計 予算＝橙の太線(375万で止まる)/予測＝緑点線/実績＝濃い青太線）※単位：千円')
     .setOption('backgroundColor', '#ffffff')
     .setOption('titleTextStyle', { fontSize: 14, bold: true })
     .setOption('legend', { position: 'bottom' })
     .setOption('series', {
-      0: { color: '#ea4335', dataLabel: 'value' },                                                     // 予算＝赤
-      1: { color: '#1a73e8', dataLabel: 'value' },                                                     // 実績＝青
-      2: { color: '#34a853', lineDashStyle: [2, 2], pointSize: 0 },                                    // 予測＝緑(点線・数値なし)
-      3: { color: '#1565c0', targetAxisIndex: 1, lineWidth: 4, pointSize: 6, pointShape: 'circle' },   // 実績累計＝濃い青・太い実線＋点(どこで終わるか見やすく・最新実績日で止まる)。MARKER_DASH_CUMACT_EMPHASIS
-      4: { color: '#f7a5b4', targetAxisIndex: 1, lineDashStyle: [4, 4], lineWidth: 1, pointSize: 0 },   // 予算累計＝ピンク(薄い点線・参照)
-      5: { color: '#81c995', targetAxisIndex: 1, lineDashStyle: [4, 4], lineWidth: 1, pointSize: 0 }    // 予測累計＝薄緑(薄い点線・参照)
+      0: { color: '#ea4335', dataLabel: 'value' },                                                     // 予算(日別)＝赤
+      1: { color: '#34a853', lineDashStyle: [2, 2], pointSize: 0 },                                    // 予測(日別)＝緑(点線・数値なし)
+      2: { color: '#ff6d01', targetAxisIndex: 1, lineWidth: 3, pointSize: 0 },                          // 予算累計＝橙・太い実線(はっきり見えるように・375万で終わる)。MARKER_DASH_BUDGET_CUM_BOLD
+      3: { color: '#188038', targetAxisIndex: 1, lineDashStyle: [4, 4], lineWidth: 2, pointSize: 0 },   // 予測累計＝緑(点線)
+      4: { color: '#1a73e8', dataLabel: 'value' },                                                     // 実績(日別)＝青(月初は空)
+      5: { color: '#1565c0', targetAxisIndex: 1, lineWidth: 4, pointSize: 6, pointShape: 'circle' }     // 実績累計＝濃い青・太い実線＋点(最新実績日で止まる)。MARKER_DASH_CUMACT_EMPHASIS
     })
     .setOption('vAxes', { 0: { format: '#,##0', title: '日別(千円)' }, 1: { format: '#,##0', title: '累計(千円)' } })
     .setOption('hAxis', { title: '日', slantedText: false, showTextEvery: 1 })   // 横軸は毎日表示（間引かない）
@@ -4698,11 +4739,11 @@ function buildDashboardCharts_(sh, meta) {
   // ② 原価率の推移（緑=理論／赤=実際・35〜45%固定・各月に数値ラベル）折れ線
   if (meta.costRows > 1) sh.insertChart(sh.newChart().asLineChart()
     .addRange(sh.getRange(DASH_DATA_TOP_, 9, meta.costRows, 3))
-    .setOption('title', '原価率の推移（緑=理論／赤=実際・35〜45%）')
+    .setOption('title', '原価率の推移（緑=理論／赤=実際・縦軸はデータに自動フィット）')
     .setOption('backgroundColor', '#ffffff')
     .setOption('titleTextStyle', { fontSize: 14, bold: true })
     .setOption('legend', { position: 'bottom' })
-    .setOption('vAxis', { format: '0.0%', viewWindow: { min: 0.35, max: 0.45 } })
+    .setOption('vAxis', { format: '0.0%', viewWindow: { min: meta.costMin, max: meta.costMax } })   // 固定35〜45%をやめ、データの最小最大から自動（45%超も切れない）。MARKER_DASH_COST_AXIS_AUTO
     .setOption('series', { 0: { color: '#34a853', dataLabel: 'value' }, 1: { color: '#ea4335', dataLabel: 'value' } })   // 明るい緑/赤
     .setOption('pointSize', 7)
     .setPosition(55, 1, 0, 0).setOption('width', 720).setOption('height', 320).build());
@@ -4815,7 +4856,7 @@ function buildMonthBudgetAllocation() {
     doneMsgs.push(t.year + '/' + ('0' + t.month).slice(-2) + '　' + tot.toLocaleString() + '円');
   });
 
-  try { const dsh = ss.getSheetByName(DASHBOARD_SHEET_); if (dsh) buildDashboardData_(ss, dsh); } catch (e) {}
+  try { const dsh = ss.getSheetByName(DASHBOARD_SHEET_); if (dsh) { const _dm = buildDashboardData_(ss, dsh); try { buildDashboardCharts_(dsh, _dm); } catch (e3) {} } } catch (e) {}   // グラフも作り直して自己修復。MARKER_DASH_CHART_SELFHEAL
 
   let msg = '配分した月（各月とも予算ちょうど・1万円単位）：\n' + (doneMsgs.length ? doneMsgs.join('\n') : '（なし）') +
     '\n\n・平日＝各週の平日平均で一律\n・土日祝＝各日の予測比率で個別';
@@ -4976,6 +5017,19 @@ function buildCpProductActuals() {
     '※売上は定価×出数の概算(セット割引前)。毎日の自動更新でも最新になります。', ui.ButtonSet.OK);
 }
 // 集計本体（UIなし＝トリガーから呼べる）。戻り {status, cpCount}。MARKER_CP_PRODUCT_ACTUALS
+// CP名から「くくり名」を作る＝サイズ・盛り違い・括弧内(新商品等)を取り除いた共通部分。これが一致するCPを1つにまとめる。MARKER_CP_GROUP
+//   例) ﾌｨﾚｽﾃｰｷ120g/180g/240g → ﾌｨﾚｽﾃｰｷ ／ ｽｰﾊﾟｰｶﾞﾘﾏﾖPR M・お肉特盛ｽｰﾊﾟｰｶﾞﾘﾏﾖPR ﾗｲｽ大盛 等 → ｽｰﾊﾟｰｶﾞﾘﾏﾖPR
+function cpGroupKey_(name) {
+  let s = String(name || '').trim();
+  s = s.replace(/[（(][^）)]*[）)]/g, '');                        // 括弧内（新商品）(3種合計)等を除去
+  s = s.replace(/^(お肉特盛|肉特盛|お肉大盛|肉大盛)\s*/g, '');   // 先頭の盛りバリエーション
+  ['ﾗｲｽ大盛', 'ライス大盛', 'ごはん大盛', 'ご飯大盛', '大盛', '特盛', '並盛', '並', 'ｼﾞｬﾝﾎﾞ', 'ジャンボ', 'ﾚｷﾞｭﾗｰ', 'レギュラー'].forEach(t => { s = s.split(t).join(''); });   // サイズ・盛りの語を除去
+  s = s.replace(/\s*\d+\s*[gｇ]/gi, '');                          // 容量(120g等)を除去
+  s = s.replace(/(^|\s)[SMLＳＭＬ](\s|$)/g, ' ');                 // 単独のS/M/Lサイズ記号を除去
+  s = s.replace(/[\s　・,，]+/g, '').trim();                      // 区切り・空白を整理
+  return s || String(name || '').trim();
+}
+
 function buildCpProductActualsCore_(ss) {
   const cpSh = ss.getSheetByName('CP設定'); if (!cpSh || cpSh.getLastRow() < 2) return { status: 'noCpSheet' };
   const jSh = ss.getSheetByName('実績データ'); if (!jSh || jSh.getLastRow() < 2) return { status: 'noJisseki' };
@@ -5020,6 +5074,20 @@ function buildCpProductActualsCore_(ss) {
     cps.push({ name, s: startEff, e: endEff, codes });
   });
   if (!cps.length) return { status: 'noCp' };
+  // 同じくくり（サイズ・盛り違い）のCPを1つにまとめ、くくりの「計」を出す。フィレ/ガリマヨ等が別行登録でも合算。MARKER_CP_GROUP
+  const gmap = {};
+  cps.forEach(cp => {
+    const gk = cpGroupKey_(cp.name);
+    const g = gmap[gk] || (gmap[gk] = { names: [], n: 0, codes: [], seen: {}, s: cp.s, e: cp.e });
+    g.names.push(cp.name); g.n++;
+    cp.codes.forEach(c => { if (!g.seen[c]) { g.seen[c] = true; g.codes.push(c); } });
+    if (cp.s < g.s) g.s = cp.s;
+    if (cp.e > g.e) g.e = cp.e;
+  });
+  const cpsGrouped = Object.keys(gmap).map(gk => {
+    const g = gmap[gk];
+    return { name: (g.n >= 2 ? (gk + '(' + g.n + '種合計)') : g.names[0]), s: g.s, e: g.e, codes: g.codes };   // 2種以上だけ「くくり(N種合計)」・単独は元の名前
+  });
   // 実績データを1パス集計
   const jVals = jSh.getRange(2, 1, jSh.getLastRow() - 1, 7).getValues();
   const perDay = {}, codeDay = {};
@@ -5038,8 +5106,8 @@ function buildCpProductActualsCore_(ss) {
   // 出力
   const out = [['CP名', 'コード', '商品名', '出数合計', '1日平均', '売上概算', '売上比', '出食比', '期間']];
   const boldRows = [];
-  cps.sort((a, b) => (a.s < b.s ? 1 : -1));   // 新しいCPを上に
-  cps.forEach(cp => {
+  cpsGrouped.sort((a, b) => (a.s < b.s ? 1 : -1));   // 新しいCPを上に
+  cpsGrouped.forEach(cp => {
     const winDays = allDays.filter(ds => ds >= cp.s && ds <= cp.e);
     if (!winDays.length) return;
     const activeDays = winDays.length;
@@ -13387,73 +13455,118 @@ function registerMenuCodeSwitch2026_10() {
   const pm = ss.getSheetByName('商品マスタ');
   if (!pm || pm.getLastRow() < 2) { ui.alert('商品マスタが見つかりません。'); return; }
 
-  // 対応表 [新コード, 新名, コピー元コード, 肉上書きg(無ければそのまま)]
-  //   肉上書き＝612102(トップ)と612041(バラ)に半々で設定（肉の日の配分と同じ 60/60=120g, 77.5/77.5=155g）
+  // 対応表 [新コード, 新名, コピー元(番号 または [番号,番号]=合体), 肉上書きg(無ければそのまま)]
+  //   ・デリバリー(UB/DE)は1人前＝店内ベースから写す（本部改定で2人前をやめた＝店長確認2026/10/30）。
+  //   ・肉上書き＝牛肉(612102/612041/612098/612072)の合計がそのgになるよう比例調整する。
   const MAP = [
-    // ── 肉の日（単品・毎月29）：旧肉N_PR からコピー（肉量そのまま正しい）
+    // ── 肉の日（単品・毎月29）：旧肉N_PR から。肉1-3=120g / 肉4-6=155g / 肉7-9(特盛)=235g
     [7276, '肉1_PR S',   4619], [7277, '肉2_PR',    4620], [7278, '肉3_PR L',  4621],
     [7279, '肉4_肉PR S', 4622], [7280, '肉5_肉PR',  4623], [7281, '肉6_肉PR L', 4624],
-    [7283, '肉8_特PR',   4626], [7284, '肉9_特PR L', 5222],
+    [7282, '肉7_特PR S', 4625], [7283, '肉8_特PR',  4626], [7284, '肉9_特PR L', 5222],
     // ── ランチ肉の日：新ランチ基(お肉大盛セット=新付け合わせ・120g)から写す。Lサイズ155gだけ肉を上書き
     [7270, 'ﾗ)肉1_PR S', 7249], [7271, 'ﾗ)肉2_PR', 7250], [7272, 'ﾗ)肉3_PR L', 7251],
     [7275, 'ﾗ)肉6_肉PR L', 7251, 155],
-    // ── 配送(UB/DE)・コンビ：旧の“配送コード”から写す（2人前などの分量を保つ）
-    [7077, 'UB)2_PR',     4533], [7078, 'UB)5_肉PR',  4534], [7079, 'UB)8_特PR', 4558],
-    [7081, 'UB)夜PR',     4595], [7084, 'UB)ﾜｲﾙﾄﾞ200', 4581], [7090, 'UB)TPｺｰﾝ', 5211],
-    [7091, 'UB)人気ｺﾝﾋﾞ②', 4554], [7093, 'UB)ｻﾗﾀﾞ',   5110], [7111, 'DE)2_PR',   4576],
-    [7115, 'DE)ｶﾙｷﾑPR',   5099], [7118, 'DE)ﾜｲﾙﾄﾞ300', 4562], [7139, 'C)ﾗｲｽ大+ｻﾗﾀﾞ', 5116],
-    [7141, 'ALL)ﾗｲｽ大',   5118], [7166, 'DE)ﾋﾞﾋﾞﾝﾊﾞPR', 7129],
-    // ── 会員ランク：2916=空の分別コード（食材なし・発注に影響せず通知だけ止める）／5418=ワイルド150g
+    // ── 単品デリバリー(1人前)＝店内ベースから写す（2人前ではない）
+    [7077, 'UB)2_PR',   7001], [7078, 'UB)5_肉PR', 7004], [7079, 'UB)8_特PR', 7007],
+    [7111, 'DE)2_PR',   7001], [7115, 'DE)ｶﾙｷﾑPR', 7011],
+    [7084, 'UB)ﾜｲﾙﾄﾞ200', 7014], [7118, 'DE)ﾜｲﾙﾄﾞ300', 7015], [7166, 'DE)ﾋﾞﾋﾞﾝﾊﾞPR', 7129],
+    // ── 2026-11 追加：改定時に入れ忘れた未登録UBデリバリー3品（店内ベース=1人前から写す）。MARKER_UB_ADD_2026_11
+    [7083, 'UB)ﾜｲﾙﾄﾞ150', 7013], [7087, 'UB)ｶｯﾄ110', 7017], [5398, 'UB)ｶﾞﾘﾏﾖ特PR大', 5390],
+    // ── 旧デリバリーに1人前＋デリバリー容器がそのまま在る物＝旧デリバリーから複製（店内ベースより正確＝容器も入る）
+    [7112, 'DE)5_肉PR', 4577], [7128, 'DE)Gﾗｲｽ', 6683],
+    // ── コンビ：夜PR=ペッパーライスの肉230g／人気コンビ②=お肉大盛120g＋ワイルド200gのセット(合体)
+    [7081, 'UB)夜PR', 7001, 230], [7091, 'UB)人気ｺﾝﾋﾞ②', [7004, 7014]],
+    // ── トッピング/サラダ/ライス（肉なし）
+    [7090, 'UB)TPｺｰﾝ', 5196], [7093, 'UB)ｻﾗﾀﾞ', 5110], [7139, 'C)ﾗｲｽ大+ｻﾗﾀﾞ', 5116], [7141, 'ALL)ﾗｲｽ大', 5118],
+    // ── 会員ランク：2916=空の分別コード（食材なし・通知だけ止める）／5418=ワイルド150g
     [2916, 'ﾀﾞｲﾔ TP選択', 2903], [5418, 'ﾌﾟﾗﾁﾅWD150', 7013]
   ];
-  const BEEF_MAIN = [612102, 612041];   // 肉上書きの対象（この2つに半々で入れる）
-  const BARA_B = 612089;                // 廃番バラB＝コピーしない
+  const BEEF_ALL = [612102, 612041, 612098, 612072];   // 牛肉コード（肉上書き時に合計がその量になるよう比例調整）
+  const BARA_B = 612089;                                // 廃番バラB＝写さない
 
   const lr = pm.getLastRow();
-  const data = pm.getRange(2, 1, lr - 1, 15).getValues();   // A〜O
-  const byCode = {}, existing = {};
-  data.forEach(r => { const c = Number(r[0]); if (!c) return; (byCode[c] = byCode[c] || []).push(r); existing[c] = true; });
+  const data = pm.getRange(2, 1, lr - 1, 15).getValues();   // A〜O スナップショット
+  const byCode = {};
+  data.forEach(r => { const c = Number(r[0]); if (!c) return; (byCode[c] = byCode[c] || []).push(r); });
 
-  const newRows = [], added = [], skipped = [], missing = [];
-  MAP.forEach(m => {
-    const nc = m[0], nm = m[1], src = m[2], beefG = (m.length > 3 ? m[3] : null);
-    if (existing[nc]) { skipped.push(nc); return; }
-    const srcRows = byCode[src];
-    if (!srcRows) { missing.push(nc + '(元' + src + ')'); return; }
-    srcRows.forEach(sr => {
-      if (Number(sr[4]) === BARA_B) return;                 // 廃番バラB行は写さない
+  // コピー元から新コードの行(入力列だけ)を組み立てる。srcは番号 or [番号,番号](合体)
+  function buildRows(nc, nm, src, beefG) {
+    const srcCodes = Array.isArray(src) ? src : [src];
+    for (let k = 0; k < srcCodes.length; k++) if (!byCode[srcCodes[k]]) return null;   // 1つでも元が無ければ失敗
+    // ★コピー元の「重複行」対策：元コードが物理的に重複登録されていても食材コード単位で1行に畳む。MARKER_COPY_DEDUP
+    //   合体[a,b]は元ごとに畳むので、両方に在る食材は両方ぶん残る（＝意図どおり合算される）。
+    const base = [];
+    srcCodes.forEach(s => {
+      const seenE = {};
+      byCode[s].forEach(sr => {
+        if (Number(sr[4]) === BARA_B) return;               // 廃番バラB行は写さない
+        const ek = String(sr[4]);
+        if (seenE[ek]) return;                              // 同じ元コード内の同一食材は1行だけ
+        seenE[ek] = true;
+        base.push(sr);
+      });
+    });
+    let beefSum = 0;
+    base.forEach(sr => { if (BEEF_ALL.indexOf(Number(sr[4])) >= 0) beefSum += Number(sr[14]) || 0; });
+    const scale = (beefG != null && beefSum > 0) ? (beefG / beefSum) : 1;   // 肉を目標gへ比例調整
+    const out = base.map(sr => {
       const row = new Array(15).fill('');
       PM_INPUT_COLS_.forEach(ci => { row[ci - 1] = sr[ci - 1]; });   // A,B,C,D,E,L,M,O をコピー
       row[0] = nc; row[1] = nm;                             // コード・名前だけ新に差し替え
-      if (beefG != null && BEEF_MAIN.indexOf(Number(sr[4])) >= 0 && (Number(sr[14]) || 0) > 0) {
-        const half = beefG / 2;                             // 肉を上書き（トップ/バラへ半々）
-        row[12] = half; row[14] = half;                     // M単位使用量・O提供量
+      if (beefG != null && BEEF_ALL.indexOf(Number(sr[4])) >= 0 && (Number(sr[14]) || 0) > 0) {
+        row[12] = Math.round((Number(sr[12]) || 0) * scale * 10) / 10;   // M単位使用量
+        row[14] = Math.round((Number(sr[14]) || 0) * scale * 10) / 10;   // O提供量
       }
-      newRows.push(row);
+      return row;
     });
-    added.push(nc);
-  });
-
-  if (!added.length) {
-    ui.alert('メニューコードの振り直し登録',
-      '追加する新コードはありません。\n\n既に登録済（スキップ）: ' + (skipped.join(',') || 'なし') +
-      '\nコピー元が見つからない: ' + (missing.join(',') || 'なし'), ui.ButtonSet.OK);
-    return;
+    return out;
   }
-  const resp = ui.alert('メニューコードの振り直し登録',
-    added.length + ' 件の新コードを、旧同名コードからコピーして商品マスタに登録します。\n' + added.join(', ') +
-    (skipped.length ? '\n\n既に登録済でスキップ: ' + skipped.join(',') : '') +
-    (missing.length ? '\nコピー元なしでスキップ: ' + missing.join(',') : '') +
+
+  const builtByCode = {}, added = [], missing = [];
+  MAP.forEach(m => {
+    const nc = m[0], nm = m[1], src = m[2], beefG = (m.length > 3 ? m[3] : null);
+    const rows = buildRows(nc, nm, src, beefG);
+    if (!rows) { missing.push(nc); return; }
+    builtByCode[nc] = rows; added.push(nc);
+  });
+  if (!added.length) { ui.alert('メニューコードの振り直し登録', 'コピー元が見つからず登録できませんでした: ' + missing.join(','), ui.ButtonSet.OK); return; }
+  const newRows = [];
+  added.forEach(nc => builtByCode[nc].forEach(r => newRows.push(r)));
+
+  // 既に登録済みの対象コード行（前回の誤登録を含む）＝一度消して作り直す（再実行で上書き修正できる）
+  const manage = {}; added.forEach(c => manage[c] = true);
+  const existingRows = [];
+  data.forEach((r, i) => { if (manage[Number(r[0])]) existingRows.push(i + 2); });   // シート行番号(2始まり)
+
+  const resp = ui.alert('メニューコードの振り直し登録（作り直し）',
+    added.length + ' 件の新コードを、正しいコピー元から作り直します（デリバリーは1人前）。\n' + added.join(', ') +
+    (existingRows.length ? '\n\n既存の該当 ' + existingRows.length + ' 行を一度消して入れ直します（前回ぶんの上書き修正）。' : '') +
+    (missing.length ? '\n\nコピー元なしでスキップ: ' + missing.join(',') : '') +
     '\n\n原価は自動計算されます。実行しますか？', ui.ButtonSet.YES_NO);
   if (resp !== ui.Button.YES) return;
 
+  // 既存の該当行を削除 → まっさらにしてから入れ直す。
+  //   ★1行ずつ deleteRow だと数百行で6分制限を超える（タイムアウトの主因）。連続行はまとめて deleteRows で消す。MARKER_BATCH_DELETE
+  const delRows = existingRows.slice().sort(function (a, b) { return b - a; });   // 降順（下＝行番号が大きい方から）
+  let di = 0;
+  while (di < delRows.length) {
+    const topRow = delRows[di];                                                   // このブロックの最下行(最大row番号)
+    let dj = di;
+    while (dj + 1 < delRows.length && delRows[dj + 1] === delRows[dj] - 1) dj++;   // 連続している間はまとめる
+    const bottomRow = delRows[dj];                                                // このブロックの最上行(最小row番号)
+    pm.deleteRows(bottomRow, topRow - bottomRow + 1);                             // まとめて削除（高い行から消すので残りの行番号はずれない）
+    di = dj + 1;
+  }
+
   // 入力列だけ追記（F〜K・N のスピルには書かない）
-  const startRow = pm.getLastRow() + 1;
-  PM_INPUT_COLS_.forEach(ci => { pm.getRange(startRow, ci, newRows.length, 1).setValues(newRows.map(r => [r[ci - 1]])); });
+  if (newRows.length) {
+    const startRow = pm.getLastRow() + 1;
+    PM_INPUT_COLS_.forEach(ci => { pm.getRange(startRow, ci, newRows.length, 1).setValues(newRows.map(r => [r[ci - 1]])); });
+  }
 
   // CP設定「肉の日」(毎月29の本体)のD列に、新しい単品肉の日コードを追加（union・重複は足さない）
   let cpMsg = '';
-  const NEW_NIKU = [7276, 7277, 7278, 7279, 7280, 7281, 7283, 7284];
+  const NEW_NIKU = [7276, 7277, 7278, 7279, 7280, 7281, 7282, 7283, 7284];
   const cp = ss.getSheetByName('CP設定');
   if (cp && cp.getLastRow() > 1) {
     const n = cp.getLastRow() - 1;
@@ -13470,17 +13583,36 @@ function registerMenuCodeSwitch2026_10() {
     }
   }
 
-  // 使用量・トレンドを再計算（発注・仕込みに即反映できる状態にする）
+  // ★未登録メニュー誤通知の根本対策：登録直後に「健全スナップショット」を記録。MARKER_UNREG_SEED_ON_REGISTER
+  //   6時のCSV取込中は商品マスタが大きなARRAYFORMULA再計算中で、登録したての行を一瞬読み落とし未登録と誤判定することがある。
+  //   いま（再計算外・確実に読める状態）で登録済みコードを恒久ホワイトリスト(knownRegisteredCodes)に入れ、
+  //   監視リストから登録済みを外す＝大量登録の直後でもこの誤報を出さない。読み方は checkUnregisteredMenus_ と同じ getMaxRows 方式。
+  let seedMsg = '';
+  try {
+    const propsU = PropertiesService.getScriptProperties();
+    const regSet = new Set();
+    try { JSON.parse(propsU.getProperty('knownRegisteredCodes') || '[]').forEach(c => regSet.add(String(c))); } catch (e) {}
+    pm.getRange(2, 1, Math.max(1, pm.getMaxRows() - 1), 1).getValues().forEach(r => { const c = normalizeCode_(r[0]); if (c) regSet.add(c); });
+    if (regSet.size >= 50) propsU.setProperty('knownRegisteredCodes', JSON.stringify([...regSet]));
+    let watchU = {};
+    try { watchU = JSON.parse(propsU.getProperty('unregisteredMenuWatch') || '{}'); } catch (e) { watchU = {}; }
+    let removedU = 0;
+    Object.keys(watchU).forEach(code => { if (regSet.has(code) || regSet.has(normalizeCode_(code))) { delete watchU[code]; removedU++; } });
+    propsU.setProperty('unregisteredMenuWatch', JSON.stringify(watchU));
+    seedMsg = '\n\n未登録通知の誤報対策：登録済み ' + regSet.size + ' 件を記録し、監視リストから ' + removedU + ' 件を解除しました（登録済みは今後通知されません）。';
+    console.log('seed knownRegisteredCodes: ' + regSet.size + '件 / watch解除 ' + removedU + '件');
+  } catch (e) { seedMsg = '\n\n（未登録通知の誤報対策の記録はスキップ：' + e.message + '）'; console.log('seed knownRegisteredCodes失敗: ' + e.message); }
+
+  // 使用量・トレンドを再計算（発注・仕込みに即反映）。※一番最後＝万一ここで時間切れでも「登録」と「誤報対策」は完了済み。朝の自動処理でも再計算される。
   let recalc = '';
   try { const cpu = buildIngredientDailyUsage(); saveCpSubtractMap_(cpu); recalc = '\n使用量を再計算しました。'; } catch (e) { recalc = '\n使用量の再計算はスキップ（' + e.message + '）。'; }
   try { buildTrendHistoryAverages_(); recalc += ' トレンドも再計算しました。'; } catch (e) { recalc += ' トレンド再計算はスキップ（' + e.message + '）。'; }
 
   ui.alert('登録しました',
-    added.length + ' 件の新コードを登録しました。\n' + added.join(', ') + cpMsg + recalc +
+    added.length + ' 件の新コードを作り直しました。\n' + added.join(', ') + cpMsg + recalc + seedMsg +
     '\n\n仕上げに「🖨発注書」メニュー →「発注書を作る（今週）」を押すと発注表に反映されます（来週分も同様）。' +
-    (skipped.length ? '\n\n登録済でスキップ: ' + skipped.join(',') : '') +
-    (missing.length ? '\nコピー元なしでスキップ: ' + missing.join(',') : ''), ui.ButtonSet.OK);
-  console.log('registerMenuCodeSwitch2026_10: added=' + added.join(',') + ' rows=' + newRows.length + ' skip=' + skipped.join(',') + ' missing=' + missing.join(','));
+    (missing.length ? '\n\nコピー元なしでスキップ: ' + missing.join(',') : ''), ui.ButtonSet.OK);
+  console.log('registerMenuCodeSwitch2026_10: added=' + added.join(',') + ' rows=' + newRows.length + ' missing=' + missing.join(','));
 }
 
 // 食材マスタを「発注画面(FOODS INFOMART)の順」に並べ替える。発注書が発注画面と同じ並びになり入力が楽。MARKER_SCREEN_ORDER
@@ -16919,6 +17051,9 @@ function importDeliveryInventoryCsv() {
   // ★ドリンク実測分析も自動更新＝CSV取込のたびに最新化（手動の「分析する」を押さなくて済む）。MARKER_DRINK_ANALYSIS_AUTO
   try { const dr = buildDrinkAnalysisCore_(sh.getParent()); if (dr && dr.status === 'ok') lossMsg += '\n『ドリンク実測分析』も自動更新しました（累計1杯' + (Math.round(dr.cumU * 10) / 10) + '円）。'; }
   catch (e) { console.log('auto buildDrinkAnalysis失敗: ' + e.message); }
+  // ★実際原価率も自動反映＝「取り込む」1回で原価率まで完結（手動の「実際原価率を反映する」を押さなくて済む）。MARKER_IMPORT_AUTO_ACTUALCOST
+  try { const ac = updateActualCostFromDelivery_Core_(sh.getParent()); if (ac.ok) { lossMsg += '\n『実際原価率』も自動反映しました（' + ac.done + 'か月ぶん' + (ac.missing && ac.missing.length ? '／履歴に無い月' + ac.missing.join('・') + 'は先に理論原価の保存が必要' : '') + '）。'; } else { lossMsg += '\n※実際原価率の自動反映はスキップ：' + ac.msg.split('\n')[0]; } }
+  catch (e) { console.log('auto updateActualCost失敗: ' + e.message); lossMsg += '\n※実際原価率の自動反映に失敗（メニューから手動で）：' + e.message; }
   ui.alert('納品実績に取り込みました',
     toAppend.length + '件を追加しました。\n\n【取込】\n' + filesDone.join('\n') +
     (filesSkip.length ? '\n\n【スキップ】\n' + filesSkip.join('\n') : '') + lossMsg, ui.ButtonSet.OK);
@@ -16930,11 +17065,17 @@ function importDeliveryInventoryCsv() {
 //   実際原価率＝(実原価 − 原価戻し[J列手入力]) ÷ その月の税抜売上（履歴C列） / 実現率＝理論原価 ÷ (実原価−原価戻し)（100%＝理論通り、低いほどロス大）
 function updateActualCostFromDelivery() {
   const ss = SpreadsheetApp.getActiveSpreadsheet(); const ui = SpreadsheetApp.getUi();
+  const r = updateActualCostFromDelivery_Core_(ss);
+  ui.alert(r.title, r.msg, ui.ButtonSet.OK);
+}
+
+// 実際原価率の反映（UIなし・結果を返す）。納品CSV取込の最後からも自動で呼ぶ。MARKER_IMPORT_AUTO_ACTUALCOST
+function updateActualCostFromDelivery_Core_(ss) {
   const del = ss.getSheetByName(DELIVERY_SHEET_);
-  if (!del || del.getLastRow() < 2) { ui.alert('「' + DELIVERY_SHEET_ + '」にデータがありません。先に納品CSVを取り込んでください。'); return; }
-  if (!ss.getSheetByName(COST_HISTORY_SHEET_)) { ui.alert('「' + COST_HISTORY_SHEET_ + '」がありません。先に「過去の全月を今すぐ保存」を実行してください。'); return; }
+  if (!del || del.getLastRow() < 2) return { ok: false, title: '実際原価率', msg: '「' + DELIVERY_SHEET_ + '」にデータがありません。先に納品CSVを取り込んでください。', done: 0, missing: [] };
+  if (!ss.getSheetByName(COST_HISTORY_SHEET_)) return { ok: false, title: '実際原価率', msg: '「' + COST_HISTORY_SHEET_ + '」がありません。先に「過去の全月を今すぐ保存」を実行してください。', done: 0, missing: [] };
   const hist = ensureCostHistorySheet_(ss);   // 列レイアウトを最新化（原価戻し列が無ければ挿入してから処理）
-  if (hist.getLastRow() < 2) { ui.alert('「' + COST_HISTORY_SHEET_ + '」に月データがありません。先に「過去の全月を今すぐ保存」を実行してください。'); return; }
+  if (hist.getLastRow() < 2) return { ok: false, title: '実際原価率', msg: '「' + COST_HISTORY_SHEET_ + '」に月データがありません。先に「過去の全月を今すぐ保存」を実行してください。', done: 0, missing: [] };
 
   // 年月キーの正規化（文字列'2026/03' も 月末日付 も 'yyyy/MM' に揃える。日付はUTCで月を取る＝末日15:00Z対策）
   const ymKey = v => {
@@ -16942,7 +17083,8 @@ function updateActualCostFromDelivery() {
     const m = String(v == null ? '' : v).trim().match(/(\d{4})[\/\-](\d{1,2})/);
     return m ? m[1] + '/' + ('0' + Number(m[2])).slice(-2) : String(v == null ? '' : v).trim();
   };
-  const COST_CATS = { '食材': 1, 'ドリンク': 1, '酒': 1, '冷凍': 1, '生鮮': 1 };   // 消耗品のみ原価から除外（冷凍・生鮮は食材と同じく計上）
+  // 消耗品のみ原価から除外（冷凍・生鮮は食材と同じく計上）。発注終了＝切替・終売の旧コードだが本部納品が続き実際に消費される本物の食材原価なので計上する（除外すると実原価が過少→実際原価率が低く出る）。MARKER_COST_INCLUDE_ENDED
+  const COST_CATS = { '食材': 1, 'ドリンク': 1, '酒': 1, '冷凍': 1, '生鮮': 1, '発注終了': 1 };
 
   // 納品実績を年月別に集計
   const agg = {};   // ym -> {actual, other}
@@ -16986,11 +17128,36 @@ function updateActualCostFromDelivery() {
       (agg[ym].other ? '（未計上' + Math.round(agg[ym].other).toLocaleString() + '円）' : ''));
   });
 
-  ui.alert('実際原価率を反映しました',
-    (done.length ? done.join('\n') : '更新対象なし') +
+  const msg = (done.length ? done.join('\n') : '更新対象なし') +
     (missing.length ? '\n\n【履歴に無い月＝先に理論原価を保存してください】\n' + missing.join(', ') : '') +
-    '\n\n※実際原価率＝(実原価−原価戻し)÷税抜売上。原価戻しはJ列(手入力の実額)を優先し、無い月はK列(予測)を使います。\n※本部請求の実額が分かったらJ列に入れて再実行すると、予測から実額に切り替わります。\n※実現率100%＝理論通り。下回るほどロス（廃棄・盛りすぎ・まかない・棚卸差異）が大きい。', ui.ButtonSet.OK);
+    '\n\n※実際原価率＝(実原価−原価戻し)÷税抜売上。原価戻しはJ列(手入力の実額)を優先し、無い月はK列(予測)を使います。\n※本部請求の実額が分かったらJ列に入れて再実行すると、予測から実額に切り替わります。\n※実現率100%＝理論通り。下回るほどロス（廃棄・盛りすぎ・まかない・棚卸差異）が大きい。';
   console.log('updateActualCostFromDelivery: ' + done.length + '月更新');
+  return { ok: true, title: '実際原価率を反映しました', msg: msg, done: done.length, missing: missing };
+}
+
+// メニュー：納品CSVを取り込んだあとの更新を、これ1つでまとめて実行する（実際原価率＋実損分析＋ドリンク実測）。
+//   取込自体も最後に同じ更新を自動で行うが、既に取込済み(新規0件)や取り直しの時のために1クリックの入口も用意。MARKER_POST_DELIVERY_BUNDLE
+function runPostDeliveryUpdates() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(); const ui = SpreadsheetApp.getUi();
+  const del = ss.getSheetByName(DELIVERY_SHEET_);
+  if (!del || del.getLastRow() < 2) { ui.alert('納品取込のあとの更新', '「' + DELIVERY_SHEET_ + '」にデータがありません。先に「納品データCSVを取り込む」を実行してください。', ui.ButtonSet.OK); return; }
+  const t0 = Date.now();
+  const EXTRA_BUDGET_MS = 150000;   // 残り重い処理(実損・ドリンク)を"始めてよい"上限＝経過2.5分。超えたら6分制限で落ちないようスキップ。MARKER_POST_DELIVERY_BUNDLE
+  const lines = [];
+  // ① 実際原価率＝最重要。まず確実に反映（このあと万一時間切れでも実際原価率は完了させる）。
+  try {
+    const ac = updateActualCostFromDelivery_Core_(ss);
+    lines.push((ac.ok ? '✅ ' : '⚠️ ') + '実際原価率：' + (ac.ok ? ac.done + 'か月ぶん反映' + (ac.missing && ac.missing.length ? '（履歴に無い月' + ac.missing.join('・') + 'は先に理論原価の保存が必要）' : '') : ac.msg.split('\n')[0]));
+  } catch (e) { lines.push('⚠️ 実際原価率：' + e.message); }
+  // ② 実損分析（取込時に自動更新済み。時間が残っていれば最新化）
+  if (Date.now() - t0 < EXTRA_BUDGET_MS) {
+    try { buildLossAnalysisCore_(ss); lines.push('✅ 実損分析を更新（実測vs理論）'); } catch (e) { lines.push('⚠️ 実損分析：' + e.message); }
+  } else { lines.push('⏭ 実損分析はスキップ（時間節約／取込時に自動更新済み・必要なら「実損を分析する」）'); }
+  // ③ ドリンク実測分析（同上）
+  if (Date.now() - t0 < EXTRA_BUDGET_MS) {
+    try { const dr = buildDrinkAnalysisCore_(ss); lines.push('✅ ドリンク実測分析を更新' + (dr && dr.status === 'ok' ? '（累計1杯' + (Math.round(dr.cumU * 10) / 10) + '円）' : '')); } catch (e) { lines.push('⚠️ ドリンク実測分析：' + e.message); }
+  } else { lines.push('⏭ ドリンク実測分析はスキップ（時間節約／取込時に自動更新済み・必要なら「ドリンクの使用量を分析する」）'); }
+  ui.alert('納品取込のあとの更新（まとめて実行）', lines.join('\n') + '\n\n※実際原価率の月ごとの内訳は「' + COST_HISTORY_SHEET_ + '」シートで見られます。\n※発注量を実測に寄せる「実測補正」は毎月1日に自動で動きます（全食材でやりたい時だけ別メニュー）。', ui.ButtonSet.OK);
 }
 
 // ═════════ 原価率・月次作業のサポート（月初に不足作業＋手順を知らせる）MARKER_COST_MONTHLY_TASKS ═════════
@@ -17337,7 +17504,7 @@ function buildLossAnalysisCore_(ss) {
   if (!sh) sh = ss.insertSheet(name); else sh.clear();
   const out = [];
   out.push(['■ 実損分析：実際の使用金額(納品) − 理論の使用金額(出食数×レシピ) ＝ ロス', '', '', '', '', '', '', '']);
-  out.push(['※差(ロス)＝廃棄・盛りすぎ・まかない・棚卸差異。肉の増量対象(クロッド・バラ等)の差には本部原価戻し分が含まれます。', '', '', '', '', '', '', '']);
+  out.push(['※差(ロス)＝廃棄・盛りすぎ・まかない・棚卸差異。肉の増量対象(クロッド・バラ等)の差には本部原価戻し分が含まれます。ドリンク(飲み放題・セルフ)はロス対象外＝出数で別管理（下に実額のみ併記）。', '', '', '', '', '', '', '']);
   out.push(['', '', '', '', '', '', '', '']);
 
   // 月別サマリー
@@ -17347,21 +17514,28 @@ function buildLossAnalysisCore_(ss) {
   months.forEach(ym => {
     const a = actUse[ym] || {}, t = theoUse[ym] || {};
     const keys = {}; Object.keys(a).forEach(k => keys[k] = 1); Object.keys(t).forEach(k => keys[k] = 1);
-    let actSum = 0, theoSum = 0; const rows = [];
+    let actSum = 0, theoSum = 0, drinkActSum = 0; const rows = [];
     Object.keys(keys).forEach(ing => {
+      const cat = (a[ing] && a[ing].cat) || maps.ingCatMap[ing] || '';
       const av = a[ing] ? a[ing].actual : 0;
       const tv = t[ing] || 0;
+      if (cat === 'ドリンク') { drinkActSum += av; return; }   // ドリンクは飲み放題(セルフ)＝1杯量が変動し出数で別管理。ロス対象から除外（偽ロス284%等を出さない）。MARKER_LOSS_SKIP_DRINK
       actSum += av; theoSum += tv;
       const diff = av - tv;
-      rows.push({ ing: ing, name: ingName[ing] || '', cat: (a[ing] && a[ing].cat) || maps.ingCatMap[ing] || '', act: av, theo: tv, diff: diff });
+      rows.push({ ing: ing, name: ingName[ing] || '', cat: cat, act: av, theo: tv, diff: diff });
     });
     const reb = rebate[ym] || 0;
     const realLoss = (actSum - theoSum) - reb;
     const achieve = actSum > 0 ? theoSum / actSum : '';
     out.push([ym, Math.round(actSum), Math.round(theoSum), Math.round(actSum - theoSum), Math.round(reb), Math.round(realLoss), achieve, '']);
     rows.sort((x, y) => y.diff - x.diff);
-    detailBlocks.push({ ym: ym, rows: rows });
+    detailBlocks.push({ ym: ym, rows: rows, drinkAct: drinkActSum });
   });
+  out.push(['', '', '', '', '', '', '', '']);
+  // ドリンクは飲み放題(セルフ)で別管理＝ロス対象外。参考に実際使用金額だけ併記（1杯の実測単価は「ドリンク実測分析」シート）。MARKER_LOSS_SKIP_DRINK
+  out.push(['【ドリンク（飲み放題・出数で別管理・ロス対象外）】※1杯量が変動するためロスにしない。1杯単価は「ドリンク実測分析」シート', '', '', '', '', '', '', '']);
+  out.push(['年月', '実際使用金額(ドリンク)', '', '', '', '', '', '']);
+  detailBlocks.forEach(b => out.push([b.ym, Math.round(b.drinkAct || 0), '', '', '', '', '', '']));
   out.push(['', '', '', '', '', '', '', '']);
 
   // 月別の食材ロス明細（差の大きい順・上位30）
@@ -17396,8 +17570,8 @@ function buildLossAnalysisCore_(ss) {
 
   // 総括メッセージ
   const latest = months[months.length - 1];
-  const la = actUse[latest], lt = theoUse[latest] || {};
-  let laSum = 0, ltSum = 0; Object.keys(la).forEach(k => laSum += la[k].actual); Object.keys(lt).forEach(k => ltSum += lt[k]);
+  const lb = detailBlocks[detailBlocks.length - 1] || { rows: [] };   // 最新月（ドリンク除外済み）
+  let laSum = 0, ltSum = 0; lb.rows.forEach(r => { laSum += r.act; ltSum += r.theo; });
   return { ok: true, latest: latest, months: months, msg:
     'シート「' + name + '」に、月別サマリーと食材別ロス（差の大きい順）を出しました。\n\n' +
     '最新月（' + latest + '）：実際' + Math.round(laSum).toLocaleString() + '円 − 理論' + Math.round(ltSum).toLocaleString() +

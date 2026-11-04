@@ -103,6 +103,26 @@ function apiAddPeriod(start, end, text, color) {
   return readAll_();
 }
 
+function apiUpdatePeriod(id, start, end, text, color) {
+  text = String(text || '').trim();
+  if (!id || !text || !start || !end) return readAll_();
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var sh = getSS_().getSheetByName('期間');
+    var vals = sh.getDataRange().getValues();
+    for (var i = 1; i < vals.length; i++) {
+      if (String(vals[i][0]) === String(id)) {
+        // B:start, C:end, D:text, E:color を上書き（id=A列は保持）
+        sh.getRange(i + 1, 2, 1, 4)
+          .setValues([[String(start), String(end), text, String(color || '#3f7fd6')]]);
+        break;
+      }
+    }
+  } finally { lock.releaseLock(); }
+  return readAll_();
+}
+
 function apiDeletePeriod(id) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);

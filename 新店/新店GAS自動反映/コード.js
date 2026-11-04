@@ -256,8 +256,13 @@ function build食材マスタ(ss) {
 function build仕込み品マスタ(ss) {
   var sh = newSheet_(ss, '仕込み品マスタ');
 
-  var headers = ['仕込みID', '仕込み品名', '出来上がり量', '単位', '保存区分', '日持ち日数', '原価合計(自動)', '単位原価(自動)', 'チェック(自動)'];
-  var widths  = [90, 180, 110, 70, 80, 90, 120, 130, 220];
+  // 原価合計・単位原価・チェック（自動）は位置を変えない。昔の基準表の項目はその右に足す。
+  // ※「出来上がり量」が昔の「仕上がり総量」にあたるので、重複して足さない。
+  var headers = ['仕込みID', '仕込み品名', '出来上がり量', '単位', '保存区分', '日持ち日数',
+                 '原価合計(自動)', '単位原価(自動)', 'チェック(自動)',
+                 '仕込み時間', '製作者', '制作年月日'];
+  var widths  = [90, 180, 110, 70, 80, 90, 120, 130, 220,
+                 100, 100, 110];
   setHeader_(sh, headers, widths);
 
   var rows = [
@@ -272,6 +277,7 @@ function build仕込み品マスタ(ss) {
 
   sh.getRange(2, 7, LAST_ROW, 1).setNumberFormat('¥#,##0.0');
   sh.getRange(2, 8, LAST_ROW, 1).setNumberFormat('¥#,##0.0000');
+  sh.getRange(2, 12, LAST_ROW, 1).setNumberFormat('yyyy/mm/dd');   // 制作年月日
   markAuto_(sh, 7, 3);
 }
 
@@ -280,8 +286,13 @@ function build仕込み品マスタ(ss) {
 function build商品マスタ(ss) {
   var sh = newSheet_(ss, '商品マスタ');
 
-  var headers = ['商品ID', '商品名', 'カテゴリ', '売価(税抜)', '目標原価率', '提供開始日', '提供終了日', '原価(自動)', '原価率(自動)', '目標差(自動)'];
-  var widths  = [100, 220, 100, 110, 110, 110, 110, 110, 110, 110];
+  // 原価・原価率・目標差（自動）は位置を変えない＝原価計算・採用・登録フォームを壊さない。
+  // 昔の「メニュー基準表」にあった項目（商品コード〜制作年月日）は、その右に足す。
+  var headers = ['商品ID', '商品名', 'カテゴリ', '売価(税抜)', '目標原価率', '提供開始日', '提供終了日',
+                 '原価(自動)', '原価率(自動)', '目標差(自動)',
+                 '商品コード', '仕上がり量', '仕込み時間', '製作者', '制作年月日'];
+  var widths  = [100, 220, 100, 110, 110, 110, 110, 110, 110, 110,
+                 120, 100, 100, 100, 110];
   setHeader_(sh, headers, widths);
 
   var rows = [
@@ -297,6 +308,7 @@ function build商品マスタ(ss) {
   sh.getRange(2, 8,  LAST_ROW, 1).setNumberFormat('¥#,##0.0');
   sh.getRange(2, 9,  LAST_ROW, 1).setNumberFormat('0.0%');
   sh.getRange(2, 10, LAST_ROW, 1).setNumberFormat('+0.0%;-0.0%;0.0%');
+  sh.getRange(2, 15, LAST_ROW, 1).setNumberFormat('yyyy/mm/dd');   // 制作年月日
   markAuto_(sh, 8, 3);
 
   // 目標を超えたら赤、下回ったら緑
@@ -439,6 +451,7 @@ function onOpen() {
     .addItem('台帳を整える（色分け・保護・入力ガイド）', '台帳を整える')
     .addSeparator()
     .addItem('サンプルのご飯を仕込み品にする（1回だけ）', 'ご飯を仕込み品にする')
+    .addItem('白だしを取り込む（1回だけ）', '白だしを取り込む')
     .addToUi();
 
   ui.createMenu('🧪 試作')
@@ -452,6 +465,7 @@ function onOpen() {
     .addItem('発注準備の列を追加(初回のみ)', '発注準備の列を追加')
     .addItem('辛味の列を追加(初回のみ)', '辛味の列を追加')
     .addItem('味の列を追加(初回のみ)', '味の列を追加')
+    .addItem('基準表の項目を追加(初回のみ)', '基準表の項目を追加')
     .addItem('総合評価を自動計算にする(初回のみ)', '総合評価を自動計算にする')
     .addSeparator()
     .addItem('試作比較を作り直す', '試作比較を作り直す')
@@ -722,6 +736,234 @@ function 味の列を追加() {
            '・よく使う調味料には初期値が入っています（空欄＝0 として扱います）\n' +
            '・原価は変わっていないはずです（実効単価の右に足したため）\n\n' +
            '仕上げに「🍳 レシピ → 台帳を整える」を1回押すと、色分けと説明が付きます。');
+}
+
+
+/* =====================================================================
+ *  昔の「メニュー基準表」にあって台帳に無かった項目を足す。
+ *   ・商品マスタ   … 商品コード / 仕上がり量 / 仕込み時間 / 製作者 / 制作年月日（11〜15列）
+ *   ・仕込み品マスタ … 仕込み時間 / 製作者 / 制作年月日（10〜12列。仕上がり総量は「出来上がり量」が兼ねる）
+ *
+ *  ★計算に関わる列（原価・原価率・目標差・単位原価…）は一切動かさない＝原価は変わらない。
+ *   これらは自動計算列の「右の空き列」に名前を付けるだけ（列の挿入はしない）。
+ *   新規に作った台帳では build〜 が最初から入れるので、この関数は昔の台帳用。
+ * ===================================================================== */
+
+/** 商品マスタ・仕込み品マスタに基準表の項目があることを保証する（何度呼んでも安全）。足した数を返す */
+function ensure基準表Cols_(ss) {
+  var added = 0;
+
+  var pm = ss.getSheetByName('商品マスタ');
+  if (pm) {
+    ensureCols_(pm, 15);
+    // 8列目が「原価(自動)」＝想定どおりの並びのときだけ、その右(11〜15)に名前を付ける
+    if (String(pm.getRange(1, 8).getValue()).indexOf('原価') === 0) {
+      var pmHeads = [['商品コード', 120], ['仕上がり量', 100], ['仕込み時間', 100], ['製作者', 100], ['制作年月日', 110]];
+      pmHeads.forEach(function (h, i) {
+        var col = 11 + i;
+        if (stripMark_(pm.getRange(1, col).getValue()) !== h[0]) {
+          pm.getRange(1, col).setValue(h[0])
+            .setFontWeight('bold').setBackground(C_HEADER_BG).setFontColor('#2A2019').setVerticalAlignment('middle');
+          pm.setColumnWidth(col, h[1]);
+          added++;
+        }
+      });
+      pm.getRange(2, 15, LAST_ROW, 1).setNumberFormat('yyyy/mm/dd');   // 制作年月日
+    }
+  }
+
+  var prep = ss.getSheetByName('仕込み品マスタ');
+  if (prep) {
+    ensureCols_(prep, 12);
+    // 9列目が「チェック(自動)」＝想定どおりのときだけ、その右(10〜12)に名前を付ける
+    if (String(prep.getRange(1, 9).getValue()).indexOf('チェック') === 0) {
+      var prHeads = [['仕込み時間', 100], ['製作者', 100], ['制作年月日', 110]];
+      prHeads.forEach(function (h, i) {
+        var col = 10 + i;
+        if (stripMark_(prep.getRange(1, col).getValue()) !== h[0]) {
+          prep.getRange(1, col).setValue(h[0])
+            .setFontWeight('bold').setBackground(C_HEADER_BG).setFontColor('#2A2019').setVerticalAlignment('middle');
+          prep.setColumnWidth(col, h[1]);
+          added++;
+        }
+      });
+      prep.getRange(2, 12, LAST_ROW, 1).setNumberFormat('yyyy/mm/dd');   // 制作年月日
+    }
+  }
+
+  return added;
+}
+
+/** メニュー：昔の基準表の項目（商品コード・仕上がり量・仕込み時間・製作者・制作年月日）を足す */
+function 基準表の項目を追加() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+
+  if (!ss.getSheetByName('商品マスタ') || !ss.getSheetByName('仕込み品マスタ')) {
+    ui.alert('商品マスタ・仕込み品マスタが見つかりません。\n\n先に台帳を作ってください。');
+    return;
+  }
+
+  // 並びが想定どおりか（計算列を手で動かしていないか）を確認
+  if (String(ss.getSheetByName('商品マスタ').getRange(1, 8).getValue()).indexOf('原価') !== 0 ||
+      String(ss.getSheetByName('仕込み品マスタ').getRange(1, 9).getValue()).indexOf('チェック') !== 0) {
+    ui.alert('中止しました。\n\n商品マスタ／仕込み品マスタの並びが想定と違います。\n' +
+             '（商品マスタの8列目＝原価、仕込み品マスタの9列目＝チェック のはずです）\n' +
+             '列を手で動かしている場合は、先に元に戻してください。');
+    return;
+  }
+
+  if (ui.alert('確認',
+      '昔の「メニュー基準表」にあった項目を足します（覚え書き欄）。\n\n' +
+      '・商品マスタ … 商品コード / 仕上がり量 / 仕込み時間 / 製作者 / 制作年月日\n' +
+      '・仕込み品マスタ … 仕込み時間 / 製作者 / 制作年月日\n' +
+      '　（仕上がり総量は、今ある「出来上がり量」がそれにあたります）\n\n' +
+      '★自動計算の列（原価など）の右の空き列に名前を付けるだけです。\n' +
+      '　原価・売価・原価率は変わりません。入力済みのデータも消えません。\n\n' +
+      'よろしいですか?',
+      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+
+  var added = ensure基準表Cols_(ss);
+
+  ss.setActiveSheet(ss.getSheetByName('商品マスタ'));
+  ui.alert((added > 0 ? '追加しました（' + added + '項目）。\n\n' : 'すでに揃っていました。\n\n') +
+           '・商品マスタの右に 商品コード〜制作年月日\n' +
+           '・仕込み品マスタの右に 仕込み時間〜制作年月日\n\n' +
+           '仕上げに「🍳 レシピ → 台帳を整える」を1回押すと、色分けと説明が付きます。');
+}
+
+
+/* =====================================================================
+ *  昔の基準表の「白だし」を、仕込み品として取り込む（1回だけ）。
+ *   ・足りない食材（水・昆布・鰹節・日本酒・塩・薄口醤油）を食材マスタに追加
+ *     （仕入価格は“だいたいの相場”の仮入力。あとで実際の値に直してください）
+ *   ・仕込み品マスタに「白だし」を追加（出来上がり1000cc・冷蔵・21日・作者/日付/時間つき）
+ *   ・レシピ明細に材料7つ、調理手順に作り方9手順を入れる（rebuildBlock_ なので何度実行しても二重にならない）
+ * ===================================================================== */
+function 白だしを取り込む() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+
+  var ing  = ss.getSheetByName('食材マスタ');
+  var prep = ss.getSheetByName('仕込み品マスタ');
+  var det  = ss.getSheetByName('レシピ明細');
+  var proc = ss.getSheetByName('調理手順');
+  if (!ing || !prep || !det || !proc) {
+    ui.alert('必要なシート（食材マスタ・仕込み品マスタ・レシピ明細・調理手順）が見つかりません。');
+    return;
+  }
+
+  if (ui.alert('白だしを取り込みますか?',
+      '昔の基準表の「白だし」を、仕込み品として取り込みます。\n\n' +
+      '・足りない食材（水・昆布・鰹節・日本酒・塩・薄口醤油）を食材マスタに足します\n' +
+      '　※仕入価格は “だいたいの相場” の仮入力です。あとで実際の値に直してください\n' +
+      '・仕込み品「白だし」＋材料7つ＋作り方9手順 を入れます\n\n' +
+      '何度押しても二重にはなりません。よろしいですか?',
+      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+
+  // 基準表の項目（製作者・制作年月日・仕込み時間）の置き場所を先に用意しておく
+  ensure基準表Cols_(ss);
+
+  // --- ① 足りない食材を用意（名前で探し、無ければ追加）。相場は 1在庫単位あたりの仮価格 ---
+  // [名前, 分類, 在庫単位, 保存区分, 日持ち日数, 発注単位, 入数, 仕入価格(相場・仮)]
+  var needIng = [
+    ['水',       'ドリンク', 'ml', '常温', 999, '—', 1000,    0],
+    ['昆布',     'その他',   'g',  '常温', 365, '袋',  1000, 2500],
+    ['鰹節',     'その他',   'g',  '常温', 365, '袋',  1000, 3000],
+    ['日本酒',   '調味料',   'ml', '常温', 365, '本',  1800, 1200],
+    ['塩',       '調味料',   'g',  '常温', 365, '袋',  1000,  150],
+    ['薄口醤油', '調味料',   'ml', '常温', 365, '本',  1800,  700]
+  ];
+  var hasTaste = (String(ing.getRange(1, 19).getValue()).indexOf('甘味度') === 0);
+  var idByName = {};
+  readRows_(ss, '食材マスタ', 2).forEach(function (r) {
+    idByName[String(r[1]).trim()] = String(r[0]).trim();
+  });
+
+  needIng.forEach(function (x) {
+    if (idByName[x[0]]) return;                       // 既にある食材は作らない（みりん等）
+    var id = 'ING-' + zero4_(nextIdNumber_(ing, ID_RULES['食材マスタ']));
+    var row = lastDataRow_(ing) + 1;
+    // 1:ID 2:名 3:分類 4:在庫単位 5:保存区分 6:日持ち 7:歩留まり率 8:仕入先ID 9:商品コード 10:発注単位 11:入数 12:仕入価格
+    ing.getRange(row, 1, 1, 12).setValues([[id, x[0], x[1], x[2], x[3], x[4], 1, '', '', x[5], x[6], x[7]]]);
+    if (hasTaste) ing.getRange(row, 19, 1, 6).setValues([tasteDefaultFor_(x[0])]);
+    idByName[x[0]] = id;
+    SpreadsheetApp.flush();                            // 次のID採番がかぶらないように確定
+  });
+
+  // --- ② 仕込み品「白だし」を用意（名前で探し、無ければ追加） ---
+  var preId = '';
+  readRows_(ss, '仕込み品マスタ', 2).forEach(function (r) {
+    if (String(r[1]).trim() === '白だし' && !preId) preId = String(r[0]).trim();
+  });
+  if (!preId) {
+    preId = 'PRE-' + zero4_(nextIdNumber_(prep, ID_RULES['仕込み品マスタ']));
+    var prow = lastDataRow_(prep) + 1;
+    // 1:ID 2:名 3:出来上がり量 4:単位 5:保存区分 6:日持ち日数
+    prep.getRange(prow, 1, 1, 6).setValues([[preId, '白だし', 1000, 'ml', '冷蔵', 21]]);
+  } else {
+    // 既にある場合も、出来上がり量・保存・日持ちは基準表の値に合わせておく
+    var frow = findRowById_(prep, preId);
+    if (frow) prep.getRange(frow, 3, 1, 4).setValues([[1000, 'ml', '冷蔵', 21]]);
+  }
+  // 基準表の覚え書き（仕込み時間=10列 / 製作者=11列 / 制作年月日=12列）
+  var mrow = findRowById_(prep, preId);
+  if (mrow) prep.getRange(mrow, 10, 1, 3).setValues([['40分', '津原', new Date(2013, 7, 31)]]);
+
+  // --- ③ 材料（レシピ明細）。rebuildBlock_ の入力列 = 親ID(1)/子ID(3)/使用量(5)/備考(10) ---
+  // [子ID, 使用量, 備考]
+  var mat = [
+    [idByName['水'],       400, ''],
+    [idByName['昆布'],      10, '水に浸けて一晩'],
+    [idByName['鰹節'],      15, ''],
+    [idByName['日本酒'],   100, ''],
+    [idByName['みりん'] || idByName['本みりん'] || '', 100, ''],
+    [idByName['塩'],        20, ''],
+    [idByName['薄口醤油'],  60, '']
+  ].filter(function (m) { return m[0]; });
+  rebuildBlock_(det, [1, 3, 5, 10], [{
+    key: preId,
+    rows: mat.map(function (m) { return [preId, m[0], m[1], m[2]]; })
+  }]);
+
+  // --- ④ 作り方（調理手順）。入力列 = 商品ID(1)/手順番号(3)/手順内容(4)/所要時間(5)/温度火加減(6)/ポイント(7) ---
+  var steps = [
+    '昆布を分量の水に浸け、冷蔵庫で一晩（約1日）おく',
+    '火にかけ、沸騰する直前に昆布を取り出す',
+    '鰹節を入れる',
+    '1〜2分おいて漉す',
+    '日本酒・みりんを鍋に入れ、1〜2分煮る（煮切る）',
+    '沸騰したまま塩を加えて混ぜる',
+    '出汁と薄口醤油を加える',
+    '軽く混ぜ、粗熱が取れたら完成',
+    '冷蔵庫で2〜3週間ほど保存できる'
+  ];
+  rebuildBlock_(proc, [1, 3, 4, 5, 6, 7], [{
+    key: preId,
+    rows: steps.map(function (t, i) { return [preId, i + 1, t, '', '', '']; })
+  }]);
+
+  SpreadsheetApp.flush();
+  ss.setActiveSheet(prep);
+  ui.alert('白だしを取り込みました（' + preId + '）。\n\n' +
+           '・仕込み品マスタ … 白だし（出来上がり1000cc・冷蔵・約21日・製作者 津原）\n' +
+           '・材料7つ、作り方9手順 を入れました\n\n' +
+           '【要確認】\n' +
+           '・昆布・鰹節・日本酒・塩・薄口醤油の仕入価格は “相場の仮” です。実際の値に直すと原価が正しくなります。\n' +
+           '・出来上がり量は基準表どおり1000ccにしています（材料の合計は約705cc）。\n' +
+           '　煮詰め方や水の量で変わるので、実際に作って量ったら直してください。\n\n' +
+           '「🍳 レシピ → レシピを見る（カード）」で白だしを選ぶと、まとめて見られます。');
+}
+
+/** IDから行番号を探す（1列目を上から照合）。無ければ 0 */
+function findRowById_(sh, id) {
+  var last = lastDataRow_(sh);
+  if (last < 2) return 0;
+  var vals = sh.getRange(2, 1, last - 1, 1).getValues();
+  for (var i = 0; i < vals.length; i++) {
+    if (String(vals[i][0]).trim() === String(id).trim()) return i + 2;
+  }
+  return 0;
 }
 
 
@@ -2419,29 +2661,122 @@ function レシピを見る() {
 /** 品と回の一覧（新しい順）。試作の回ごとにカードにできる */
 function recipeList() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var out = {}, order = [];
+  var map = {}, order = [];
+  function ent(target, name, kind) {
+    if (!map[target]) { map[target] = { target: target, name: name || target, kind: kind, trials: [] }; order.push(target); }
+    if (name && map[target].name === target) map[target].name = name;
+    return map[target];
+  }
+
+  // 登録済みレシピ（本番）＝ 商品マスタ・仕込み品マスタ。no=1e9 で先頭に並べる
+  readRows_(ss, '商品マスタ', 2).forEach(function (r) {
+    var id = String(r[0] || '').trim(); if (!id) return;
+    ent(id, String(r[1] || '').trim(), '商品').trials.push({ tryId: id, no: 1e9, label: '登録レシピ（本番）' });
+  });
+  readRows_(ss, '仕込み品マスタ', 2).forEach(function (r) {
+    var id = String(r[0] || '').trim(); if (!id) return;
+    ent(id, String(r[1] || '').trim(), '仕込み品').trials.push({ tryId: id, no: 1e9, label: '登録レシピ（本番）' });
+  });
+
+  // 試作の回
   readRows_(ss, '試作記録', 15).forEach(function (r) {
     var id = String(r[0] || '').trim(); if (!id) return;
     var tgt = String(r[1] || '').trim();
-    var name = String(r[2] || '').trim() || tgt;
     var no = Number(r[3]) || 0;
-    if (!out[tgt]) { out[tgt] = { target: tgt, name: name, kind: (tgt.indexOf('PRE') === 0 ? '仕込み品' : '商品'), trials: [] }; order.push(tgt); }
-    out[tgt].trials.push({ tryId: id, no: no });
+    ent(tgt, String(r[2] || '').trim(), (tgt.indexOf('PRE') === 0 ? '仕込み品' : '商品'))
+      .trials.push({ tryId: id, no: no, label: '第' + no + '回' });
   });
+
   return order.map(function (t) {
-    var o = out[t];
-    o.trials.sort(function (a, b) { return b.no - a.no; });   // 新しい回が先
+    var o = map[t];
+    o.trials.sort(function (a, b) { return b.no - a.no; });   // 登録レシピ→新しい回の順
     return o;
-  }).reverse();
+  });
 }
 
-/** 1つの回（tryId）を、材料・作り方・味・原価・売価をまとめて返す */
-function recipeCard(tryId) {
+/** 日付の値を yyyy/MM/dd に。文字列(2013.8.31)などはそのまま返す */
+function fmtDate_(v) {
+  try { return Utilities.formatDate(new Date(v), 'JST', 'yyyy/MM/dd'); }
+  catch (e) { return String(v || ''); }
+}
+
+/** カードの入口：TRY-… は試作カード、MENU-/PRE-… は登録レシピ（本番）カード */
+function recipeCard(key) {
+  key = String(key || '').trim();
+  if (key.indexOf('TRY') === 0) return recipeCardTrial_(key);
+  return recipeCardMaster_(key);
+}
+
+/** 登録レシピ（本番＝商品マスタ・仕込み品マスタ）を、昔の基準表の形でまとめて返す */
+function recipeCardMaster_(id) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var isPrep = (id.indexOf('PRE') === 0);
+  var card = { tryId: id, target: id, isMaster: true, kind: isPrep ? '仕込み品' : '商品',
+               name: '', no: 0, date: '', tastes: ['', '', '', '', '', ''], hasTaste: false,
+               estimated: false, overall: '', cost: 0, price: 0, salePrice: '', margin: '', rate: '',
+               unitCost: '', lines: [], steps: [], meta: {} };
+
+  if (isPrep) {
+    readRows_(ss, '仕込み品マスタ', 12).forEach(function (r) {
+      if (String(r[0]).trim() !== id) return;
+      card.name = String(r[1] || '').trim() || id;
+      card.cost = Math.round((Number(r[6]) || 0) * 10) / 10;                 // 原価合計(自動)
+      card.unitCost = (r[7] === '' || r[7] == null) ? '' : (Math.round(Number(r[7]) * 10000) / 10000);
+      card.meta = { code: '', cat: '', yield_: (r[2] === '' || r[2] == null) ? '' : (r[2] + ' ' + String(r[3] || '')),
+                    time: String(r[9] || ''), save: String(r[4] || ''),
+                    keep: (r[5] === '' || r[5] == null) ? '' : (r[5] + '日'),
+                    author: String(r[10] || ''), made: r[11] ? fmtDate_(r[11]) : '' };
+    });
+  } else {
+    readRows_(ss, '商品マスタ', 15).forEach(function (r) {
+      if (String(r[0]).trim() !== id) return;
+      card.name = String(r[1] || '').trim() || id;
+      card.cost = Math.round((Number(r[7]) || 0) * 10) / 10;                 // 原価(自動)
+      card.salePrice = (r[3] === '' || r[3] == null) ? '' : Number(r[3]);
+      card.rate = (r[8] === '' || r[8] == null) ? '' : (Math.round(Number(r[8]) * 1000) / 10);  // %
+      if (card.salePrice !== '') card.margin = Math.round((card.salePrice - card.cost) * 10) / 10;
+      card.meta = { code: String(r[10] || ''), cat: String(r[2] || ''), yield_: String(r[11] || ''),
+                    time: String(r[12] || ''), save: '', keep: '',
+                    author: String(r[13] || ''), made: r[14] ? fmtDate_(r[14]) : '' };
+    });
+  }
+
+  // 材料（レシピ明細 親ID=id）。味の推定のために子IDも集める
+  var matLines = [];
+  readRows_(ss, 'レシピ明細', 10).forEach(function (r) {
+    if (String(r[0]).trim() === id && r[2]) {
+      card.lines.push({ name: String(r[3] || '').trim() || String(r[2]).trim(),
+                        qty: Number(r[4]) || 0, unit: String(r[5] || ''),
+                        cost: Math.round((Number(r[8]) || 0) * 10) / 10, memo: String(r[9] || '') });
+      matLines.push({ id: String(r[2]).trim(), qty: Number(r[4]) || 0 });
+    }
+  });
+
+  // 作り方（調理手順 商品ID/仕込みID=id）
+  readRows_(ss, '調理手順', 7).forEach(function (r) {
+    if (String(r[0]).trim() === id && r[3]) {
+      card.steps.push({ no: Number(r[2]) || 0, text: String(r[3] || ''), time: String(r[4] || ''), heat: String(r[5] || '') });
+    }
+  });
+  card.steps.sort(function (a, b) { return a.no - b.no; });
+
+  // 味は材料から推定（目安）。登録レシピには味の記録そのものが無いため
+  try {
+    var est = estimateTaste_(matLines);
+    if (est && est.length === 6 && matLines.length) { card.tastes = est; card.hasTaste = true; card.estimated = true; }
+  } catch (e) {}
+
+  return card;
+}
+
+/** 1つの試作の回（tryId）を、材料・作り方・味・原価・売価をまとめて返す */
+function recipeCardTrial_(tryId) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   tryId = String(tryId || '').trim();
   var card = { tryId: tryId, name: '', no: 0, kind: '', date: '', target: '',
-               tastes: ['', '', '', '', '', ''], hasTaste: false, overall: '',
-               cost: 0, price: 0, lines: [], steps: [] };
+               tastes: ['', '', '', '', '', ''], hasTaste: false, overall: '', isMaster: false,
+               estimated: false, cost: 0, price: 0, salePrice: '', margin: '', rate: '', unitCost: '',
+               lines: [], steps: [], meta: {} };
 
   readRows_(ss, '試作記録', 15).forEach(function (r) {
     if (String(r[0]).trim() !== tryId) return;
@@ -2498,6 +2833,8 @@ function recipeViewHtml_() {
 '  td.r, th.r { text-align: right; white-space: nowrap; }',
 '  ol { margin: 4px 0; padding-left: 22px; line-height: 1.9; }',
 '  .tag { font-size: 11px; color: #7A7168; }',
+'  table.info td { padding: 3px 6px; vertical-align: top; }',
+'  table.info td.il { color: #7A7168; width: 96px; white-space: nowrap; }',
 '  .tr { display: flex; align-items: center; gap: 8px; margin: 3px 0; }',
 '  .tr .nm { width: 48px; font-size: 12px; }',
 '  .bar { flex: 1; height: 12px; background: #EFEAE0; border-radius: 6px; position: relative; }',
@@ -2538,7 +2875,7 @@ function recipeViewHtml_() {
 'function onTarget(){',
 '  var o = LIST[Number(document.getElementById("target").value)||0]; if(!o) return;',
 '  var sel = document.getElementById("no");',
-'  sel.innerHTML = o.trials.map(function(t){ return "<option value=\\""+t.tryId+"\\">第"+t.no+"回</option>"; }).join("");',
+'  sel.innerHTML = o.trials.map(function(t){ return "<option value=\\""+t.tryId+"\\">"+esc(t.label||("第"+t.no+"回"))+"</option>"; }).join("");',
 '  show();',
 '}',
 'function show(){',
@@ -2556,18 +2893,36 @@ function recipeViewHtml_() {
 '  document.getElementById("msg").textContent = "";',
 '  var names = ["甘味","塩味","酸味","旨味","苦味","辛味"];',
 '  var taste = c.hasTaste ? names.map(function(nm,i){ return tasterow(nm, c.tastes[i]); }).join("")',
-'                        : "<p class=\\"empty\\">まだ味は記録されていません（🧪試作→味を記録・調整する）。</p>";',
+'                        : "<p class=\\"empty\\">まだ味は記録されていません。</p>";',
+'  var tasteNote = c.estimated ? " <span class=\\"tag\\">（材料からの目安）</span>" : "";',
 '  var overall = (c.overall==="") ? "-" : c.overall;',
 '  var lines = c.lines.length ? ("<table><tr><th>材料</th><th class=\\"r\\">分量</th><th class=\\"r\\">原価</th></tr>" +',
 '       c.lines.map(function(L){ return "<tr><td>"+esc(L.name)+(L.memo?" <span class=\\"tag\\">"+esc(L.memo)+"</span>":"")+"</td><td class=\\"r\\">"+L.qty+" "+esc(L.unit)+"</td><td class=\\"r\\">"+L.cost+"円</td></tr>"; }).join("") +',
 '       "</table>") : "<p class=\\"empty\\">材料がまだありません。</p>";',
 '  var steps = c.steps.length ? ("<ol>" + c.steps.map(function(s){ var ex=[]; if(s.time)ex.push(s.time); if(s.heat)ex.push(s.heat); return "<li>"+esc(s.text)+(ex.length?" <span class=\\"tag\\">（"+esc(ex.join("・"))+"）</span>":"")+"</li>"; }).join("") + "</ol>") : "<p class=\\"empty\\">作り方がまだありません。</p>";',
-'  var price = (c.kind==="商品") ? ("<div class=\\"price\\">原価 <b>"+c.cost+"</b> 円　売価の目安 <b>"+(c.price||"-")+"</b> 円 <span class=\\"tag\\">（原価率30%の目安）</span></div>")',
-'                               : ("<div class=\\"price\\">原価 <b>"+c.cost+"</b> 円 <span class=\\"tag\\">（仕込み品なので売価は出しません）</span></div>");',
+'  var m = c.meta || {};',
+'  function inf(label, v){ return v ? ("<tr><td class=\\"il\\">"+label+"</td><td>"+esc(v)+"</td></tr>") : ""; }',
+'  var info = "";',
+'  if (c.isMaster) {',
+'    var irows = inf("商品コード", m.code) + inf("カテゴリ", m.cat) + inf((c.kind==="商品"?"仕上がり量":"出来上がり量"), m.yield_) + inf("仕込み時間", m.time) + inf("保存", m.save) + inf("日持ち", m.keep) + inf("製作者", m.author) + inf("制作年月日", m.made);',
+'    if (irows) info = "<div class=\\"sec\\">基本情報</div><table class=\\"info\\">" + irows + "</table>";',
+'  }',
+'  var price;',
+'  if (c.isMaster && c.kind==="商品") {',
+'    price = "<div class=\\"price\\">売価 <b>"+(c.salePrice===""?"-":c.salePrice)+"</b> 円　原価 <b>"+c.cost+"</b> 円　粗利 <b>"+(c.margin===""?"-":c.margin)+"</b> 円"+(c.rate===""?"":"　<span class=\\"tag\\">原価率 "+c.rate+"%</span>")+"</div>";',
+'  } else if (c.isMaster) {',
+'    price = "<div class=\\"price\\">原価 <b>"+c.cost+"</b> 円"+(c.unitCost===""?"":"　単位原価 <b>"+c.unitCost+"</b> 円")+" <span class=\\"tag\\">（仕込み品なので売価は出しません）</span></div>";',
+'  } else if (c.kind==="商品") {',
+'    price = "<div class=\\"price\\">原価 <b>"+c.cost+"</b> 円　売価の目安 <b>"+(c.price||"-")+"</b> 円 <span class=\\"tag\\">（原価率30%の目安）</span></div>";',
+'  } else {',
+'    price = "<div class=\\"price\\">原価 <b>"+c.cost+"</b> 円 <span class=\\"tag\\">（仕込み品なので売価は出しません）</span></div>";',
+'  }',
+'  var sub = c.isMaster ? (esc(c.kind)+"　登録レシピ（本番）"+(m.made?"　"+esc(m.made):"")) : (esc(c.kind)+"　第"+c.no+"回"+(c.date?"　"+esc(c.date):"")+"　総合評価 "+overall);',
 '  document.getElementById("card").innerHTML =',
 '    "<p class=\\"ttl\\">"+esc(c.name)+"</p>" +',
-'    "<p class=\\"sub\\">"+esc(c.kind)+"　第"+c.no+"回"+(c.date?"　"+esc(c.date):"")+"　総合評価 "+overall+"</p>" +',
-'    "<div class=\\"sec\\">味のバランス</div>" + taste +',
+'    "<p class=\\"sub\\">"+sub+"</p>" +',
+'    info +',
+'    "<div class=\\"sec\\">味のバランス"+tasteNote+"</div>" + taste +',
 '    "<div class=\\"sec\\">材料</div>" + lines +',
 '    "<div class=\\"sec\\">作り方</div>" + steps +',
 '    price;',
@@ -2605,11 +2960,15 @@ var COLUMN_ROLES = {
                  ROLE_PICK, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_AUTO, ROLE_AUTO,
                  ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN],
 
-  // 仕込みID / 仕込み品名 / 出来上がり量 / 単位 / 保存区分 / 日持ち日数 / 原価合計 / 単位原価 / チェック
-  '仕込み品マスタ': [ROLE_ID, ROLE_IN, ROLE_IN, ROLE_PICK, ROLE_PICK, ROLE_IN, ROLE_AUTO, ROLE_AUTO, ROLE_AUTO],
+  // 仕込みID / 仕込み品名 / 出来上がり量 / 単位 / 保存区分 / 日持ち日数 / 原価合計 / 単位原価 / チェック /
+  // 仕込み時間 / 製作者 / 制作年月日（基準表の項目を後ろに追加）
+  '仕込み品マスタ': [ROLE_ID, ROLE_IN, ROLE_IN, ROLE_PICK, ROLE_PICK, ROLE_IN, ROLE_AUTO, ROLE_AUTO, ROLE_AUTO,
+                     ROLE_IN, ROLE_IN, ROLE_IN],
 
-  // 商品ID / 商品名 / カテゴリ / 売価 / 目標原価率 / 提供開始日 / 提供終了日 / 原価 / 原価率 / 目標差
-  '商品マスタ': [ROLE_ID, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_AUTO, ROLE_AUTO, ROLE_AUTO],
+  // 商品ID / 商品名 / カテゴリ / 売価 / 目標原価率 / 提供開始日 / 提供終了日 / 原価 / 原価率 / 目標差 /
+  // 商品コード / 仕上がり量 / 仕込み時間 / 製作者 / 制作年月日（基準表の項目を後ろに追加）
+  '商品マスタ': [ROLE_ID, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_AUTO, ROLE_AUTO, ROLE_AUTO,
+                 ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN, ROLE_IN],
 
   // 親ID / 親名 / 子ID / 子名 / 使用量 / 単位 / 食材分原価 / 仕込み分原価 / 原価計 / 備考
   'レシピ明細': [ROLE_PICK, ROLE_AUTO, ROLE_PICK, ROLE_AUTO, ROLE_IN, ROLE_AUTO, ROLE_AUTO, ROLE_AUTO, ROLE_AUTO, ROLE_IN],
@@ -2744,12 +3103,22 @@ var EXTRA_NOTES = {
        'ここが「炊き上がり倍率」を決める唯一の場所です。\n' +
        '実際に作って量ってみて違っていたら、ここだけ直せば\n' +
        'それを使っている全部の商品に反映されます。\n\n' +
-       '※いまどうなっているかは、右の「チェック」列に出ています。'
+       '※いまどうなっているかは、右の「チェック」列に出ています。',
+    10: '仕込みにかかる時間の目安（例：40分）。覚え書きです。計算には使いません。',
+    11: 'この仕込み品のレシピを作った人の名前（例：津原）。覚え書きです。',
+    12: 'このレシピを作った（決めた）日。覚え書きです。'
   },
   'レシピ明細': {
     5: '1食ぶんに使う量です（捨てる部分を除いた正味）。\n\n' +
        '★ご飯のような仕込み品を使うときは、盛り付ける量（炊いた後の量）で書きます。\n' +
        '　原価は自動で生米に戻して計算されるので、生米の量を書く必要はありません。'
+  },
+  '商品マスタ': {
+    11: '本部の商品コード・POSコードなど（任意）。台帳の中で使う「商品ID」とは別に、\nお店で使っている番号を控えておく欄です。空のままでも構いません。',
+    12: '1食ぶんの仕上がり量の目安（例：250g、1杯）。覚え書きです。計算には使いません。',
+    13: '作る（仕込む）のにかかる時間の目安（例：15分）。覚え書きです。',
+    14: 'このレシピを作った人の名前（例：津原）。覚え書きです。',
+    15: 'このレシピを作った（決めた）日。覚え書きです。'
   }
 };
 var PROTECT_TAG  = '【自動計算】';
@@ -2782,6 +3151,12 @@ function lastDataRow_(sh, col) {
 function ensureRows_(sh) {
   var need = LAST_ROW + 1 - sh.getMaxRows();
   if (need > 0) sh.insertRowsAfter(sh.getMaxRows(), need);
+}
+
+/** 列が足りなければ右に足す（既存データは動かさない） */
+function ensureCols_(sh, need) {
+  var have = sh.getMaxColumns();
+  if (need > have) sh.insertColumnsAfter(have, need - have);
 }
 
 /** ヘッダー名から役割の印を取り除く（何度実行しても印が増えないようにするため） */
@@ -2844,6 +3219,7 @@ function applyRoles_(sh) {
   var roles = COLUMN_ROLES[sh.getName()];
   if (!roles) return;
   ensureRows_(sh);
+  ensureCols_(sh, roles.length);   // 列が足りないと getRange で落ちるので先に確保
 
   var heads = sh.getRange(1, 1, 1, roles.length).getValues()[0];
   var newHeads = [], bgs = [], fonts = [];
@@ -2879,6 +3255,7 @@ function applyProtection_(sh) {
   var roles = COLUMN_ROLES[sh.getName()];
   if (!roles) return;
   ensureRows_(sh);
+  ensureCols_(sh, roles.length);
 
   // 前回このスクリプトが付けた保護を外してから付け直す（何度実行しても増えない）
   sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) {
