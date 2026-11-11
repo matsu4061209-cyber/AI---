@@ -88,6 +88,7 @@ function createWeekSheetFrom_(ss, currentSheet) {
 
   // 7-2. ポジションの色は新しい週に持ち越さない
   resetPositionColorsOnCopy_(newSheet);
+  fixDayTimeFormat_(newSheet);      // 出勤・退勤・休入・休終を「900→9:00」の書式にそろえる
 
   // 8. 祝日の色付けを新しいシートにも反映する（「祝日」シートは既にあるものを使う）
   applyHolidayColoring_(newSheet);
@@ -128,6 +129,82 @@ function fixTimeFormat_(sheet) {
   var mergedRanges = range.getMergedRanges();
   mergedRanges.forEach(function(m) { m.breakApart(); });
   range.setNumberFormat('0":"00');
+}
+
+// 右側の日別シフト表の「出勤・退勤・休入・休終」も、900と打てば 9:00 と出るようにする。
+// 転写は「書いた行の出勤・退勤」しか直していなかったので、休憩の2列と、
+// 誰も入っていない行の書式が抜けていた＝場所によって 1600 のまま出る、の正体。MARKER_DAY_TIME_FORMAT
+function fixDayTimeFormat_(week) {
+  ADJUST_BLOCKS.forEach(function(block) {
+    var range = week.getRange(block.head + 1, block.col - 4, ADJUST_ROWS, 4);   // 出勤〜休終
+    range.getMergedRanges().forEach(function(m) { m.breakApart(); });
+    range.setNumberFormat('0":"00');
+  });
+}
+
+// 「16:00」と打つと本物の時刻になってしまうことがある。この表は 1600 という数字で持つ決まりなので、
+// 時刻のまま置いておくと升目にも出ず、決まりの確認も効かなくなる。打ち方に関わらず数字に直す。
+// 中身ではなく「画面の見え方」から読む（古い日付の時間帯のズレに引っかからないため）
+function fixTypedTimes_(week, range) {
+  var r0 = range.getRow(), c0 = range.getColumn();
+  var r1 = r0 + range.getNumRows() - 1, c1 = c0 + range.getNumColumns() - 1;
+  var fixed = 0;
+  ADJUST_BLOCKS.forEach(function(block) {
+    var left = block.col - 4, right = block.col - 1;
+    if (c1 < left || c0 > right) return;
+    var top = Math.max(r0, block.head + 1), bottom = Math.min(r1, block.head + ADJUST_ROWS);
+    if (top > bottom) return;
+    var from = Math.max(c0, left), to = Math.min(c1, right);
+    var area = week.getRange(top, from, bottom - top + 1, to - from + 1);
+    var values = area.getValues(), shown = area.getDisplayValues(), changed = false;
+    for (var i = 0; i < values.length; i++) {
+      for (var j = 0; j < values[i].length; j++) {
+        if (!(values[i][j] instanceof Date)) continue;
+        var m = /^(\d{1,2}):(\d{2})/.exec(String(shown[i][j]).trim());
+        if (!m) continue;
+        values[i][j] = Number(m[1]) * 100 + Number(m[2]);
+        changed = true;
+        fixed++;
+      }
+    }
+    if (changed) { area.setValues(values); area.setNumberFormat('0":"00'); }
+  });
+  return fixed;
+}
+
+// 休入に時間を入れたら、休終をその1時間後にしておく（休憩はたいてい1時間のため）。
+// 入れるのは「休終が空のとき」と「休終が休入より後になっていないとき」だけ。
+// 手で入れた休終は上書きしない。MARKER_BREAK_PLUS_HOUR
+var BREAK_DEFAULT_MINUTES = 60;
+
+function fillBreakEnd_(week, range) {
+  var r0 = range.getRow(), c0 = range.getColumn();
+  var r1 = r0 + range.getNumRows() - 1, c1 = c0 + range.getNumColumns() - 1;
+  var filled = 0;
+  ADJUST_BLOCKS.forEach(function(block) {
+    var breakCol = block.col - 2;                 // 休入（休終はその右どなり）
+    if (c1 < breakCol || c0 > breakCol) return;
+    var top = Math.max(r0, block.head + 1), bottom = Math.min(r1, block.head + ADJUST_ROWS);
+    if (top > bottom) return;
+    var rows = bottom - top + 1;
+    var startRange = week.getRange(top, breakCol, rows, 1);
+    var endRange = week.getRange(top, breakCol + 1, rows, 1);
+    var starts = startRange.getValues(), startsShown = startRange.getDisplayValues();
+    var ends = endRange.getValues(), endsShown = endRange.getDisplayValues();
+    var changed = false;
+    for (var i = 0; i < rows; i++) {
+      var from = minutesOfTime_(timeNumber_(starts[i][0], startsShown[i][0]));
+      if (from === null) continue;                // 休入が空・読めないときは何もしない
+      var now = minutesOfTime_(timeNumber_(ends[i][0], endsShown[i][0]));
+      if (now !== null && now > from) continue;   // すでに入っている休終は触らない
+      var to = from + BREAK_DEFAULT_MINUTES;
+      ends[i][0] = Math.floor(to / 60) * 100 + (to % 60);
+      changed = true;
+      filled++;
+    }
+    if (changed) endRange.setValues(ends).setNumberFormat('0":"00');
+  });
+  return filled;
 }
 
 // メニューが無くても実行できるように、Appsスクリプトエディタから直接実行するための入り口
@@ -204,6 +281,7 @@ function onOpen() {
   // ふだん使わないものは下のまとまりに入れて、毎週使うものを探しやすくする
   ui.createMenu('スタッフ管理')
     // ----- 毎週のシフト作り -----
+    .addItem('希望と今の表をくらべる', 'openRequestCompare')
     .addItem('決まりを点検する（未成年・休憩）', 'checkWeekLawNow')
     .addItem('足りないところを募集する', 'openRecruit')
     .addItem('目安人数を週シートに入れ直す', 'refreshWeekTargets')
@@ -530,8 +608,11 @@ function saveProtectedStaff(names) {
 }
 
 // 名簿(4〜25行目)の空いている行に新しいスタッフの名前を入力する
+// 週シート以外（日別勤務時間・月次集計など）でも押せてしまうと、そのシートの4〜25行目を
+// 名簿と勘違いして書き換えてしまうので、週シートかどうかを先に確かめる。MARKER_STAFF_WEEK_GUARD
 function addStaffMember() {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var sheet = activeWeekSheet_();
+  if (!sheet) return;
   var ui = SpreadsheetApp.getUi();
 
   var names = sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues();
@@ -559,8 +640,12 @@ function addStaffMember() {
 }
 
 // 名簿(4〜25行目)を一覧表示し、プルダウンで選んで削除する画面を開く
+// 週シート以外でも押せてしまうと、そのシートの4〜25行目の文字が「スタッフの名前」として
+// プルダウンに出てしまう（日別勤務時間には名前が並ぶので見分けがつかない）。先に確かめる。
+// MARKER_STAFF_WEEK_GUARD
 function removeStaffMember() {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var sheet = activeWeekSheet_();
+  if (!sheet) return;
   var ui = SpreadsheetApp.getUi();
 
   var names = sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues();
@@ -579,47 +664,208 @@ function removeStaffMember() {
   }).join('');
 
   var html = '<div style="font-family:sans-serif;padding:8px;font-size:14px;">' +
-    '<p>削除する人を選んでください</p>' +
+    '<p style="margin:0 0 6px;">削除する人を選んでください</p>' +
+    '<p style="margin:0 0 10px;color:#555;font-size:12px;">今週から先の週ぜんぶの名簿（名前と時間）と、' +
+    '区分・生年月日・時給の設定から消します。過ぎた週と、右の日別シフト表はそのまま残します</p>' +
     '<select id="targetRow" style="width:100%;padding:6px;font-size:14px;">' + options + '</select>' +
-    '<div style="margin-top:16px;text-align:right;">' +
-    '<button onclick="google.script.host.close()" style="margin-right:8px;padding:6px 12px;">キャンセル</button>' +
-    '<button onclick="doDelete()" style="padding:6px 12px;">削除する</button>' +
+    '<div id="msg" style="margin-top:10px;font-size:12.5px;white-space:pre-wrap;"></div>' +
+    '<div style="margin-top:12px;text-align:right;">' +
+    '<button onclick="google.script.host.close()" style="margin-right:8px;padding:6px 12px;">閉じる</button>' +
+    '<button id="go" onclick="doDelete()" style="padding:6px 12px;">削除する</button>' +
     '</div>' +
     '</div>' +
     '<script>' +
     'function doDelete(){' +
-    '  var row = document.getElementById("targetRow").value;' +
-    '  google.script.run.withSuccessHandler(function(){ google.script.host.close(); }).deleteStaffRow(Number(row));' +
+    '  var sel = document.getElementById("targetRow");' +
+    '  var btn = document.getElementById("go");' +
+    '  var msg = document.getElementById("msg");' +
+    '  if (!sel.value) return;' +
+    '  btn.disabled = true; msg.style.color = "#555"; msg.textContent = "消しています…";' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function(r){' +
+    '      btn.disabled = false;' +
+    '      msg.style.color = "#1155CC";' +
+    '      msg.textContent = r.text;' +
+    '      if (sel.selectedIndex >= 0) sel.remove(sel.selectedIndex);' +
+    '      if (!sel.options.length) btn.disabled = true;' +
+    '    })' +
+    '    .withFailureHandler(function(e){' +
+    '      btn.disabled = false; msg.style.color = "#C00000";' +
+    '      msg.textContent = "消せませんでした：" + ((e && e.message) ? e.message : e);' +
+    '    })' +
+    '    .deleteStaffRow(Number(sel.value));' +
     '}' +
     '</script>';
 
-  var output = HtmlService.createHtmlOutput(html).setWidth(320).setHeight(180);
+  var output = HtmlService.createHtmlOutput(html).setWidth(340).setHeight(280);
   ui.showModalDialog(output, 'スタッフを削除');
+}
+
+// 1枚の週シートの名簿から、その名前の行を消して下を1行ずつ上に詰める。消した数を返す
+// 名前の突き合わせは flatName_（全角・半角の空白を取る）。下から見るので、詰めても番号がずれない
+function removeRosterName_(week, flat) {
+  var lastRosterRow = ROSTER_START_ROW + ROSTER_ROWS - 1;
+  var names = week.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues();
+  var removed = 0;
+  for (var i = ROSTER_ROWS - 1; i >= 0; i--) {
+    if (flatName_(names[i][0]) !== flat) continue;
+    var row = ROSTER_START_ROW + i;
+    if (row < lastRosterRow) {
+      // copyTo は値だけでなく「時刻の表示形式」などの書式もまとめて移動するため、
+      // getValues/setValues（値だけ）ではなくこちらを使う
+      week.getRange(row + 1, 1, lastRosterRow - row, 16)
+        .copyTo(week.getRange(row, 1, lastRosterRow - row, 16));
+    }
+    week.getRange(lastRosterRow, 1, 1, 16).clearContent();
+    removed++;
+  }
+  return removed;
+}
+
+// スタッフ区分シート（A=名前 B=区分 C=生年月日 D=高校生 E=今の時給 F=前の時給 G=いつから）
+// から、その人の行を消して下を1行ずつ上に詰める。
+// ★行ごと削除（deleteRow）は使わない。J列に「数式の自動チェック」の控えが入っているため。
+// MARKER_STAFF_DELETE_ALL
+function removeRoleRow_(flat) {
+  var sheet = getRoleSheet_();
+  var last = sheet.getLastRow();
+  if (last < 2) return 0;
+  var names = sheet.getRange(2, 1, last - 1, 1).getValues();
+  var removed = 0;
+  for (var i = names.length - 1; i >= 0; i--) {
+    if (flatName_(names[i][0]) !== flat) continue;
+    var row = i + 2;
+    if (row < last) {
+      sheet.getRange(row + 1, 1, last - row, ROLE_WAGE_FROM_COL)
+        .copyTo(sheet.getRange(row, 1, last - row, ROLE_WAGE_FROM_COL));
+    }
+    sheet.getRange(last, 1, 1, ROLE_WAGE_FROM_COL).clearContent();
+    last--;                      // 1行詰めたので、いちばん下が1つ上がる
+    removed++;
+  }
+  return removed;
+}
+
+// 「時間を固定するスタッフ」（この書類の覚えがき）から外す
+function removeProtectedStaff_(flat) {
+  var props = PropertiesService.getDocumentProperties();
+  var raw = props.getProperty('protectedStaff');
+  if (!raw) return 0;
+  var list = [];
+  try { list = JSON.parse(raw) || []; } catch (err) { return 0; }
+  var kept = list.filter(function(n) { return flatName_(n) !== flat; });
+  if (kept.length === list.length) return 0;
+  props.setProperty('protectedStaff', JSON.stringify(kept));
+  return list.length - kept.length;
+}
+
+// まだ週シートが無い週にフォームから届いていた希望（保留）を消す。
+// 専用シートなので、行ごと消して詰めてよい（下から見るので番号がずれない）
+function removePendingFor_(flat) {
+  var pending = getPendingSheet_();
+  var last = pending.getLastRow();
+  if (last < PENDING_FIRST_ROW) return 0;
+  var rows = pending.getRange(PENDING_FIRST_ROW, 1, last - PENDING_FIRST_ROW + 1, 2).getValues();
+  var removed = 0;
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (flatName_(rows[i][1]) !== flat) continue;
+    pending.deleteRow(PENDING_FIRST_ROW + i);
+    removed++;
+  }
+  return removed;
+}
+
+// その週の右の日別シフト表（DAY_BLOCKS の名前の欄）に、その人が入っているか。
+// 曜日ごとに7回読むと、週の枚数だけ時間がかかるので、同じ列はまとめて1回で読む
+function weekHasNameInDays_(week, flat) {
+  var byCol = {};
+  DAY_BLOCKS.forEach(function(block) {
+    var m = /^([A-Z]+)(\d+):[A-Z]+(\d+)$/.exec(block.names);
+    if (!m) return;
+    var col = m[1], top = Number(m[2]), bottom = Number(m[3]);
+    if (!byCol[col]) byCol[col] = { top: top, bottom: bottom };
+    byCol[col].top = Math.min(byCol[col].top, top);
+    byCol[col].bottom = Math.max(byCol[col].bottom, bottom);
+  });
+  var cols = Object.keys(byCol);
+  for (var i = 0; i < cols.length; i++) {
+    var span = byCol[cols[i]];
+    var vals = week.getRange(cols[i] + span.top + ':' + cols[i] + span.bottom).getValues();
+    for (var j = 0; j < vals.length; j++) {
+      if (flatName_(vals[j][0]) === flat) return true;
+    }
+  }
+  return false;
+}
+
+// 週シートの名前（261116）を 'yyyy-MM-dd' に直す
+function weekNameToYmd_(name) {
+  return '20' + name.slice(0, 2) + '-' + name.slice(2, 4) + '-' + name.slice(4, 6);
 }
 
 // removeStaffMember のプルダウンから呼ばれる削除の実処理
 // ★末尾に _ を付けると google.script.run から呼べなくなるため付けない
-// 削除した行より下の名簿(A〜P列)を1行ずつ上に詰め、最後の行を空にする
+// 辞めた人の名前が、シフトを作るときに出てこないようにするのが目的なので、
+// 「今日が入る週から先ぜんぶ」の名簿（名前と時間）と、スタッフ区分・生年月日・時給・
+// 時間を固定するスタッフ・まだ入れていない週の希望を、まとめて消す。
+// 過ぎた週は実績なので触らない。右の日別シフト表は、その後の調整で動かすので触らない（残りは知らせる）。
+// MARKER_STAFF_DELETE_ALL
 function deleteStaffRow(row) {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  var lastRosterRow = ROSTER_START_ROW + ROSTER_ROWS - 1;
-
-  if (row < lastRosterRow) {
-    // copyTo は値だけでなく「時刻の表示形式」などの書式もまとめて移動するため、
-    // getValues/setValues（値だけ）ではなくこちらを使う
-    var sourceRange = sheet.getRange(row + 1, 1, lastRosterRow - row, 16);
-    var destRange = sheet.getRange(row, 1, lastRosterRow - row, 16);
-    sourceRange.copyTo(destRange);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var week = ss.getActiveSheet();
+  // 6けたの週シート（261116）だけを相手にする。古い4けたの名前の週は、日付の大小を
+  // くらべられないので触らない（実績として残す）
+  if (!/^\d{6}$/.test(week.getName())) {
+    throw new Error('週シート（261116 のような名前）を開いてから押してください。');
   }
-  sheet.getRange(lastRosterRow, 1, 1, 16).clearContent();
+  var name = String(week.getRange(row, 1).getValue()).trim();
+  if (!name) throw new Error('その行には名前が入っていません。いちど閉じて、開き直してください。');
+  var flat = flatName_(name);
+  var today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  var monday = addDaysYmd_(today, -((dowOfYmd_(today) + 6) % 7));   // 今日が入る週の月曜
+  var done = [], left = [];
+  ss.getSheets().forEach(function(s) {
+    var n = s.getName();
+    if (!/^\d{6}$/.test(n) || weekNameToYmd_(n) < monday) return;   // 過ぎた週は実績として残す
+    if (removeRosterName_(s, flat)) done.push(n);
+    if (weekHasNameInDays_(s, flat)) left.push(n);
+  });
+  var role = removeRoleRow_(flat);
+  var fixed = removeProtectedStaff_(flat);
+  var pending = removePendingFor_(flat);
+  // 名簿から消えた人が、月次集計や日別勤務時間に残らないように作り直す
+  try {
+    if (ss.getSheetByName(MONTHLY_SHEET_NAME)) refreshMonthlySummary_();
+    if (ss.getSheetByName(DAILY_SHEET_NAME)) refreshDailyHours_();
+  } catch (err) {
+    Logger.log('スタッフ削除のあとの作り直しに失敗: ' + err.message);
+  }
+  var lines = [name + ' さんを消しました'];
+  lines.push('・名簿（名前と時間）：' + (done.length ? done.length + '枚（' + done.join('・') + '）' : 'なし'));
+  lines.push('・区分・生年月日・時給：' + (role ? '消しました' : 'もともと入っていません'));
+  if (fixed) lines.push('・時間を固定するスタッフ：外しました');
+  if (pending) lines.push('・まだ入れていない週の希望：' + pending + '件');
+  if (left.length) {
+    lines.push('※ 右の日別シフト表にはまだ名前が入っています：' + left.join('・') + '（そのままで大丈夫です）');
+  }
+  return { name: name, done: done, left: left, role: role, fixed: fixed, pending: pending,
+    from: monday, text: lines.join('\n') };
 }
 
 // ===================== スマホのシフト希望フォームとの連携 =====================
 // フォーム（別のGAS）もこの「シフト希望設定」シートを同じ並びで読み書きする。並びを変える時は両方を直すこと
 var REQUEST_SETTINGS_SHEET = 'シフト希望設定';
-var REQUEST_PENDING_HEADER_ROW = 8;
-var REQUEST_PENDING_FIRST_ROW = 9;   // まだ週シートが無い週の希望
 var REQUEST_PENDING_COLS = 19;       // シート名・名前・時間14・備考・送信日時・端末ID
+/* 保留（まだ週シートが無い週）の希望は、専用シート「保留の希望」に置く。
+   前は「シフト希望設定」シートの9行目以降に置いていた。しかしそのシートは
+   D3:D49＝設定の説明／E3:E49＝設定の値 で、保留のデータと行が重なる。
+   いまは保留が設定の下（50行目以降）に積まれているので壊れていないが、
+   設定をもう1つ足すと 50行目＝保留の1行目 と重なって壊れる（時間幅やページURLがずれる）。
+   専用シートに分ければ、行を消しても詰めても安全。MARKER_PENDING_OWN_SHEET          */
+var PENDING_SHEET_NAME = '保留の希望';
+var PENDING_FIRST_ROW = 2;           // 1行目は見出し
+var OLD_PENDING_HEADER_ROW = 8;      // 前の見出し行（D8・E8は「書庫のURL」の設定なので触らない）
+var OLD_PENDING_FIRST_ROW = 9;       // 前の置き場所。残っている分を移すときだけ見る
 var REQUEST_INPUT_COLS = 15;         // 週シートのB〜P列
 /* ----- お店ごとに変わる2つ。設定シートに入っていればそれを使う -----
    新しいお店では、メニュー「お店のはじめ方」から入れてもらう。
@@ -670,6 +916,54 @@ var REQUEST_END_TO_CELL = 'E45';        // 退勤で選べる いちばん遅い
 var REQUEST_DEFAULT_BASE = { closingDay: 15, deadlineWeeks: 2, deadlineTime: '23:59', castClosingDay: 20,
   startFrom: '9:00', startTo: '19:30', endFrom: '12:00', endTo: '21:30' };
 
+// 保留（まだ週シートが無い週）の希望シートを取得（無ければ非表示で作る）。
+// 取るたびに、前の置き場所に残っている分を引っ越す（1回で終わる・自動）。MARKER_PENDING_OWN_SHEET
+function getPendingSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(PENDING_SHEET_NAME);
+  if (!sheet) {
+    var active = ss.getActiveSheet();   // シート作成で表示中のシートが変わるので先に覚えておく
+    sheet = ss.insertSheet(PENDING_SHEET_NAME);
+    ss.setActiveSheet(active);
+    var headers = ['シート名', '名前'];
+    ['月', '火', '水', '木', '金', '土', '日'].forEach(function(d) { headers.push(d + ' 出勤', d + ' 退勤'); });
+    headers.push('備考', '送信日時', '端末ID');
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#EFF0ED');
+    sheet.setFrozenRows(1);
+    sheet.getRange('A:A').setNumberFormat('@');     // シート名（261116）が日付や数字に化けないように
+    sheet.getRange('S:S').setNumberFormat('@');     // 端末ID
+    sheet.getRange('A1').setNote('「次週シート作成」でその週のシートができると、ここから週シートへ入って行が消えます');
+    sheet.hideSheet();
+  }
+  movePendingFromSettings_(ss, sheet);
+  return sheet;
+}
+
+// 前の置き場所（シフト希望設定シートの9行目以降）に残っている保留を、専用シートへ移す。
+// A列が6けたの週シート名で、名前が入っている行だけが保留のデータ（設定の行はA列が空）
+function movePendingFromSettings_(ss, pendingSheet) {
+  var settings = ss.getSheetByName(REQUEST_SETTINGS_SHEET);
+  if (!settings) return 0;
+  var last = settings.getLastRow();
+  if (last < OLD_PENDING_FIRST_ROW) return 0;
+  var n = last - OLD_PENDING_FIRST_ROW + 1;
+  // まずA・B列だけ見て、前の置き場所に残っているかを調べる（ふだんは0件なのでここで終わる）
+  var head = settings.getRange(OLD_PENDING_FIRST_ROW, 1, n, 2).getValues();
+  var at = [];
+  for (var i = 0; i < n; i++) {
+    if (/^\d{6}$/.test(String(head[i][0]).trim()) && String(head[i][1]).trim()) at.push(i);
+  }
+  if (!at.length) return 0;
+  var rows = settings.getRange(OLD_PENDING_FIRST_ROW, 1, n, REQUEST_PENDING_COLS).getValues();
+  pendingSheet.getRange(pendingSheet.getLastRow() + 1, 1, at.length, REQUEST_PENDING_COLS)
+    .setValues(at.map(function(i) { return rows[i]; }));
+  at.forEach(function(i) {
+    settings.getRange(OLD_PENDING_FIRST_ROW + i, 1, 1, REQUEST_PENDING_COLS).clearContent();   // 行は消さない（設定が上にある）
+  });
+  Logger.log('保留の希望を ' + at.length + '件、専用シートへ移しました');
+  return at.length;
+}
+
 // 「シフト希望設定」シートを取得（無ければ非表示で作る）
 function getRequestSettingsSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -682,11 +976,6 @@ function getRequestSettingsSheet_() {
     sheet.getRange('B3:B5').setNumberFormat('@');
     sheet.getRange('R:R').setNumberFormat('@');
     sheet.getRange('A1').setValue('シフト希望の募集設定（メニュー「スタッフ管理」→「シフト希望の募集設定」で変更します）');
-    sheet.getRange('A7').setValue('まだ週シートが無い週の希望（「次週シート作成」でシートを作ると自動でシートに入り、ここから消えます）');
-    var headers = ['シート名', '名前'];
-    ['月', '火', '水', '木', '金', '土', '日'].forEach(function(d) { headers.push(d + ' 出勤', d + ' 退勤'); });
-    headers.push('備考', '送信日時', '端末ID');
-    sheet.getRange(REQUEST_PENDING_HEADER_ROW, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
     ss.setActiveSheet(active);
     sheet.hideSheet();
   }
@@ -778,17 +1067,21 @@ function getRequestSettingsSheet_() {
     if (String(colorCell.getDisplayValue()).trim() === '') colorCell.setValue(pos.color);
   });
   sheet.getRange('A3:A5').setValues([['今回だけの開始週（空なら自動）'], ['今回だけの週数'], ['今回だけのスタッフ入力締切']]);
+  // 前の版は、7行目に案内・8行目に保留の見出しを書いていた。保留は専用シートに移したので片づける。
+  // ★8行目の D・E列は「書庫ファイルのURL」の設定なので触らない
+  sheet.getRange('A7').setValue('※ まだ週シートが無い週の希望は「保留の希望」シート（ふだんは非表示）に入ります');
+  sheet.getRange(OLD_PENDING_HEADER_ROW, 1, 1, 3).clearContent();                          // A〜C
+  sheet.getRange(OLD_PENDING_HEADER_ROW, 6, 1, REQUEST_PENDING_COLS - 5).clearContent();   // F〜S
   return sheet;
 }
 
 // 新しく作った週シートに、フォームから先に送られていたその週の希望を入れ、保留から消す
 function applyPendingRequests_(sheet) {
-  var settings = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(REQUEST_SETTINGS_SHEET);
-  if (!settings) return;
-  var last = settings.getLastRow();
-  if (last < REQUEST_PENDING_FIRST_ROW) return;
+  var pending = getPendingSheet_();
+  var last = pending.getLastRow();
+  if (last < PENDING_FIRST_ROW) return;
 
-  var rows = settings.getRange(REQUEST_PENDING_FIRST_ROW, 1, last - REQUEST_PENDING_FIRST_ROW + 1, REQUEST_PENDING_COLS).getValues();
+  var rows = pending.getRange(PENDING_FIRST_ROW, 1, last - PENDING_FIRST_ROW + 1, REQUEST_PENDING_COLS).getValues();
   var roster = sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, 1).getValues()
     .map(function(r) { return String(r[0]).trim(); });
 
@@ -798,7 +1091,7 @@ function applyPendingRequests_(sheet) {
     var index = roster.indexOf(name);
     if (index === -1) continue; // 名簿に名前が無い希望は消さずに残す
     sheet.getRange(ROSTER_START_ROW + index, 2, 1, REQUEST_INPUT_COLS).setValues([rows[i].slice(2, 2 + REQUEST_INPUT_COLS)]);
-    settings.deleteRow(REQUEST_PENDING_FIRST_ROW + i);
+    pending.deleteRow(PENDING_FIRST_ROW + i);   // 専用シートなので、行ごと消して詰めてよい
   }
 }
 
@@ -968,9 +1261,10 @@ function openShiftRequestSettings() {
 
   // シートがまだ無いため保留になっている希望の件数
   var pendingCounts = {};
-  var last = sheet.getLastRow();
-  if (last >= REQUEST_PENDING_FIRST_ROW) {
-    sheet.getRange(REQUEST_PENDING_FIRST_ROW, 1, last - REQUEST_PENDING_FIRST_ROW + 1, 2).getValues().forEach(function(r) {
+  var pendingSheet = getPendingSheet_();
+  var last = pendingSheet.getLastRow();
+  if (last >= PENDING_FIRST_ROW) {
+    pendingSheet.getRange(PENDING_FIRST_ROW, 1, last - PENDING_FIRST_ROW + 1, 2).getValues().forEach(function(r) {
       if (r[0] && r[1]) pendingCounts[String(r[0])] = (pendingCounts[String(r[0])] || 0) + 1;
     });
   }
@@ -1860,6 +2154,10 @@ var ADJUST_SHEET_NAME = '調整前の時間';
 var ADJUST_ROWS = 16;              // 1つの曜日ブロックの人数
 var ADJUST_GRID_COLS = 62;         // 15分きざみのマスの数（左はY〜CH、右はDI〜FR）
 var ADJUST_COLOR = '#E0E0E0';      // 削ったマスの薄いグレー
+// 自動で動く処理（onEditの塗り直しなど）が失敗しても、画面には何も出ない＝気づけない。
+// 最後の失敗だけ、この控えシートの隅に残しておく（あとから原因を見るため）。MARKER_AUTO_FAIL_NOTE
+var AUTO_FAIL_LABEL_CELL = 'G1';
+var AUTO_FAIL_CELL = 'H1';
 // 曜日ブロックの場所（月→日の順。head＝見出しの行、col＝升目の先頭列）
 var ADJUST_BLOCKS = [
   { head: 23, col: 25 },    // 月曜
@@ -2470,12 +2768,25 @@ function dayViolations_(person, info, date) {
   return { list: reasons, hard: hard };
 }
 
+// この表の時間は「900」のような数字で持つ決まり（minutesOfTime_ は数字しか読めない）。
+// 「9:00」と打って本物の時刻で入っているセルは、画面の見え方から数字に直して読む。
+// これをしないと、その行は決まりの点検から丸ごと外れ、8時間を超えていても赤くならない。
+// MARKER_LAW_TIME_READ
+function timeNumber_(value, shownText) {
+  if (!(value instanceof Date)) return value;
+  var m = /^(\d{1,2}):(\d{2})/.exec(String(shownText == null ? '' : shownText).trim());
+  return m ? Number(m[1]) * 100 + Number(m[2]) : '';
+}
+
 // 週シートの1日ぶん（日ブロック）の人を読む
 function blockPeople_(week, blockIndex) {
   var block = ADJUST_BLOCKS[blockIndex];
-  var values = week.getRange(block.head + 1, block.col - 5, ADJUST_ROWS, 5).getValues();
+  var range = week.getRange(block.head + 1, block.col - 5, ADJUST_ROWS, 5);
+  var values = range.getValues(), shown = range.getDisplayValues();
   return values.map(function(r, p) {
-    return { row: block.head + 1 + p, name: String(r[0]).trim(), start: r[1], end: r[2], breakStart: r[3], breakEnd: r[4] };
+    return { row: block.head + 1 + p, name: String(r[0]).trim(),
+      start: timeNumber_(r[1], shown[p][1]), end: timeNumber_(r[2], shown[p][2]),
+      breakStart: timeNumber_(r[3], shown[p][3]), breakEnd: timeNumber_(r[4], shown[p][4]) };
   });
 }
 
@@ -2533,6 +2844,40 @@ function checkWeekLaw_(week, paint) {
 function isLawColor_(bg) {
   var c = String(bg || '').toUpperCase();
   return c === LAW_WARN_COLOR.toUpperCase() || c === LAW_HARD_COLOR.toUpperCase();
+}
+
+// 名前のマスに残った「決まりの確認」の赤とメモを、まとめて消す。
+// 週シートをコピーすると、名前と時間（T24:X39など）は消えるのに、名前のマスの色とメモは
+// 前の週のまま残ってしまう。これが「使っていないはずの赤が残る」の正体。MARKER_LAW_MARK_CLEAR
+function clearLawMarks_(week) {
+  var cleared = 0;
+  ADJUST_BLOCKS.forEach(function(block) {
+    var top = block.head + 1, col = block.col - 5;
+    var range = week.getRange(top, col, ADJUST_ROWS, 1);
+    var bgs = range.getBackgrounds(), notes = range.getNotes();
+    for (var i = 0; i < ADJUST_ROWS; i++) {
+      if (!isLawColor_(bgs[i][0]) && String(notes[i][0]).indexOf('決まりの確認') !== 0) continue;
+      week.getRange(top + i, col).setBackground(null).setFontColor(null).setFontWeight(null).setNote('');
+      cleared++;
+    }
+  });
+  return cleared;
+}
+
+// 自動で動く処理は、1つ失敗しても次を続ける。失敗は控えシートの隅に残す
+function autoStep_(what, run) {
+  try { run(); return true; } catch (err) { noteAutoFailure_(what, err); return false; }
+}
+
+function noteAutoFailure_(what, err) {
+  try {
+    var text = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'MM/dd HH:mm') + '　' + what + '　' +
+      (err && err.message ? err.message : String(err));
+    Logger.log('自動処理の失敗: ' + text);
+    var sheet = getAdjustSheet_();
+    sheet.getRange(AUTO_FAIL_LABEL_CELL).setValue('自動処理の最後の失敗');
+    sheet.getRange(AUTO_FAIL_CELL).setValue(text);
+  } catch (e2) {}
 }
 
 // 名前のマスに色とメモを付ける／消す
@@ -3094,6 +3439,7 @@ function clearOurGridColors_(week) {
 function resetPositionColorsOnCopy_(newSheet) {
   ensureGridPaintable_(newSheet);      // 自動の水色ルールが残っていれば外す
   clearOurGridColors_(newSheet);       // 先週のポジションの色を消す
+  clearLawMarks_(newSheet);            // 先週の「決まりの確認」の赤とメモも消す（名前は空になっているため）
   repaintWeekColors_(newSheet);        // いる時間を水色に塗り直す
   try { newSheet.setTabColor(null); } catch (e) {}
 }
@@ -3551,6 +3897,7 @@ function dailyShiftCheck() {
   var period = currentRequestPeriod_(settings, now);
   if (!period) return { created: [], missingBudget: [], notice: '', holiday: holiday };
 
+  tidyFutureWeekColors_(ss, today);   // 色と名前の赤を、今の時間に合わせ直す（取りこぼしの回収）
   var created = ensurePeriodSheets_(ss, period);
   ensureBudgetDateRows_(ss, addDaysYmd_(period.start, period.weeks * 7 - 1));   // 入れる欄を先の月まで用意しておく
   var missing = missingBudgetDays_(ss, period);
@@ -3559,6 +3906,27 @@ function dailyShiftCheck() {
   // 予算が足りない日は、週シートを作った日とお知らせを送った日にだけメールする（毎日は送らない）
   if (missing.length && (created.length || notice)) noticeMissingBudget_(ss, period, missing, settings, today);
   return { created: created, missingBudget: missing, notice: notice, holiday: holiday };
+}
+
+// これから先の週シート（今週をふくむ）の色と、名前の「決まりの確認」の赤を、今の時間に合わせ直す。
+// 手で直したときの自動の塗り直しが取りこぼしても、翌朝にはそろう。変わるところが無ければ何も書かない
+var TIDY_WEEKS_PER_DAY = 5;          // 1日にそろえ直す枚数（今週から先に向かって。組んでいる先の週まで届くように）
+
+function tidyFutureWeekColors_(ss, today) {
+  var monday = addDaysYmd_(today, -((dowOfYmd_(today) + 6) % 7));   // 今週の月曜
+  var names = ss.getSheets().map(function(s) { return s.getName(); })
+    .filter(function(n) {
+      if (!/^\d{6}$/.test(n)) return false;
+      return '20' + n.slice(0, 2) + '-' + n.slice(2, 4) + '-' + n.slice(4, 6) >= monday;
+    })
+    .sort().slice(0, TIDY_WEEKS_PER_DAY);
+  names.forEach(function(name) {
+    var week = ss.getSheetByName(name);
+    autoStep_('時間の書式（毎日・' + name + '）', function() { fixDayTimeFormat_(week); });
+    autoStep_('色の塗り直し（毎日・' + name + '）', function() { repaintWeekColors_(week); });
+    autoStep_('決まりの確認（毎日・' + name + '）', function() { checkWeekLaw_(week, true); });
+  });
+  return names;
 }
 
 // 募集している期間の週シートを、足りなければ古い方から順に作る
@@ -3657,11 +4025,11 @@ function waitingCounts_(ss, period) {
 // 名前ごとに「時間か備考が入っている週の数」を数える（週シートがまだ無い週は、保留中の希望を見る）
 function filledWeeksByName_(ss, period) {
   var filled = {};
-  var settings = getRequestSettingsSheet_();
   var pending = {};
-  var last = settings.getLastRow();
-  if (last >= REQUEST_PENDING_FIRST_ROW) {
-    settings.getRange(REQUEST_PENDING_FIRST_ROW, 1, last - REQUEST_PENDING_FIRST_ROW + 1, 2).getValues().forEach(function(r) {
+  var pendingSheet = getPendingSheet_();
+  var last = pendingSheet.getLastRow();
+  if (last >= PENDING_FIRST_ROW) {
+    pendingSheet.getRange(PENDING_FIRST_ROW, 1, last - PENDING_FIRST_ROW + 1, 2).getValues().forEach(function(r) {
       if (r[0] && r[1]) pending[String(r[0]) + '/' + String(r[1]).trim()] = true;
     });
   }
@@ -3997,6 +4365,270 @@ function noticeTemplateFor_(notice, left) {
    店長が画面で選んだ枠だけを「募集と応募」シート（アクセス記録）に書き、
    スタッフのシフト希望の画面に赤く重ねて出す。週シートの中には枠を置かない
    （週シートに名前と時間を入れると、その時間の「実時間」が増えて不足が消えてしまうため）。   */
+// ===================== 希望と今の表をくらべる =====================
+// シフトを組んでいる最中に、人ごとの「出した希望の日数」と「今の表に入っている日数」を
+// 並べて見るための浮く窓。シートは読むだけで、何も書き換えない。
+//  希望 ＝ 名簿（A4:P25）。1日＝出勤と退勤の2列で、両方そろって1日と数える（フォームの fillState_ と同じ決まり）
+//  今   ＝ 曜日ブロックの名前と右はしの「計」。計が0より大きい日だけ数える（出勤履歴と同じ決まり）
+// 週シートを切りかえると、窓もその週にきりかわる（getActiveSheet を毎回見るため）。
+// MARKER_REQUEST_COMPARE
+var COMPARE_REFRESH_MS = 8000;   // 窓が自分で数え直す間かく
+var COMPARE_EMP_OFF_TARGET = 9;    // 社員が1か月に取る公休の数
+var COMPARE_CAST_DAYS_TARGET = 15; // これ以上の出勤で交通費が出る
+var COMPARE_HEIGHT = 700;        // 窓の高さ（「もどす」でもこの高さに戻る）
+var COMPARE_MIN_HEIGHT = 96;     // 「小さく」したときの高さ（見出しと合計だけ残る）
+
+// その日が入っている締め期間（◯日締め）を 'yyyy-MM-dd' で返す。
+// 締め日が月の日数より大きいときは末日にする（31日締めの2月など）
+function closingPeriodOf_(ymd, closingDay) {
+  var y = Number(ymd.slice(0, 4)), m = Number(ymd.slice(5, 7));
+  function endOf(yy, mm) {
+    var last = new Date(Date.UTC(yy, mm, 0)).getUTCDate();
+    return yy + '-' + ('0' + mm).slice(-2) + '-' + ('0' + Math.min(closingDay, last)).slice(-2);
+  }
+  var end = endOf(y, m);
+  if (ymd > end) { m++; if (m > 12) { m = 1; y++; } end = endOf(y, m); }
+  var pm = m - 1, py = y;
+  if (pm < 1) { pm = 12; py--; }
+  return { start: addDaysYmd_(endOf(py, pm), 1), end: end };
+}
+
+// 出勤履歴から「名前→その期間に入った日数」を数える。同じ日に2行あっても1日と数える
+function attendanceDaysIn_(ss, start, end) {
+  var out = {}, days = {};
+  var sheet = ss.getSheetByName(HISTORY_SHEET_NAME);
+  if (!sheet) return days;
+  var last = sheet.getLastRow();
+  if (last < 2) return days;
+  var tz = ss.getSpreadsheetTimeZone();
+  sheet.getRange(2, 1, last - 1, HISTORY_HEADERS.length).getValues().forEach(function(r) {
+    if (!(r[0] instanceof Date) || !(Number(r[7]) > 0)) return;
+    var ymd = Utilities.formatDate(r[0], tz, 'yyyy-MM-dd');
+    if (ymd < start || ymd > end) return;
+    var key = flatName_(r[2]);
+    if (!key) return;
+    if (!out[key]) out[key] = {};
+    out[key][ymd] = true;
+  });
+  Object.keys(out).forEach(function(k) { days[k] = Object.keys(out[k]).length; });
+  return days;
+}
+
+// 「スタッフ区分」シートの 名前→区分（店長・社員・空＝スタッフ）
+function roleOfNames_() {
+  var sheet = getRoleSheet_();
+  var map = {}, last = sheet.getLastRow();
+  if (last < 2) return map;
+  sheet.getRange(2, 1, last - 1, 2).getValues().forEach(function(r) {
+    var key = flatName_(r[0]);
+    if (key) map[key] = String(r[1]).trim();
+  });
+  return map;
+}
+
+// 'yyyy-MM-dd' → '11/16'
+function shortYmd_(ymd) { return Number(ymd.slice(5, 7)) + '/' + Number(ymd.slice(8, 10)); }
+
+// 窓の下に出す締め期間。その週のうちに締め日が来る＝切り替わりの週なら印を付ける
+// （どちらの月で数えているのか、ひと目で分かるようにするため）。MARKER_COMPARE_TERM_LINE
+function termInfo_(term, mondayYmd) {
+  var sunday = addDaysYmd_(mondayYmd, 6);
+  return { text: shortYmd_(term.start) + '〜' + shortYmd_(term.end),
+    cross: term.end >= mondayYmd && term.end <= sunday };
+}
+
+function requestCompareData_(sheet) {
+  // 同じ人を2行に分けないため、名前は flatName_（全角・半角の空白を取る）で突き合わせる。
+  // 名簿は「吉田 恋花」、右の表は「吉田　恋花」のように空白がゆれるので、
+  // そのまま比べると1人が2行に分かれ、引き算も合わなくなる。MARKER_COMPARE_FLATNAME
+  var order = [], label = {}, plan = {}, wish = {}, made = {}, madeDow = {}, inRoster = {};
+
+  // 予定の日（その人がその日に入るつもりだった日）。
+  //  ・名簿に希望を出した日
+  //  ・右の表に名前を入れた日（店長が頼んで入れた日。時間を消して削った日もふくむ）
+  function planDay(key, dayIndex) {
+    if (!plan[key]) plan[key] = {};
+    plan[key][dayIndex] = true;
+  }
+
+  // 希望（名簿）
+  var roster = sheet.getRange(ROSTER_START_ROW, 1, ROSTER_ROWS, REQUEST_INPUT_COLS + 1).getDisplayValues();
+  roster.forEach(function(r) {
+    var shown = String(r[0]).trim();
+    var key = flatName_(shown);
+    if (!key) return;
+    if (order.indexOf(key) === -1) { order.push(key); label[key] = shown; }
+    inRoster[key] = true;
+    for (var d = 0; d < 7; d++) {
+      if (String(r[1 + d * 2]).trim() === '' || String(r[2 + d * 2]).trim() === '') continue;
+      planDay(key, d);
+      wish[key] = (wish[key] || 0) + 1;
+    }
+  });
+
+  // 今の表（曜日ブロック）。名前だけで時間が空の日は「一度は予定に入れて、削った日」
+  DAY_BLOCKS.forEach(function(block, dayIndex) {
+    var names = sheet.getRange(block.names).getValues();
+    var hours = sheet.getRange(block.hours).getValues();
+    for (var i = 0; i < names.length; i++) {
+      var shown = String(names[i][0]).trim();
+      var key = flatName_(shown);
+      if (!key) continue;
+      if (order.indexOf(key) === -1) { order.push(key); label[key] = shown; }   // 名簿に無い人も出す
+      planDay(key, dayIndex);
+      if (!(Number(hours[i][0]) > 0)) continue;
+      made[key] = (made[key] || 0) + 1;
+      madeDow[key] = (madeDow[key] || '') + WEEK_DOW_JP[dayIndex];
+    }
+  });
+
+  // 締め月の数（社員＝公休が9日とれているか／スタッフ＝15日以上で交通費）
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var base = readRequestBase_(getRequestSettingsSheet_());
+  var monday = Utilities.formatDate(weekMondayOf_(sheet), ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd');
+  var empTerm = closingPeriodOf_(monday, base.closingDay);
+  var castTerm = closingPeriodOf_(monday, base.castClosingDay);
+  var empDays = attendanceDaysIn_(ss, empTerm.start, empTerm.end);
+  var castDays = (empTerm.start === castTerm.start && empTerm.end === castTerm.end)
+    ? empDays : attendanceDaysIn_(ss, castTerm.start, castTerm.end);
+  var empLen = daysBetweenYmd_(empTerm.start, empTerm.end) + 1;
+  var roles = roleOfNames_();
+
+  var rows = [], totalPlan = 0, totalMade = 0;
+  order.forEach(function(key) {
+    var p = plan[key] ? Object.keys(plan[key]).length : 0, m = made[key] || 0;
+    totalPlan += p;
+    totalMade += m;
+    var role = roles[key] || '';
+    var emp = (role === ROLE_MANAGER || role === ROLE_EMPLOYEE);
+    var done = emp ? (empLen - (empDays[key] || 0)) : (castDays[key] || 0);
+    var target = emp ? COMPARE_EMP_OFF_TARGET : COMPARE_CAST_DAYS_TARGET;
+    rows.push({ name: label[key], plan: p, wish: wish[key] || 0, made: m, diff: m - p, dows: madeDow[key] || '',
+      inRoster: !!inRoster[key], emp: emp,
+      // 「/9」「/15」まで出すと細かくなるので、数だけ出す（めやすは色で分かる）
+      monthText: (emp ? '公休' : '出勤') + done,
+      monthOk: emp ? (done >= target) : (done >= target) });
+  });
+  return { ok: true, week: sheet.getName(), label: weekRangeLabel_(sheet.getName()),
+    rows: rows, totalPlan: totalPlan, totalMade: totalMade,
+    terms: { emp: termInfo_(empTerm, monday), cast: termInfo_(castTerm, monday) } };
+}
+
+// 窓から呼ぶので、名前のうしろに _ を付けない（google.script.run は _ 付きを呼べない）
+function requestCompareNow() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  if (!/^\d{6}$/.test(sheet.getName())) return { ok: false };
+  return requestCompareData_(sheet);
+}
+
+function openRequestCompare() {
+  var sheet = activeWeekSheet_();
+  if (!sheet) return;
+  SpreadsheetApp.getUi().showModelessDialog(
+    HtmlService.createHtmlOutput(requestCompareHtml_(requestCompareData_(sheet))).setWidth(455).setHeight(COMPARE_HEIGHT),
+    '希望と今の表をくらべる');
+}
+
+function requestCompareHtml_(data) {
+  var json = JSON.stringify(data).replace(/</g, '\u003c');
+  return [
+    '<style>',
+    '  body{ font-family:sans-serif; font-size:13px; line-height:1.5; margin:0; padding:8px 10px 12px; }',
+    '  h2{ font-size:13.5px; margin:0 0 2px; }',
+    '  .sub{ font-size:11px; color:#777; margin:0 0 8px; }',
+    '  table{ border-collapse:collapse; width:100%; }',
+    '  th,td{ padding:3px 5px; border-bottom:1px solid #eee; text-align:right; white-space:nowrap; }',
+    '  th{ font-size:11px; color:#666; border-bottom:1px solid #bbb; }',
+    '  td.name,th.name{ text-align:left; width:100%; }',
+    '  td.dow{ font-size:10.5px; color:#999; }',
+    '  td.month{ font-size:11.5px; color:#555; white-space:nowrap; }',
+    '  td.month.ng{ color:#C00000; font-weight:bold; }',
+    '  td.month.ok{ color:#1155CC; font-weight:bold; }',
+    '  tbody td:nth-child(2), tbody td:nth-child(3), tbody td:nth-child(4){ font-size:16px; }',
+    '  .minus{ color:#C00000; font-weight:bold; }',
+    '  .plus{ color:#1155CC; font-weight:bold; }',
+    '  .same{ color:#AAA; }',
+    '  .none{ color:#BBB; }',
+    '  tr.warn{ background:#FFF2F2; }',
+    '  tr.extra{ background:#F2F7FF; }',
+    '  .foot{ margin-top:9px; padding-top:7px; border-top:1px solid #bbb; font-size:14px; font-weight:bold; }',
+    '  .stamp{ font-size:11px; color:#999; margin-top:5px; }',
+    '  .term{ margin-top:7px; padding:6px 9px; border-radius:5px; font-size:12.5px; color:#222;',
+    '         background:#EEF3FB; border-left:4px solid #1155CC; }',
+    '  .term b{ font-weight:bold; font-size:13.5px; }',
+    '  .term b.cross{ color:#C00000; }',
+    '  .term .cm{ font-size:10.5px; color:#C00000; margin-left:3px; }',
+    '  [hidden]{ display:none !important; }',
+    '  .bar{ display:flex; align-items:flex-start; gap:8px; }',
+    '  .bar h2{ flex:1; }',
+    '  .bar button{ font-size:11px; padding:2px 9px; cursor:pointer; white-space:nowrap; }',
+    '</style>',
+    '<div class="bar"><h2 id="ttl">&nbsp;</h2><button id="btn" onclick="toggle()">小さく</button></div>',
+    '<div id="main">',
+    '<p class="sub">予定＝希望＋頼んで入れた日／今＝表に入っている日数<br>締め月＝社員は公休の数・スタッフは出勤の数（交通費の目安）</p>',
+    '<table><thead><tr><th class="name">名前</th><th>予定</th><th>今</th><th>差</th><th>締め月</th><th></th></tr></thead>',
+    '<tbody id="body"></tbody></table>',
+    '</div>',
+    '<div class="foot" id="foot">&nbsp;</div>',
+    '<div class="term" id="term">&nbsp;</div>',
+    '<div class="stamp" id="stamp">&nbsp;</div>',
+    '<script>',
+    'var busy = false;',
+    'var small = false;',
+    // 「小さく」＝名前の表だけ隠して窓の高さを縮める。数え直しは小さいままでも続く（合計は動く）
+    'function toggle(){',
+    '  small = !small;',
+    '  document.getElementById("main").hidden = small;',
+    '  document.getElementById("btn").textContent = small ? "もどす" : "小さく";',
+    '  try { google.script.host.setHeight(small ? ' + COMPARE_MIN_HEIGHT + ' : ' + COMPARE_HEIGHT + '); } catch (e) {}',
+    '}',
+    'function esc(s){ return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;"); }',
+    'function two(n){ return (n < 10 ? "0" : "") + n; }',
+    '// 締め日がその週のうちに来る＝切り替わりの週。赤くして「この週で切替」と添える',
+    'function term(t){',
+    '  return "<b class=\\"" + (t.cross ? "cross" : "") + "\\">" + esc(t.text) + "</b>" +',
+    '    (t.cross ? "<span class=\\"cm\\">この週で切替</span>" : "");',
+    '}',
+    'function draw(d){',
+    '  var stamp = document.getElementById("stamp");',
+    '  if (!d || !d.ok) { stamp.textContent = "週シートを開くと、その週にきりかわります"; return; }',
+    '  document.getElementById("ttl").textContent = d.label + "（" + d.week + "）";',
+    '  var html = "";',
+    '  d.rows.forEach(function(r){',
+    '    var cls = r.diff < 0 ? "minus" : (r.diff > 0 ? "plus" : "same");',
+    '    var txt = r.diff === 0 ? "±0" : (r.diff > 0 ? "+" + r.diff : String(r.diff));',
+    '    var tr = "";',
+    '    if (r.plan > 0 && r.made === 0) tr = " class=\\"warn\\"";',
+    '    else if (!r.inRoster || (r.wish === 0 && r.made > 0)) tr = " class=\\"extra\\"";',
+    '    var none = "<span class=\\"none\\">—</span>";',
+    '    html += "<tr" + tr + ">" +',
+    '      "<td class=\\"name\\">" + esc(r.name) + "</td>" +',
+    '      "<td>" + (r.plan ? r.plan : none) + "</td>" +',
+    '      "<td>" + (r.made ? r.made : none) + "</td>" +',
+    '      "<td class=\\"" + cls + "\\">" + (r.plan === 0 && r.made === 0 ? "" : txt) + "</td>" +',
+    '      "<td class=\\"month " + (r.monthOk ? "ok" : (r.emp ? "ng" : "")) + "\\">" + esc(r.monthText) + "</td>" +',
+    '      "<td class=\\"dow\\">" + esc(r.dows) + "</td></tr>";',
+    '  });',
+    '  document.getElementById("body").innerHTML = html;',
+    '  document.getElementById("foot").textContent = "合計　予定 " + d.totalPlan + "日 → 今 " + d.totalMade + "日";',
+    '  document.getElementById("term").innerHTML = "締め月　社員 " + term(d.terms.emp) +',
+    '    "<br>　　　　スタッフ " + term(d.terms.cast);',
+    '  var t = new Date();',
+    '  stamp.textContent = "自動で数え直しています（" + two(t.getHours()) + ":" + two(t.getMinutes()) + ":" + two(t.getSeconds()) + " 時点）";',
+    '}',
+    'function tick(){',
+    '  if (busy) return;',
+    '  busy = true;',
+    '  google.script.run',
+    '    .withSuccessHandler(function(d){ busy = false; draw(d); })',
+    '    .withFailureHandler(function(){ busy = false; }).requestCompareNow();',
+    '}',
+    'draw(' + json + ');',
+    'setInterval(tick, ' + COMPARE_REFRESH_MS + ');',
+    '</script>'
+  ].join('\n');
+}
+
 var RECRUIT_SHEET_NAME = '募集と応募';
 var RECRUIT_HEADERS = ['枠ID', '週シート', '日付', '曜日', '開始', '終了', '人数', '状態', '応募', '入れた人',
   '作った日時', '種類', '候補', '声をかける人'];
@@ -6060,8 +6692,14 @@ function writeHistoryRows_(historySheet, rows) {
 }
 
 // 1週ぶんの行を入れ替える（他の週・書庫へ移した週の行はそのまま残す）
+// ★実働時間（CI・FS列）は =SUM(升目) の数式なので、名前と時間を書き込んだ直後は計算がまだ終わっていない。
+//   先に flush で確定させないと「実働時間が0」と見なされ、その日が丸ごと履歴に入らない
+//   ＝日別勤務時間が0になる（転写ボタンで12/17〜20が落ちた原因）。
+//   ここに置けば、転写・手直し・次週シート作成・作り直しのどこから呼ばれても安全。
+//   MARKER_HISTORY_FLUSH_FIRST
 function refreshWeekHistory_(sheet) {
   if (!isWeekSheetName_(sheet.getName())) return 0;
+  SpreadsheetApp.flush();
   var historySheet = getHistorySheet_();
   var weekName = sheet.getName();
   var last = historySheet.getLastRow();
@@ -6193,7 +6831,13 @@ var DAILY_SHEET_NAME = '日別勤務時間';
 var DAILY_DAYS = 31;                       // 1か月でいちばん長い日数ぶんの列を用意する
 var DAILY_FIRST_COL = 2;                   // B列から日が並ぶ
 var DAILY_COUNT_COL = DAILY_FIRST_COL + DAILY_DAYS;   // 出勤日数（表の見出しの行では「期間の開始」も置く）
-var DAILY_HOURS_COL = DAILY_COUNT_COL + 1;            // 合計時間（　　　〃　　　　「期間の終了」）
+var DAILY_OFF_COL = DAILY_COUNT_COL + 1;              // 休み日数（　　　〃　　　　「期間の終了」）
+var DAILY_HOURS_COL = DAILY_COUNT_COL + 2;            // 合計時間
+// 休み日数 ＝ 期間の日数 − 出勤日数。出勤日数と足すと必ず期間の日数になる。MARKER_DAILY_OFF_DAYS
+// 店長・社員の表だけ、1人につき「その日の出勤（開始）の時間」の行を名前の下に足す（確認用）。
+// 入れるのは「9」「9:30」といった文字なので、いちばん下の合計には入らない（SUMは文字をとばす）。
+// MARKER_DAILY_START_TIME
+var DAILY_START_LABEL = '　開始';
 var DAILY_FIRST_BLOCK_ROW = 5;             // 1つめの表の見出し行
 var DAILY_BLOCK_GAP = 2;                   // 表と表のあいだの空き行
 var DAILY_RANGE_CELL = 'B3';               // 区切り方を選ぶところ
@@ -6275,7 +6919,7 @@ function refreshDailyHours_() {
   }
   var blocks = [
     { title: '【' + ROLE_MANAGER + '・' + ROLE_EMPLOYEE + '】', closing: set + REQUEST_BASE_CLOSING_CELL,
-      names: names.filter(isEmployee) },
+      names: names.filter(isEmployee), withStart: true },
     { title: '【それ以外（キャスト）】', closing: set + REQUEST_CAST_CLOSING_CELL,
       names: names.filter(function(n) { return !isEmployee(n); }) }
   ];
@@ -6284,8 +6928,8 @@ function refreshDailyHours_() {
   var rules = [];
   var row = DAILY_FIRST_BLOCK_ROW;
   blocks.forEach(function(b) {
-    b.nameTop = row + 3;                            // 名前が並びはじめる行（縦の表がここを見る）
-    b.nameEnd = row + 3 + b.names.length - 1;
+    // 名前のマスが何行目になるかは writeDailyBlock_ が b.nameRows に入れる（縦の表がここを見る）。
+    // 「開始」の行が間に入るので、上から順に1行ずつとは限らない
     row = writeDailyBlock_(sheet, b, row, hist, rules, year, month, calRef) + DAILY_BLOCK_GAP;
   });
   writeDailyJournalBlock_(sheet, blocks, row, hist, rules, year, month);
@@ -6295,8 +6939,45 @@ function refreshDailyHours_() {
   sheet.setColumnWidth(1, 110);
   sheet.setColumnWidths(DAILY_FIRST_COL, DAILY_DAYS, 34);
   sheet.setColumnWidth(DAILY_COUNT_COL, 62);
+  sheet.setColumnWidth(DAILY_OFF_COL, 62);
   sheet.setColumnWidth(DAILY_HOURS_COL, 70);
   return sheet;
+}
+
+// 1人ぶんの「その日の実働時間」の行。右はしに 出勤日数・休み日数・合計時間が付く
+function dailyHoursFormulas_(r, dateRow, hist, startRef, endRef) {
+  var out = [];
+  for (var i = 0; i < DAILY_DAYS; i++) {
+    var c = colLetter_(DAILY_FIRST_COL + i);
+    out.push('=IF(' + c + '$' + dateRow + '="","",SUMIFS(' + hist + '$H:$H,' +
+      hist + '$C:$C,$A' + r + ',' + hist + '$A:$A,' + c + '$' + dateRow + '))');
+  }
+  out.push('=COUNTIFS(' + hist + '$C:$C,$A' + r + ',' + hist + '$A:$A,">="&' + startRef +
+    ',' + hist + '$A:$A,"<="&' + endRef + ',' + hist + '$H:$H,">0")');
+  // 休み日数＝期間の日数−出勤日数（出勤日数のマスをそのまま引くので、ズレることがない）
+  out.push('=' + endRef + '-' + startRef + '+1-' + colLetter_(DAILY_COUNT_COL) + r);
+  out.push('=SUMIFS(' + hist + '$H:$H,' + hist + '$C:$C,$A' + r + ',' +
+    hist + '$A:$A,">="&' + startRef + ',' + hist + '$A:$A,"<="&' + endRef + ')');
+  return out;
+}
+
+// 1人ぶんの「その日の出勤（開始）の時間」の行。名前の行のすぐ下に出す。
+// 出勤履歴の「出勤」は 900（＝9:00）のような数字。9時なら「9」、9時半なら「9:30」と出す。
+// 同じ日に2回入っているときは、いちばん早い出勤を取る。
+// 数字ではなく文字で入れるので、いちばん下の合計には入らない。MARKER_DAILY_START_TIME
+function dailyStartFormulas_(nameRow, dateRow, hist) {
+  var out = [];
+  for (var i = 0; i < DAILY_DAYS; i++) {
+    var c = colLetter_(DAILY_FIRST_COL + i);
+    var min = 'MINIFS(' + hist + '$D:$D,' + hist + '$C:$C,$A$' + nameRow + ',' +
+      hist + '$A:$A,' + c + '$' + dateRow + ',' + hist + '$D:$D,">0")';
+    out.push('=IF(' + c + '$' + dateRow + '="","",IFERROR(LET(t,' + min +
+      ',IF(t=0,"",TEXT(INT(t/100),"0")&IF(MOD(t,100)=0,"",":"&TEXT(MOD(t,100),"00")))),""))');
+  }
+  out.push('=""');   // 出勤日数
+  out.push('=""');   // 休み日数
+  out.push('=""');   // 合計時間
+  return out;
 }
 
 // 1つぶんの表を書く。返り値は、その表の最後の行
@@ -6304,20 +6985,27 @@ function refreshDailyHours_() {
 // 区切り方が「暦」なら その月の1日〜末日、「締め期間」なら 前月の締め日の翌日〜当月の締め日。
 function writeDailyBlock_(sheet, block, top, hist, rules, year, month, calRef) {
   var startRef = '$' + colLetter_(DAILY_COUNT_COL) + '$' + top;
-  var endRef = '$' + colLetter_(DAILY_HOURS_COL) + '$' + top;
+  var endRef = '$' + colLetter_(DAILY_OFF_COL) + '$' + top;
   var dateRow = top + 1, dowRow = top + 2, firstRow = top + 3;
   var count = block.names.length;
-  var totalRow = firstRow + count;
+  var rowsPerName = block.withStart ? 2 : 1;      // 上＝その日の実働時間／下＝出勤した時間
+  var totalRow = firstRow + count * rowsPerName;
 
   sheet.getRange(top, DAILY_COUNT_COL).setFormula('=IF(' + calRef +
     ',DATE(' + year + ',' + month + ',1),DATE(' + year + ',' + month + '-1,VALUE(' + block.closing + '))+1)');
-  sheet.getRange(top, DAILY_HOURS_COL).setFormula('=IF(' + calRef +
+  sheet.getRange(top, DAILY_OFF_COL).setFormula('=IF(' + calRef +
     ',EOMONTH(DATE(' + year + ',' + month + ',1),0),DATE(' + year + ',' + month + ',VALUE(' + block.closing + ')))');
   sheet.getRange(top, DAILY_COUNT_COL, 1, 2)
     .setNumberFormat('m/d').setFontColor('#777777').setHorizontalAlignment('center');
 
-  sheet.getRange(top, 1).setValue(block.title).setFontWeight('bold').setFontSize(12);
-  sheet.getRange(top, 2).setFormula('="期間 "&TEXT(' + startRef + ',"yyyy/m/d")&"〜"&TEXT(' + endRef + ',"yyyy/m/d")');
+  // 見出しは「題名＋期間」を1つのマスにまとめる。前は A=題名／B=期間 と分けていたので、
+  // 【それ以外（キャスト）】のような長い題名が、中身のある隣のマス(B)に切られて読めなかった。
+  // 1つにまとめると、右の空いたマスへはみ出して全部見える（この行には罫線を引いていない）。
+  // MARKER_DAILY_TITLE_ONE_CELL
+  sheet.getRange(top, 1).setFormula('="' + String(block.title).replace(/"/g, '""') +
+    '　期間 "&TEXT(' + startRef + ',"yyyy/m/d")&"〜"&TEXT(' + endRef + ',"yyyy/m/d")')
+    .setFontWeight('bold').setFontSize(12);
+  sheet.getRange(top, 2).clearContent();   // 前の作りで入っていた「期間…」を消す（残すと題名が切れる）
 
   // 日付の行（本物の日付を入れて、表示は「日」だけにする）
   var dateF = [], dowF = [];
@@ -6333,27 +7021,32 @@ function writeDailyBlock_(sheet, block, top, hist, rules, year, month, calRef) {
   sheet.getRange(dateRow, DAILY_FIRST_COL, 1, DAILY_DAYS).setFormulas([dateF]).setNumberFormat('d');
   sheet.getRange(dowRow, DAILY_FIRST_COL, 1, DAILY_DAYS).setFormulas([dowF]);
   sheet.getRange(dateRow, DAILY_COUNT_COL).setValue('出勤日数');
+  sheet.getRange(dateRow, DAILY_OFF_COL).setValue('休み日数');
   sheet.getRange(dateRow, DAILY_HOURS_COL).setValue('合計時間');
   sheet.getRange(dateRow, 1, 2, DAILY_HOURS_COL)
     .setFontWeight('bold').setBackground('#EFF0ED').setHorizontalAlignment('center');
   sheet.getRange(dateRow, 1, 2, 1).setHorizontalAlignment('left');
 
+  block.nameRows = [];                            // 名前のマスが何行目か（縦の表がここを見る）
   if (count) {
-    sheet.getRange(firstRow, 1, count, 1).setValues(block.names.map(function(n) { return [n]; }));
-    var body = block.names.map(function(name, k) {
-      var r = firstRow + k, out = [];
-      for (var i = 0; i < DAILY_DAYS; i++) {
-        var c = colLetter_(DAILY_FIRST_COL + i);
-        out.push('=IF(' + c + '$' + dateRow + '="","",SUMIFS(' + hist + '$H:$H,' +
-          hist + '$C:$C,$A' + r + ',' + hist + '$A:$A,' + c + '$' + dateRow + '))');
+    var labels = [], body = [], startRows = [];
+    block.names.forEach(function(name, k) {
+      var r = firstRow + k * rowsPerName;
+      block.nameRows.push(r);
+      labels.push([name]);
+      body.push(dailyHoursFormulas_(r, dateRow, hist, startRef, endRef));
+      if (block.withStart) {
+        labels.push([DAILY_START_LABEL]);
+        body.push(dailyStartFormulas_(r, dateRow, hist));
+        startRows.push(r + 1);
       }
-      out.push('=COUNTIFS(' + hist + '$C:$C,$A' + r + ',' + hist + '$A:$A,">="&' + startRef +
-        ',' + hist + '$A:$A,"<="&' + endRef + ',' + hist + '$H:$H,">0")');
-      out.push('=SUMIFS(' + hist + '$H:$H,' + hist + '$C:$C,$A' + r + ',' +
-        hist + '$A:$A,">="&' + startRef + ',' + hist + '$A:$A,"<="&' + endRef + ')');
-      return out;
     });
-    sheet.getRange(firstRow, DAILY_FIRST_COL, count, DAILY_DAYS + 2).setFormulas(body);
+    sheet.getRange(firstRow, 1, labels.length, 1).setValues(labels);
+    sheet.getRange(firstRow, DAILY_FIRST_COL, body.length, DAILY_DAYS + 3).setFormulas(body);
+    startRows.forEach(function(r) {                // 時間の行と見分けがつくように、小さい灰色の字にする
+      sheet.getRange(r, 1, 1, DAILY_HOURS_COL).setFontColor('#777777').setFontSize(9);
+      sheet.getRange(r, DAILY_FIRST_COL, 1, DAILY_DAYS).setHorizontalAlignment('center');
+    });
   } else {
     sheet.getRange(firstRow, 1).setValue('（この区分の人は名簿にいません）').setFontColor('#888888');
   }
@@ -6362,18 +7055,18 @@ function writeDailyBlock_(sheet, block, top, hist, rules, year, month, calRef) {
   sheet.getRange(totalRow, 1).setValue('合計').setFontWeight('bold');
   if (count) {
     var totals = [];
-    for (var j = 0; j < DAILY_DAYS + 2; j++) {
+    for (var j = 0; j < DAILY_DAYS + 3; j++) {
       var tc = colLetter_(DAILY_FIRST_COL + j);
       totals.push('=SUM(' + tc + firstRow + ':' + tc + (totalRow - 1) + ')');
     }
-    sheet.getRange(totalRow, DAILY_FIRST_COL, 1, DAILY_DAYS + 2).setFormulas([totals]);
+    sheet.getRange(totalRow, DAILY_FIRST_COL, 1, DAILY_DAYS + 3).setFormulas([totals]);
   }
   sheet.getRange(totalRow, 1, 1, DAILY_HOURS_COL).setFontWeight('bold').setBackground('#F7F7F7');
 
   // 0は出さない（空いている日が見てすぐ分かるように）
   var bodyRows = totalRow - firstRow + 1;
   sheet.getRange(firstRow, DAILY_FIRST_COL, bodyRows, DAILY_DAYS).setNumberFormat('0.0;-0.0;');
-  sheet.getRange(firstRow, DAILY_COUNT_COL, bodyRows, 1).setNumberFormat('0;-0;');
+  sheet.getRange(firstRow, DAILY_COUNT_COL, bodyRows, 2).setNumberFormat('0;-0;');
   sheet.getRange(firstRow, DAILY_HOURS_COL, bodyRows, 1).setNumberFormat('0.0;-0.0;');
   sheet.getRange(dateRow, 1, totalRow - dateRow + 1, DAILY_HOURS_COL)
     .setBorder(true, true, true, true, true, true, '#CCCCCC', SpreadsheetApp.BorderStyle.SOLID);
@@ -6418,7 +7111,7 @@ function writeDailyJournalBlock_(sheet, blocks, top, hist, rules, year, month) {
     if (!emp.names.length) return '=IF($A' + r + '="","",0)';
     var terms = [];
     for (var k = 0; k < emp.names.length; k++) {
-      terms.push('SUMIFS(' + hist + '$H:$H,' + hist + '$C:$C,$A$' + (emp.nameTop + k) +
+      terms.push('SUMIFS(' + hist + '$H:$H,' + hist + '$C:$C,$A$' + emp.nameRows[k] +
         ',' + hist + '$A:$A,$A' + r + ')');
     }
     return '=IF($A' + r + '="","",' + terms.join('+') + ')';
@@ -6476,20 +7169,26 @@ function newestWeekSheet_(ss) {
 // 週シートの右側（転写した所）を手で直した時も、出勤履歴に自動で反映する
 // ※承認のいらない簡易トリガー。左側の入力表(A〜S列)を直しただけの時は何もしない
 function onEdit(e) {
+  var sheet;
   try {
     if (!e || !e.range) return;
-    var sheet = e.range.getSheet();
+    sheet = e.range.getSheet();
     if (!isWeekSheetName_(sheet.getName())) return;
     if (e.range.getColumn() + e.range.getNumColumns() - 1 < 20) return;
-    refreshWeekHistory_(sheet);
-    // 出勤・退勤・休憩を直したら、その人の色をその場で塗り直す
-    SpreadsheetApp.flush();
-    repaintEditedRows_(sheet, e.range);
-    // 未成年の夜間・8時間超や、休憩の足りない勤務をその場で知らせる
-    checkEditedLaw_(sheet, e.range);
-  } catch (err) {
-    Logger.log('onEdit: ' + err.message);
-  }
+    SpreadsheetApp.flush();            // 升目の計算を確定させてから色を見る
+  } catch (err) { return; }
+  // 3つを別々に守る。前は1つにまとめていたので、重い「出勤履歴」で時間切れになると
+  // 色の塗り直しも決まりの確認も丸ごと動かず、休憩の水色や前の週の赤が残っていた。
+  // 軽くて目に見えるものから先に動かす。MARKER_ONEDIT_STEPS
+  autoStep_('時間の直し', function() {
+    if (fixTypedTimes_(sheet, e.range)) SpreadsheetApp.flush();   // 時刻で入ったものを1600の形に戻す
+  });
+  autoStep_('休憩の終わりを入れる', function() {
+    if (fillBreakEnd_(sheet, e.range)) SpreadsheetApp.flush();
+  });
+  autoStep_('色の塗り直し', function() { repaintEditedRows_(sheet, e.range); });
+  autoStep_('決まりの確認', function() { checkEditedLaw_(sheet, e.range); });
+  autoStep_('出勤履歴の更新', function() { refreshWeekHistory_(sheet); });
 }
 
 // ===================== 古い週を書庫へ移す =====================

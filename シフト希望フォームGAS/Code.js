@@ -30,7 +30,14 @@ var ROLE_SHEET_NAME = 'スタッフ区分';  // A列＝名前、B列＝区分。
 var EMPLOYEE_ROLES = ['店長', '社員'];
 var PAY_DAY_CAP_HOURS = 8;            // 概算の給与は1日この時間までで数える
 var HISTORY_SHEET_NAME = '出勤履歴';  // A日付・C名前（シフト表GASが週シートの右側から作る。1人1日1行）
-var PENDING_FIRST_ROW = 9;            // まだ週シートが無い週の希望
+/* 保留（まだ週シートが無い週）の希望は、シフト表ブックの専用シート「保留の希望」に入れる。
+   前は「シフト希望設定」シートの9行目以降に置いていたが、そのシートは
+   D3:D49＝設定の説明／E3:E49＝設定の値 で、保留のデータと行が重なる作りだった。
+   設定をもう1つ足すと 50行目＝保留の1行目 と重なって壊れるので、専用シートに分けた。
+   並びはシフト表GASと同じ（変えるときは両方を直すこと）。MARKER_PENDING_OWN_SHEET  */
+var PENDING_SHEET_NAME = '保留の希望';
+var PENDING_FIRST_ROW = 2;            // 1行目は見出し
+var OLD_PENDING_FIRST_ROW = 9;        // 前の置き場所。残っている分を移すときだけ見る
 var PENDING_COLS = 19;                // シート名・名前・時間14・備考・送信日時・端末ID
 var PENDING_DEVICE_INDEX = 18;
 
@@ -435,14 +442,12 @@ function cleanupTestRecords_(ss, cutoffMs) {
   result[SHEETS.devices.name] = hasTargets
     ? deleteRowsWhere_(sheet_(ss, SHEETS.devices.name), 2, 0, function(r) { return targets[String(r[0])]; })
     : 0;
-  result[REQUEST_SETTINGS_SHEET] = 0;
+  result[PENDING_SHEET_NAME] = 0;
   if (hasTargets) {
-    var settings = SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID).getSheetByName(REQUEST_SETTINGS_SHEET);
-    if (settings) {
-      result[REQUEST_SETTINGS_SHEET] = deleteRowsWhere_(settings, PENDING_FIRST_ROW, PENDING_DEVICE_INDEX, function(r) {
-        return targets[String(r[PENDING_DEVICE_INDEX])];
-      });
-    }
+    var pendingSheet = pendingSheet_(SpreadsheetApp.openById(SHIFT_SPREADSHEET_ID));
+    result[PENDING_SHEET_NAME] = deleteRowsWhere_(pendingSheet, PENDING_FIRST_ROW, PENDING_DEVICE_INDEX, function(r) {
+      return targets[String(r[PENDING_DEVICE_INDEX])];
+    });
   }
   return result;
 }
@@ -557,7 +562,7 @@ function submitRequest(payload) {
           result.notReflected.push(label);
           outcome[w] = '→ 反映できず（シート' + state.sheetName + 'に名前が無い）';
         } else {
-          upsertPending_(settings, state.sheetName, rec.name, values, nowText, rec.device);
+          upsertPending_(pendingSheet_(shiftSs), state.sheetName, rec.name, values, nowText, rec.device);
           result.waiting.push(label);
           outcome[w] = '→ シート' + state.sheetName + 'の作成時に反映';
         }
@@ -1318,9 +1323,9 @@ function closingDate_(year, month, closingDay) {
 
 // 週ごとに、この人の今の内容を読む（週シートがあればシート、無ければ保留中の希望）
 function readWeekStates_(shiftSs, config, name) {
-  var settings = sheet_(shiftSs, REQUEST_SETTINGS_SHEET);
-  applyAllPending_(shiftSs, settings);
-  var pending = readPending_(settings);
+  var pendingSheet = pendingSheet_(shiftSs);
+  applyAllPending_(shiftSs, pendingSheet);
+  var pending = readPending_(pendingSheet);
 
   return config.sheetNames.map(function(sheetName) {
     var state = {
@@ -1361,10 +1366,57 @@ function findRosterRow_(sheet, name) {
   return -1;
 }
 
-function readPending_(settings) {
+// 保留の希望シート（シフト表ブックの中。無ければ作る）。
+// 取るたびに、前の置き場所に残っている分を引っ越す（1回で終わる・自動）。MARKER_PENDING_OWN_SHEET
+function pendingSheet_(shiftSs) {
+  var sheet = shiftSs.getSheetByName(PENDING_SHEET_NAME);
+  if (!sheet) {
+    var active = null;
+    try { active = shiftSs.getActiveSheet(); } catch (err) { active = null; }   // 表示中のシートを覚えておく
+    sheet = shiftSs.insertSheet(PENDING_SHEET_NAME);
+    if (active) { try { shiftSs.setActiveSheet(active); } catch (err2) {} }     // 店長の画面が飛ばないように戻す
+    var headers = ['シート名', '名前'];
+    ['月', '火', '水', '木', '金', '土', '日'].forEach(function(d) { headers.push(d + ' 出勤', d + ' 退勤'); });
+    headers.push('備考', '送信日時', '端末ID');
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#EFF0ED');
+    sheet.setFrozenRows(1);
+    sheet.getRange('A:A').setNumberFormat('@');     // シート名（261116）が日付や数字に化けないように
+    sheet.getRange('S:S').setNumberFormat('@');     // 端末ID
+    sheet.hideSheet();
+  }
+  movePendingFromSettings_(shiftSs, sheet);
+  return sheet;
+}
+
+// 前の置き場所（シフト希望設定シートの9行目以降）に残っている保留を、専用シートへ移す。
+// A列が6けたの週シート名で、名前が入っている行だけが保留のデータ（設定の行はA列が空）
+function movePendingFromSettings_(ss, pendingSheet) {
+  var settings = ss.getSheetByName(REQUEST_SETTINGS_SHEET);
+  if (!settings) return 0;
   var last = settings.getLastRow();
+  if (last < OLD_PENDING_FIRST_ROW) return 0;
+  var n = last - OLD_PENDING_FIRST_ROW + 1;
+  // まずA・B列だけ見て、前の置き場所に残っているかを調べる（ふだんは0件なのでここで終わる）
+  var head = settings.getRange(OLD_PENDING_FIRST_ROW, 1, n, 2).getValues();
+  var at = [];
+  for (var i = 0; i < n; i++) {
+    if (/^\d{6}$/.test(String(head[i][0]).trim()) && String(head[i][1]).trim()) at.push(i);
+  }
+  if (!at.length) return 0;
+  var rows = settings.getRange(OLD_PENDING_FIRST_ROW, 1, n, PENDING_COLS).getValues();
+  pendingSheet.getRange(pendingSheet.getLastRow() + 1, 1, at.length, PENDING_COLS)
+    .setValues(at.map(function(i) { return rows[i]; }));
+  at.forEach(function(i) {
+    settings.getRange(OLD_PENDING_FIRST_ROW + i, 1, 1, PENDING_COLS).clearContent();   // 行は消さない（設定が上にある）
+  });
+  Logger.log('保留の希望を ' + at.length + '件、専用シートへ移しました');
+  return at.length;
+}
+
+function readPending_(pending) {
+  var last = pending.getLastRow();
   if (last < PENDING_FIRST_ROW) return [];
-  return settings.getRange(PENDING_FIRST_ROW, 1, last - PENDING_FIRST_ROW + 1, PENDING_COLS).getValues()
+  return pending.getRange(PENDING_FIRST_ROW, 1, last - PENDING_FIRST_ROW + 1, PENDING_COLS).getValues()
     .map(function(r, i) {
       return { row: PENDING_FIRST_ROW + i, sheetName: String(r[0]), name: String(r[1]).trim(), values: r.slice(2, 2 + INPUT_COLS) };
     })
@@ -1373,8 +1425,8 @@ function readPending_(settings) {
 
 // 週シートがもうできている週の保留中の希望は、シートに入れて保留から消す
 // （通常は「次週シート作成」がその場で行う。作成と送信が重なった時の取りこぼし防止）
-function applyAllPending_(shiftSs, settings) {
-  var pending = readPending_(settings);
+function applyAllPending_(shiftSs, pendingSheet) {
+  var pending = readPending_(pendingSheet);
   for (var i = pending.length - 1; i >= 0; i--) {
     var p = pending[i];
     if (!/^\d{6}$/.test(p.sheetName) || p.sheetName < FIRST_WRITABLE_SHEET) continue;
@@ -1383,16 +1435,16 @@ function applyAllPending_(shiftSs, settings) {
     var row = findRosterRow_(sheet, p.name);
     if (row === -1) continue; // 名簿に名前が無い希望は消さずに残す
     sheet.getRange(row, 2, 1, INPUT_COLS).setValues([p.values]);
-    settings.deleteRow(p.row);
+    pendingSheet.deleteRow(p.row);        // 専用シートなので、行ごと消して詰めてよい
   }
 }
 
-function upsertPending_(settings, sheetName, name, values, nowText, device) {
+function upsertPending_(pendingSheet, sheetName, name, values, nowText, device) {
   var rowValues = [sheetName, name].concat(values).concat([nowText, device]);
-  var existing = readPending_(settings).filter(function(p) { return p.sheetName === sheetName && p.name === name; })[0];
-  var row = existing ? existing.row : Math.max(settings.getLastRow() + 1, PENDING_FIRST_ROW);
-  settings.getRange(row, 1).setNumberFormat('@');   // シート名が数字にならないように
-  settings.getRange(row, 1, 1, PENDING_COLS).setValues([safeRow_(rowValues)]);
+  var existing = readPending_(pendingSheet).filter(function(p) { return p.sheetName === sheetName && p.name === name; })[0];
+  var row = existing ? existing.row : Math.max(pendingSheet.getLastRow() + 1, PENDING_FIRST_ROW);
+  pendingSheet.getRange(row, 1).setNumberFormat('@');   // シート名が数字にならないように
+  pendingSheet.getRange(row, 1, 1, PENDING_COLS).setValues([safeRow_(rowValues)]);
 }
 
 // セルの時間を「09:00」の形にする（900 のような数字・時刻形式・文字のどれでも読む）

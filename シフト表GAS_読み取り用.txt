@@ -78,7 +78,8 @@ function copyAttendanceData() {
   try {
     refreshWeekHistory_(sheet);
   } catch (e) {
-    Logger.log('出勤履歴の更新に失敗: ' + e.message);
+    // 黙って止まらないように控えを残す（「調整前の時間」シートのH1に出る）
+    noteAutoFailure_('転写のあとの出勤履歴の更新', e);
   }
 
   // 7. 転写した直後の時間を「調整前」として自動で記録する
@@ -90,7 +91,9 @@ function copyAttendanceData() {
       clearOurGridColors_(sheet);             // 前のポジションの色も消す（希望からやり直すため）
       saveAdjustSnapshots_(sheet);
       ensureGridPaintable_(sheet);            // 自動の水色ルールが残っていれば外す（1回だけ）
+      fixDayTimeFormat_(sheet);               // 休入・休終もふくめて「900→9:00」の書式にそろえる
       repaintWeekColors_(sheet);              // いる時間を水色に戻す
+      checkWeekLaw_(sheet, true);             // 名前の赤も今の時間に合わせ直す（前の週の分を残さない）
       refreshRecruitMarks_(sheet);            // 募集中の時間の色も、いまの募集に合わせ直す
       SpreadsheetApp.getActiveSpreadsheet().toast(
         '転写しました。今の時間を「調整前」として記録しました。', 'シフト表', 6);

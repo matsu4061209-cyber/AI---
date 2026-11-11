@@ -877,6 +877,39 @@
       console.error(err);
     })
     .apiGetAll();
+
+  // ---- 自動更新（開きっぱなしでも最新に保つ：壁紙表示向け） ----
+  // ・日付が変わったら「今日」を更新。当月を表示中なら自動で今月へ送る（月替わりで翌月に進む）
+  // ・他の端末で追加した予定も定期的に取り込む
+  function autoRefresh(){
+    var now = new Date();
+    var dayChanged = (now.getFullYear()!==today.getFullYear()
+                   || now.getMonth()!==today.getMonth()
+                   || now.getDate()!==today.getDate());
+    if(dayChanged){
+      var wasCurrent = (base.getFullYear()===today.getFullYear()
+                     && base.getMonth()===today.getMonth());
+      today = now;                                  // 「今日」を今日に更新
+      if(wasCurrent){                               // 今月を見ていたら自動で今月へ
+        base = new Date(today.getFullYear(), today.getMonth(), 1);
+      }
+    }
+    // ダイアログを開いて操作中は、画面がちらつかないよう取り込みを見送る
+    var busy = overlay.classList.contains("open")
+            || recurOverlay.classList.contains("open")
+            || cpOverlay.classList.contains("open");
+    if(busy){ if(dayChanged) render(); return; }
+    google.script.run
+      .withSuccessHandler(function(state){
+        events = state.events || {};
+        recurring = state.recurring || [];
+        periods = state.periods || [];
+        render();
+      })
+      .withFailureHandler(function(err){ console.error(err); })
+      .apiGetAll();
+  }
+  setInterval(autoRefresh, 15*60*1000);   // 15分ごと
 })();
 </script>
 </body>

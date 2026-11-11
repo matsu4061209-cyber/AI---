@@ -452,6 +452,7 @@ function onOpen() {
     .addSeparator()
     .addItem('サンプルのご飯を仕込み品にする（1回だけ）', 'ご飯を仕込み品にする')
     .addItem('白だしを取り込む（1回だけ）', '白だしを取り込む')
+    .addItem('柚子胡椒・柚子ポン酢を取り込む（1回だけ）', '柚子胡椒と柚子ポン酢を取り込む')
     .addToUi();
 
   ui.createMenu('🧪 試作')
@@ -840,18 +841,80 @@ function 基準表の項目を追加() {
  *   ・仕込み品マスタに「白だし」を追加（出来上がり1000cc・冷蔵・21日・作者/日付/時間つき）
  *   ・レシピ明細に材料7つ、調理手順に作り方9手順を入れる（rebuildBlock_ なので何度実行しても二重にならない）
  * ===================================================================== */
-function 白だしを取り込む() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var ui = SpreadsheetApp.getUi();
+/**
+ * 食材マスタに食材が無ければ1つ追加して、そのIDを返す（あればそのID）。
+ *   spec = [名前, 分類, 在庫単位, 保存区分, 日持ち日数, 発注単位, 入数, 仕入価格(相場・仮)]
+ *   idByName … 名前→IDの辞書。追加したら更新する（呼び出し側と共有）。
+ */
+function addIngredientIfMissing_(ing, idByName, spec, hasTaste) {
+  var name = String(spec[0]).trim();
+  if (idByName[name]) return idByName[name];
+  var id = 'ING-' + zero4_(nextIdNumber_(ing, ID_RULES['食材マスタ']));
+  var row = lastDataRow_(ing) + 1;
+  // 1:ID 2:名 3:分類 4:在庫単位 5:保存区分 6:日持ち 7:歩留まり率 8:仕入先ID 9:商品コード 10:発注単位 11:入数 12:仕入価格
+  ing.getRange(row, 1, 1, 12).setValues([[id, name, spec[1], spec[2], spec[3], spec[4], 1, '', '', spec[5], spec[6], spec[7]]]);
+  if (hasTaste) ing.getRange(row, 19, 1, 6).setValues([tasteDefaultFor_(name)]);
+  idByName[name] = id;
+  SpreadsheetApp.flush();                  // 次のID採番がかぶらないように確定
+  return id;
+}
 
+/**
+ * 仕込み品を1つ台帳に取り込む共通処理（白だし・柚子だれ 等はこれを呼ぶだけ）。
+ * 何度呼んでも二重にならない（名前で探して無ければ作る／材料・作り方は rebuildBlock_）。
+ *   spec = { name, yield_(空='材料合計'), unit, save, keep, time, author, made(Date|''),
+ *            ingredients:[ [名,分類,単位,保存,日持ち,発注単位,入数,仕入価格], ... ],
+ *            mats:[ {name, qty, memo} ... ],  steps:[ '手順文', ... ] }
+ * 返り値 = その仕込み品のID（PRE-xxxx）。
+ */
+function importPrep_(ss, spec) {
   var ing  = ss.getSheetByName('食材マスタ');
   var prep = ss.getSheetByName('仕込み品マスタ');
   var det  = ss.getSheetByName('レシピ明細');
   var proc = ss.getSheetByName('調理手順');
-  if (!ing || !prep || !det || !proc) {
-    ui.alert('必要なシート（食材マスタ・仕込み品マスタ・レシピ明細・調理手順）が見つかりません。');
-    return;
+  if (!ing || !prep || !det || !proc) throw new Error('必要なシート（食材マスタ・仕込み品マスタ・レシピ明細・調理手順）が見つかりません。');
+
+  ensure基準表Cols_(ss);   // 製作者・制作年月日・仕込み時間 の置き場所を用意
+
+  var hasTaste = (String(ing.getRange(1, 19).getValue()).indexOf('甘味度') === 0);
+  var idByName = {};
+  readRows_(ss, '食材マスタ', 2).forEach(function (r) { idByName[String(r[1]).trim()] = String(r[0]).trim(); });
+
+  // ① 足りない食材を用意
+  (spec.ingredients || []).forEach(function (s) { addIngredientIfMissing_(ing, idByName, s, hasTaste); });
+
+  // ② 仕込み品本体（名前で探して無ければ追加）
+  var preId = '';
+  readRows_(ss, '仕込み品マスタ', 2).forEach(function (r) { if (String(r[1]).trim() === spec.name && !preId) preId = String(r[0]).trim(); });
+  var yieldVal = (spec.yield_ === '' || spec.yield_ == null) ? '' : spec.yield_;
+  if (!preId) {
+    preId = 'PRE-' + zero4_(nextIdNumber_(prep, ID_RULES['仕込み品マスタ']));
+    var prow = lastDataRow_(prep) + 1;
+    prep.getRange(prow, 1, 1, 6).setValues([[preId, spec.name, yieldVal, spec.unit, spec.save, spec.keep]]);
+  } else {
+    var frow = findRowById_(prep, preId);
+    if (frow) prep.getRange(frow, 3, 1, 4).setValues([[yieldVal, spec.unit, spec.save, spec.keep]]);
   }
+  var mrow = findRowById_(prep, preId);   // 基準表の覚え書き（仕込み時間=10 / 製作者=11 / 制作年月日=12）
+  if (mrow) prep.getRange(mrow, 10, 1, 3).setValues([[spec.time || '', spec.author || '', spec.made || '']]);
+
+  // ③ 材料（レシピ明細）。入力列 = 親ID(1)/子ID(3)/使用量(5)/備考(10)
+  var mats = (spec.mats || []).map(function (m) { return { id: idByName[String(m.name).trim()] || '', qty: m.qty, memo: m.memo || '' }; })
+                              .filter(function (m) { return m.id; });
+  rebuildBlock_(det, [1, 3, 5, 10], [{ key: preId, rows: mats.map(function (m) { return [preId, m.id, m.qty, m.memo]; }) }]);
+
+  // ④ 作り方（調理手順）。入力列 = 商品ID(1)/手順番号(3)/手順内容(4)/所要時間(5)/温度火加減(6)/ポイント(7)
+  rebuildBlock_(proc, [1, 3, 4, 5, 6, 7], [{ key: preId, rows: (spec.steps || []).map(function (t, i) { return [preId, i + 1, t, '', '', '']; }) }]);
+
+  SpreadsheetApp.flush();
+  return preId;
+}
+
+
+function 白だしを取り込む() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  if (!ss.getSheetByName('食材マスタ')) { ui.alert('台帳が見つかりません。'); return; }
 
   if (ui.alert('白だしを取り込みますか?',
       '昔の基準表の「白だし」を、仕込み品として取り込みます。\n\n' +
@@ -861,90 +924,40 @@ function 白だしを取り込む() {
       '何度押しても二重にはなりません。よろしいですか?',
       ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
 
-  // 基準表の項目（製作者・制作年月日・仕込み時間）の置き場所を先に用意しておく
-  ensure基準表Cols_(ss);
-
-  // --- ① 足りない食材を用意（名前で探し、無ければ追加）。相場は 1在庫単位あたりの仮価格 ---
-  // [名前, 分類, 在庫単位, 保存区分, 日持ち日数, 発注単位, 入数, 仕入価格(相場・仮)]
-  var needIng = [
-    ['水',       'ドリンク', 'ml', '常温', 999, '—', 1000,    0],
-    ['昆布',     'その他',   'g',  '常温', 365, '袋',  1000, 2500],
-    ['鰹節',     'その他',   'g',  '常温', 365, '袋',  1000, 3000],
-    ['日本酒',   '調味料',   'ml', '常温', 365, '本',  1800, 1200],
-    ['塩',       '調味料',   'g',  '常温', 365, '袋',  1000,  150],
-    ['薄口醤油', '調味料',   'ml', '常温', 365, '本',  1800,  700]
-  ];
-  var hasTaste = (String(ing.getRange(1, 19).getValue()).indexOf('甘味度') === 0);
-  var idByName = {};
-  readRows_(ss, '食材マスタ', 2).forEach(function (r) {
-    idByName[String(r[1]).trim()] = String(r[0]).trim();
+  var preId = importPrep_(ss, {
+    name: '白だし', yield_: 1000, unit: 'ml', save: '冷蔵', keep: 21,
+    time: '40分', author: '津原', made: new Date(2013, 7, 31),
+    ingredients: [
+      ['水',       'ドリンク', 'ml', '常温', 999, '—', 1000,    0],
+      ['昆布',     'その他',   'g',  '常温', 365, '袋',  1000, 2500],
+      ['鰹節',     'その他',   'g',  '常温', 365, '袋',  1000, 3000],
+      ['日本酒',   '調味料',   'ml', '常温', 365, '本',  1800, 1200],
+      ['塩',       '調味料',   'g',  '常温', 365, '袋',  1000,  150],
+      ['薄口醤油', '調味料',   'ml', '常温', 365, '本',  1800,  700]
+    ],
+    mats: [
+      { name: '水',       qty: 400 },
+      { name: '昆布',     qty: 10, memo: '水に浸けて一晩' },
+      { name: '鰹節',     qty: 15 },
+      { name: '日本酒',   qty: 100 },
+      { name: 'みりん',   qty: 100 },
+      { name: '塩',       qty: 20 },
+      { name: '薄口醤油', qty: 60 }
+    ],
+    steps: [
+      '昆布を分量の水に浸け、冷蔵庫で一晩（約1日）おく',
+      '火にかけ、沸騰する直前に昆布を取り出す',
+      '鰹節を入れる',
+      '1〜2分おいて漉す',
+      '日本酒・みりんを鍋に入れ、1〜2分煮る（煮切る）',
+      '沸騰したまま塩を加えて混ぜる',
+      '出汁と薄口醤油を加える',
+      '軽く混ぜ、粗熱が取れたら完成',
+      '冷蔵庫で2〜3週間ほど保存できる'
+    ]
   });
 
-  needIng.forEach(function (x) {
-    if (idByName[x[0]]) return;                       // 既にある食材は作らない（みりん等）
-    var id = 'ING-' + zero4_(nextIdNumber_(ing, ID_RULES['食材マスタ']));
-    var row = lastDataRow_(ing) + 1;
-    // 1:ID 2:名 3:分類 4:在庫単位 5:保存区分 6:日持ち 7:歩留まり率 8:仕入先ID 9:商品コード 10:発注単位 11:入数 12:仕入価格
-    ing.getRange(row, 1, 1, 12).setValues([[id, x[0], x[1], x[2], x[3], x[4], 1, '', '', x[5], x[6], x[7]]]);
-    if (hasTaste) ing.getRange(row, 19, 1, 6).setValues([tasteDefaultFor_(x[0])]);
-    idByName[x[0]] = id;
-    SpreadsheetApp.flush();                            // 次のID採番がかぶらないように確定
-  });
-
-  // --- ② 仕込み品「白だし」を用意（名前で探し、無ければ追加） ---
-  var preId = '';
-  readRows_(ss, '仕込み品マスタ', 2).forEach(function (r) {
-    if (String(r[1]).trim() === '白だし' && !preId) preId = String(r[0]).trim();
-  });
-  if (!preId) {
-    preId = 'PRE-' + zero4_(nextIdNumber_(prep, ID_RULES['仕込み品マスタ']));
-    var prow = lastDataRow_(prep) + 1;
-    // 1:ID 2:名 3:出来上がり量 4:単位 5:保存区分 6:日持ち日数
-    prep.getRange(prow, 1, 1, 6).setValues([[preId, '白だし', 1000, 'ml', '冷蔵', 21]]);
-  } else {
-    // 既にある場合も、出来上がり量・保存・日持ちは基準表の値に合わせておく
-    var frow = findRowById_(prep, preId);
-    if (frow) prep.getRange(frow, 3, 1, 4).setValues([[1000, 'ml', '冷蔵', 21]]);
-  }
-  // 基準表の覚え書き（仕込み時間=10列 / 製作者=11列 / 制作年月日=12列）
-  var mrow = findRowById_(prep, preId);
-  if (mrow) prep.getRange(mrow, 10, 1, 3).setValues([['40分', '津原', new Date(2013, 7, 31)]]);
-
-  // --- ③ 材料（レシピ明細）。rebuildBlock_ の入力列 = 親ID(1)/子ID(3)/使用量(5)/備考(10) ---
-  // [子ID, 使用量, 備考]
-  var mat = [
-    [idByName['水'],       400, ''],
-    [idByName['昆布'],      10, '水に浸けて一晩'],
-    [idByName['鰹節'],      15, ''],
-    [idByName['日本酒'],   100, ''],
-    [idByName['みりん'] || idByName['本みりん'] || '', 100, ''],
-    [idByName['塩'],        20, ''],
-    [idByName['薄口醤油'],  60, '']
-  ].filter(function (m) { return m[0]; });
-  rebuildBlock_(det, [1, 3, 5, 10], [{
-    key: preId,
-    rows: mat.map(function (m) { return [preId, m[0], m[1], m[2]]; })
-  }]);
-
-  // --- ④ 作り方（調理手順）。入力列 = 商品ID(1)/手順番号(3)/手順内容(4)/所要時間(5)/温度火加減(6)/ポイント(7) ---
-  var steps = [
-    '昆布を分量の水に浸け、冷蔵庫で一晩（約1日）おく',
-    '火にかけ、沸騰する直前に昆布を取り出す',
-    '鰹節を入れる',
-    '1〜2分おいて漉す',
-    '日本酒・みりんを鍋に入れ、1〜2分煮る（煮切る）',
-    '沸騰したまま塩を加えて混ぜる',
-    '出汁と薄口醤油を加える',
-    '軽く混ぜ、粗熱が取れたら完成',
-    '冷蔵庫で2〜3週間ほど保存できる'
-  ];
-  rebuildBlock_(proc, [1, 3, 4, 5, 6, 7], [{
-    key: preId,
-    rows: steps.map(function (t, i) { return [preId, i + 1, t, '', '', '']; })
-  }]);
-
-  SpreadsheetApp.flush();
-  ss.setActiveSheet(prep);
+  ss.setActiveSheet(ss.getSheetByName('仕込み品マスタ'));
   ui.alert('白だしを取り込みました（' + preId + '）。\n\n' +
            '・仕込み品マスタ … 白だし（出来上がり1000cc・冷蔵・約21日・製作者 津原）\n' +
            '・材料7つ、作り方9手順 を入れました\n\n' +
@@ -953,6 +966,83 @@ function 白だしを取り込む() {
            '・出来上がり量は基準表どおり1000ccにしています（材料の合計は約705cc）。\n' +
            '　煮詰め方や水の量で変わるので、実際に作って量ったら直してください。\n\n' +
            '「🍳 レシピ → レシピを見る（カード）」で白だしを選ぶと、まとめて見られます。');
+}
+
+
+/**
+ * 柚子胡椒・柚子ポン酢を、画像（料理人のレシピ）の分量で仕込み品として取り込む（1回だけ）。
+ *   ・作り方は画像に無いので“一般的な作り方”を入れています（店長が食べて調整する前提）。
+ *   ・新しい食材（柚子の皮・青唐辛子・柚子果汁・米酢）は相場の仮価格。みりん/醤油/昆布/鰹節/塩は既存を使う。
+ */
+function 柚子胡椒と柚子ポン酢を取り込む() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  if (!ss.getSheetByName('食材マスタ')) { ui.alert('台帳が見つかりません。'); return; }
+
+  if (ui.alert('柚子胡椒・柚子ポン酢を取り込みますか?',
+      '画像の分量で、2つの仕込み品を取り込みます。\n\n' +
+      '・柚子胡椒（柚子の皮130g・青唐辛子130g・塩52g）\n' +
+      '・柚子ポン酢（柚子果汁200・米酢70・みりん120・醤油300・鰹節4・昆布4）\n\n' +
+      '※足りない食材（柚子の皮・青唐辛子・柚子果汁・米酢 ほか）は相場の仮価格で足します。\n' +
+      '※作り方は画像に無いため“一般的な手順”を入れます（あとで直せます）。\n\n' +
+      '何度押しても二重にはなりません。よろしいですか?',
+      ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+
+  var id1 = importPrep_(ss, {
+    name: '柚子胡椒', yield_: '', unit: 'g', save: '冷蔵', keep: 180,
+    time: '', author: '', made: '',
+    ingredients: [
+      ['柚子の皮', '野菜',   'g', '冷蔵', 14, '袋', 1000, 1500],
+      ['青唐辛子', '野菜',   'g', '冷蔵', 14, '袋', 1000, 1500],
+      ['塩',       '調味料', 'g', '常温', 365, '袋', 1000, 150]
+    ],
+    mats: [
+      { name: '柚子の皮', qty: 130, memo: 'ゆず約15個の皮' },
+      { name: '青唐辛子', qty: 130, memo: '丸170g→実130g' },
+      { name: '塩',       qty: 52,  memo: '海塩・全体の約20%' }
+    ],
+    steps: [
+      '柚子の皮を、白いワタを避けてすりおろす（または細かく刻む）',
+      '青唐辛子はヘタと種を取り、みじん切りにする（手袋をする）',
+      '皮・青唐辛子・塩を、すり鉢かフードプロセッサーでペースト状にする',
+      '清潔な容器に入れ、冷蔵で数日なじませて完成'
+    ]
+  });
+
+  var id2 = importPrep_(ss, {
+    name: '柚子ポン酢', yield_: '', unit: 'ml', save: '冷蔵', keep: 90,
+    time: '', author: '', made: '',
+    ingredients: [
+      ['柚子果汁', '調味料', 'ml', '冷蔵', 14,  '本', 1000, 2000],
+      ['米酢',     '調味料', 'ml', '常温', 365, '本', 1000, 500],
+      ['昆布',     'その他', 'g',  '常温', 365, '袋', 1000, 2500],
+      ['鰹節',     'その他', 'g',  '常温', 365, '袋', 1000, 3000]
+    ],
+    mats: [
+      { name: '柚子果汁', qty: 200, memo: 'ゆず15個ぶん' },
+      { name: '米酢',     qty: 70 },
+      { name: 'みりん',   qty: 120, memo: '本みりん' },
+      { name: '醤油',     qty: 300, memo: '丸大豆醤油' },
+      { name: '鰹節',     qty: 4 },
+      { name: '昆布',     qty: 4,   memo: '5cm×2本' }
+    ],
+    steps: [
+      '柚子を搾って果汁をとる（約200cc）',
+      'すべての材料を合わせる（本みりんは軽く煮切るとよい）',
+      '冷蔵で1〜2週間おき、昆布とかつお節を漉す',
+      '漉したら冷蔵で保存して完成'
+    ]
+  });
+
+  ss.setActiveSheet(ss.getSheetByName('仕込み品マスタ'));
+  ui.alert('取り込みました。\n\n' +
+           '・柚子胡椒（' + id1 + '）… 材料3つ・作り方4手順\n' +
+           '・柚子ポン酢（' + id2 + '）… 材料6つ・作り方4手順\n\n' +
+           '【要確認】\n' +
+           '・柚子の皮・青唐辛子・柚子果汁・米酢 ほかの仕入価格は “相場の仮” です。実際の値に直すと原価が正しくなります。\n' +
+           '・みりん/醤油/昆布/鰹節/塩 は既にある食材を使っています（備考に正式名）。\n' +
+           '・作り方は画像に無いので一般的な手順です。食べてみて直してください。\n\n' +
+           '「🍳 レシピ → レシピを見る（カード）」で選ぶと、まとめて見られます。');
 }
 
 /** IDから行番号を探す（1列目を上から照合）。無ければ 0 */
